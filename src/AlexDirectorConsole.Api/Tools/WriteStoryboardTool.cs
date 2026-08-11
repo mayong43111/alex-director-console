@@ -14,10 +14,9 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
     public string Name => "write_storyboard";
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<string, string, string, CancellationToken, Task<string>>)(async (
+        (Func<string, string, CancellationToken, Task<string>>)(async (
             storyboardName,
             markdownContent,
-            sourceAssetIds,
             cancellationToken) =>
         {
             await context.ResourceLock.WaitAsync(cancellationToken);
@@ -51,26 +50,10 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
                         nameof(markdownContent));
                 }
 
-                var sourceIds = SplitAssetIds(sourceAssetIds);
-                var sourceAssets = await context.DbContext.Assets
-                    .AsNoTracking()
-                    .Where(asset => asset.ProjectId == context.ProjectId && sourceIds.Contains(asset.Id))
-                    .ToListAsync(cancellationToken);
-                if (sourceIds.Count == 0 || sourceAssets.Count != sourceIds.Count)
-                {
-                    throw new ArgumentException("sourceAssetIds 必须引用当前项目中实际读取的剧本或设定资源。", nameof(sourceAssetIds));
-                }
-
                 var subject = GetResourceSubject(name);
                 var existingShots = await context.DbContext.Assets
                     .Where(asset => asset.ProjectId == context.ProjectId && asset.Type == "shot")
                     .ToListAsync(cancellationToken);
-                var provenance = string.Join(
-                    Environment.NewLine,
-                    sourceAssets
-                        .OrderBy(asset => asset.Type, StringComparer.Ordinal)
-                        .ThenBy(asset => asset.Name, StringComparer.Ordinal)
-                        .Select(asset => $"- `{asset.Id}` · {asset.Name} · v{asset.Version}"));
                 var visualRules = ExtractSection(content, "视觉总则");
                 var persistedShots = new List<Asset>(shots.Count);
                 var newShots = new List<(Asset Asset, byte[] Bytes)>();
@@ -95,8 +78,7 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
                     var bytes = Encoding.UTF8.GetBytes(BuildShotMarkdown(
                         subject,
                         shot,
-                        visualRules,
-                        provenance));
+                        visualRules));
                     var now = DateTimeOffset.UtcNow;
                     var asset = new Asset
                     {
@@ -165,16 +147,14 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
                     message = $"Agent 已创建 {persistedShots.Count} 个独立镜头资源：{subject}",
                     data = new
                     {
-                        assets = persistedShots.Select(AssetResponse.FromAsset),
-                        sources = sourceAssets.Select(asset => new { asset.Id, asset.Name, asset.Version })
+                        assets = persistedShots.Select(AssetResponse.FromAsset)
                     }
                 }, cancellationToken);
                 return JsonSerializer.Serialize(
                     new
                     {
                         assets = persistedShots.Select(AssetResponse.FromAsset),
-                        shotCount = persistedShots.Count,
-                        sourceAssets = sourceAssets.Select(AssetResponse.FromAsset)
+                        shotCount = persistedShots.Count
                     },
                     context.JsonOptions);
             }
@@ -194,7 +174,7 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
             }
         }),
         name: Name,
-        description: "将完整 Markdown 分镜表按镜号拆分，每个镜号保存为独立且可版本化的 shot 资源。sourceAssetIds 用逗号分隔，必须引用实际读取的项目资源。",
+        description: "将完整 Markdown 分镜表按镜号拆分，每个镜号保存为独立且可版本化的 shot 资源。shot 仅保存镜头设计和视觉总则，不写入人物、场景、道具或来源资源快照；生成镜头图片前应动态查找项目最新资源。",
         serializerOptions: context.JsonOptions);
 
     private static IReadOnlyList<StoryboardShot> ParseShots(string content)
@@ -312,8 +292,7 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
     private static string BuildShotMarkdown(
         string subject,
         StoryboardShot shot,
-        string visualRules,
-        string provenance)
+        string visualRules)
     {
         var details = shot.Headers
             .Skip(1)
@@ -331,21 +310,8 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
         {
             builder.AppendLine().AppendLine("## 视觉总则").AppendLine().AppendLine(visualRules);
         }
-        return builder
-            .AppendLine()
-            .AppendLine("## 来源资源")
-            .AppendLine()
-            .AppendLine(provenance)
-            .ToString();
+        return builder.ToString();
     }
-
-    private static IReadOnlyList<Guid> SplitAssetIds(string value) =>
-        value.Split([',', '，', ';', '；'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(item => Guid.TryParse(item, out var id) ? id : Guid.Empty)
-            .Where(id => id != Guid.Empty)
-            .Distinct()
-            .Take(50)
-            .ToList();
 
     private static string GetResourceSubject(string value)
     {

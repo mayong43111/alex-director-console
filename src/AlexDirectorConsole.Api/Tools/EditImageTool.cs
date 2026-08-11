@@ -12,10 +12,11 @@ public sealed class EditImageTool : IDirectorTool
     public bool IsAvailable(DirectorToolContext context) => context.ImageGenerator.IsConfigured;
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<string, string, string, CancellationToken, Task<string>>)(async (
+        (Func<string, string, string, string, CancellationToken, Task<string>>)(async (
             imagePrompt,
             sourceImageName,
             resourceName,
+            imagePurpose,
             cancellationToken) =>
         {
             var prompt = imagePrompt.Trim();
@@ -64,6 +65,8 @@ public sealed class EditImageTool : IDirectorTool
                 sourceImage,
                 sourceAsset.ContentType,
                 sourceAsset.FileName,
+                ImageOutputSize.Resolve(imagePurpose, context.ImageSize),
+                context.ImageDeployment,
                 cancellationToken);
             var imageAsset = await ImageAssetWriter.SaveAsync(context, name, editedImage, cancellationToken);
             var versionCount = await context.DbContext.Assets.CountAsync(
@@ -73,6 +76,7 @@ public sealed class EditImageTool : IDirectorTool
             {
                 context.RevisedAssets.Add(imageAsset);
             }
+            context.ImagePrompts.Add(new("修改图片", imageAsset.Name, prompt));
             await context.WriteEventAsync(new
             {
                 type = "process",
@@ -83,12 +87,18 @@ public sealed class EditImageTool : IDirectorTool
                     sourceAssetId = sourceAsset.Id,
                     asset = AssetResponse.FromAsset(imageAsset, versionCount),
                     deployment = editedImage.Deployment,
-                    quality = editedImage.Quality
+                    quality = editedImage.Quality,
+                    imagePrompt = prompt
                 }
             }, cancellationToken);
-            return JsonSerializer.Serialize(AssetResponse.FromAsset(imageAsset, versionCount), context.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                asset = AssetResponse.FromAsset(imageAsset, versionCount),
+                sourceAsset = AssetResponse.FromAsset(sourceAsset),
+                imagePrompt = prompt
+            }, context.JsonOptions);
         }),
         name: Name,
-        description: "修改已有图片时调用。工具会读取 sourceImageName 对应的最新原图，并把原图连同 imagePrompt 一起传给 Azure 图片编辑接口，再保存为不可变的新版本；当前已选图片可写“当前图片”。",
+        description: "修改已有图片时调用。imagePurpose 必须说明用途：人物三视图、人物/场景/道具设定图或其他视觉参考素材使用 asset（固定 1:1）；shot 首帧、关键帧、分镜图及成片画面使用 project-frame（遵循项目画幅）。工具读取 sourceImageName 对应的最新原图并保存为不可变新版本；当前已选图片可写“当前图片”。返回实际提交给图片模型的完整 imagePrompt；系统会将其完整输出到最终回复，不得省略或改写。",
         serializerOptions: context.JsonOptions);
 }

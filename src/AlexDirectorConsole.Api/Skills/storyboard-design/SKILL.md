@@ -1,8 +1,8 @@
 ---
 name: storyboard-design
 title: 分镜设计
-description: Design and persist production-ready storyboards from a script and the latest character, scene, and prop resources. Use when the director asks for 分镜、镜头表、shot list、画面拆分、机位设计、镜头调度 or rough storyboard planning.
-version: 1.0.0
+description: Design and persist production-ready storyboards without embedding mutable production-resource snapshots in each shot. Use when the director asks for 分镜、镜头表、shot list、画面拆分、机位设计、镜头调度 or rough storyboard planning.
+version: 1.2.0
 allowed-tools: read_project_resources write_storyboard
 ---
 # 分镜设计
@@ -22,19 +22,24 @@ allowed-tools: read_project_resources write_storyboard
 
 1. 调用 `read_project_resources` 读取目标剧本完整正文。
 2. 调用 `read_project_resources` 读取剧本涉及的人物、场景和关键道具最新设定；不存在的设定应在分镜稿中标记为待确认，不得自行补全。
-3. 按剧本场次顺序设计镜头。每个镜头必须服务于明确的叙事信息、人物动作或情绪变化，不为增加镜头数量而拆分。
+3. 按剧本场次顺序设计镜头。这里的“一个镜头”采用传统拍摄定义：摄影机从开机录制到停机的一条连续 take。每个镜号只能描述同一机位、同一镜头参数和连续时空中可一次完成的画面。
 4. 编写完整 Markdown 分镜稿，至少包含：
-   - 项目与依据：集数、标题、来源资源、版本和导演令。
+   - 项目与依据：集数、标题和导演令；不得列出人物、场景、道具或其他来源资源 ID/版本。
    - 视觉总则：画幅、视角、运动、色彩、光线、节奏和连续性原则。
    - 逐场分镜表：镜号、景别、机位/角度、画面与动作、台词/声音、镜头运动、预计时长、连续性/制作备注。
    - 场次转场与节奏小结。
    - 待导演确认事项，只列真实缺口。
 5. 镜号使用稳定格式 `S场次号-镜头号`，例如 `S03-05`。每场从 `01` 开始，保持剧本顺序。
-6. 调用 `write_storyboard`，传入清晰的分镜名称、完整 Markdown 正文及实际读取到的来源资源 ID。工具会按镜号拆分，每个镜头分别保存为独立 `shot` 资源。
+6. 调用 `write_storyboard`，只传入清晰的分镜名称和完整 Markdown 正文。工具会按镜号拆分，每个镜头分别保存为独立 `shot` 资源。
 7. 仅根据工具返回结果汇报已创建的独立镜头数量、镜号及版本。
 
 ## Storyboard Rules
 
+- 一个 `shot` 等于一次开机到停机。出现切换机位、景别跳变、焦段更换、时间跳跃、空间跳跃或无法在同一次连续拍摄中完成的动作时，必须另起镜号。
+- 单条镜头只使用一个明确机位和一套可执行的摄影运动。不能在同一行中写“先拍甲特写，再切乙反应”“大全景后转近景”等隐含剪辑。
+- 一条镜头可以同时拍到多个人物，但他们的动作必须处于同一连续时空、能由同一摄影机一次完成；人物数量不是合并镜头的理由。
+- 按实际表演和摄影时间核对时长。5 秒镜头只能承载约 5 秒内可完整执行的单一动作或连续动作链，不得塞入多个独立叙事节拍、轮番反应或跨机位信息。
+- 每条“画面与动作”应明确开机时的起始画面、连续发生的动作、停机前的结束画面，供现场直接按条拍摄。
 - 不改变剧本事件顺序、人物身份、台词含义和已确认设定。
 - 明确区分剧本写明、导演确认和分镜设计选择。
 - 避免不可执行的抽象描述；画面、动作、机位和声音必须能被拍摄或绘制。
@@ -42,6 +47,7 @@ allowed-tools: read_project_resources write_storyboard
 - 对对白场景优先建立空间关系，再进入中近景；越轴必须有可见的过渡依据。
 - 时长应与动作和台词量匹配；不把所有镜头机械设置为相同时长。
 - 每个镜号必须对应一个独立的文本 `shot` 资源，不能把整集或整场分镜只保存成一个文件。
+- `shot` 是镜头设计，不是制作资源清单；不得写入“来源资源”章节，不得固化人物、场景、道具图片或设定稿 ID/版本。后续生成镜头画面时由对应技能动态查找项目中的最新资源。
 - 文本镜头资源不调用图片生成工具。导演另行要求出分镜图时，再使用对应图像技能或工具。
 
 ## Pitfalls
@@ -53,4 +59,4 @@ allowed-tools: read_project_resources write_storyboard
 
 ## Verification
 
-确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，每个返回项都是独立 `shot` 资源；检查所有剧本场次均被覆盖、镜号无重复、版本号和来源资源可追溯。
+确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，每个返回项都是独立 `shot` 资源；检查所有剧本场次均被覆盖、镜号无重复，并确认生成的 shot 不含“来源资源”章节或资源 ID 快照。

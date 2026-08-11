@@ -6,10 +6,12 @@ using AlexDirectorConsole.Api.Storage;
 using AlexDirectorConsole.Api.Tools;
 using DotNetEnv;
 using Microsoft.Agents.AI;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 var envFilePath = FindFileUpward(".env", Directory.GetCurrentDirectory())
     ?? FindFileUpward(".env", AppContext.BaseDirectory);
@@ -28,21 +30,36 @@ builder.WebHost.ConfigureKestrel(options =>
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddDataProtection()
+    .SetApplicationName("AlexDirectorConsole")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "DataProtection")));
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddSingleton<IBlobStorage, LocalBlobStorage>();
 builder.Services.AddSingleton<IDirectorAgent, AzureFoundryDirectorAgent>();
 builder.Services.AddSingleton<IProjectSkillCatalog, ProjectSkillCatalog>();
 builder.Services.AddSingleton<IDirectorToolRegistry, DirectorToolRegistry>();
+builder.Services.AddSingleton<IDirectorTool, ListProjectResourcesTool>();
 builder.Services.AddSingleton<IDirectorTool, ReadProjectResourcesTool>();
+builder.Services.AddSingleton<IDirectorTool, ReadProjectResourceContentsTool>();
 builder.Services.AddSingleton<IDirectorTool, WriteDirectorRevisionTool>();
 builder.Services.AddSingleton<IDirectorTool, GenerateImageTool>();
 builder.Services.AddSingleton<IDirectorTool, EditImageTool>();
 builder.Services.AddSingleton<IDirectorTool, InspectVisualReferencesTool>();
+builder.Services.AddSingleton<IDirectorTool, MergeReferenceImagesTool>();
 builder.Services.AddSingleton<IDirectorTool, GenerateImageFromReferencesTool>();
 builder.Services.AddSingleton<IDirectorTool, RunScriptBreakdownTool>();
 builder.Services.AddSingleton<IDirectorTool, UpdateCurrentResourceTool>();
 builder.Services.AddSingleton<IDirectorTool, WriteStoryboardTool>();
+builder.Services.AddSingleton<IDirectorTool, BindShotAssetTool>();
+builder.Services.AddSingleton<IDirectorTool, InspectRemoteComfyUiTool>();
+builder.Services.AddSingleton<IDirectorTool, ManageRemoteComfyUiTool>();
+builder.Services.AddSingleton<IDirectorTool, GenerateComfyUiVideoTool>();
+builder.Services.AddSingleton<IDirectorTool, AssembleImageSlideshowTool>();
+builder.Services.AddSingleton<IDirectorTool, AssembleVideoClipsTool>();
+builder.Services.AddHttpClient("ComfyUiProxy", client => client.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<IRemoteComfyUiService, RemoteComfyUiService>();
+builder.Services.AddHttpClient<IComfyUiVideoGenerator, ComfyUiVideoGenerator>(client => client.Timeout = TimeSpan.FromHours(2));
 builder.Services.AddHttpClient<IAzureFoundryImageGenerator, AzureFoundryImageGenerator>();
 builder.Services.AddScoped<IAgentSkillExecutor, AgentSkillExecutor>();
 builder.Services.Configure<FormOptions>(options =>
@@ -61,7 +78,13 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await dbContext.Database.MigrateAsync();
+    await EnsureGlobalRuntimeConfigurationAsync(dbContext);
+    var dataProtectionProvider = scope.ServiceProvider.GetRequiredService<IDataProtectionProvider>();
+    await EnsureAndLoadGlobalFoundryConfigurationAsync(dbContext, dataProtectionProvider, app.Configuration);
     await BackfillAssetVersionsAsync(dbContext);
+    await RepairGeneratedImageResourcesAsync(dbContext);
+    var blobStorage = scope.ServiceProvider.GetRequiredService<IBlobStorage>();
+    await RemoveStaticShotSourcesAsync(dbContext, blobStorage);
     var skillCatalog = scope.ServiceProvider.GetRequiredService<IProjectSkillCatalog>();
     await EnsureSystemSkillsAsync(dbContext, skillCatalog);
     var skillExecutor = scope.ServiceProvider.GetRequiredService<IAgentSkillExecutor>();
@@ -106,20 +129,225 @@ app.MapGet("/api/agent/status", (
 .WithOpenApi();
 
 app.MapGet(
-    "/api/skills",
+    "/api/projects",
     async (AppDbContext dbContext, CancellationToken cancellationToken) =>
     {
-        var skills = await dbContext.SkillDefinitions
+        var projects = await dbContext.Projects
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+        return Results.Ok(projects
+            .OrderByDescending(project => project.UpdatedAtUtc)
+            .Select(ProjectResponse.FromProject));
+    })
+    .WithName("GetProjects")
+    .WithOpenApi();
+
+app.MapPut(
+    "/api/projects/{projectId:guid}",
+    async (
+        Guid projectId,
+        UpsertProjectRequest request,
+        AppDbContext dbContext,
+        CancellationToken cancellationToken) =>
+    {
+        if (string.IsNullOrWhiteSpace(request.Name)
+            || request.Name.Trim().Length > 200
+            || request.Description.Length > 4000
+            || string.IsNullOrWhiteSpace(request.FormatPreset)
+            || request.FormatPreset.Trim().Length > 40
+            || string.IsNullOrWhiteSpace(request.PreviewResolution)
+            || request.PreviewResolution.Trim().Length > 40
+            || string.IsNullOrWhiteSpace(request.LanguageModel)
+            || request.LanguageModel.Trim().Length > 100
+            || string.IsNullOrWhiteSpace(request.ImageModel)
+            || request.ImageModel.Trim().Length > 100
+            || request.VideoModel.Length > 100
+            || request.OutputWidth is < 1 or > 16384
+            || request.OutputHeight is < 1 or > 16384)
+        {
+            return Results.BadRequest(new { error = "项目字段为空、过长或超出有效范围。" });
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var project = await dbContext.Projects
+            .SingleOrDefaultAsync(item => item.Id == projectId, cancellationToken);
+        if (project is null)
+        {
+            project = new Project
+            {
+                Id = projectId,
+                Name = request.Name.Trim(),
+                CreatedAtUtc = request.CreatedAt == default ? now : request.CreatedAt,
+                UpdatedAtUtc = now
+            };
+            dbContext.Projects.Add(project);
+        }
+
+        project.Name = request.Name.Trim();
+        project.Description = request.Description.Trim();
+        project.FormatPreset = request.FormatPreset.Trim();
+        project.OutputWidth = request.OutputWidth;
+        project.OutputHeight = request.OutputHeight;
+        project.PreviewResolution = request.PreviewResolution.Trim();
+        project.LanguageModel = request.LanguageModel.Trim();
+        project.ImageModel = request.ImageModel.Trim();
+        project.VideoModel = request.VideoModel.Trim();
+        project.UpdatedAtUtc = now;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Results.Ok(ProjectResponse.FromProject(project));
+    })
+    .WithName("UpsertProject")
+    .WithOpenApi();
+
+app.MapGet(
+    "/api/system/runtime-configuration",
+    async (AppDbContext dbContext, CancellationToken cancellationToken) =>
+    {
+        var configuration = await dbContext.ProjectRuntimeConfigurations
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.ProjectId == Guid.Empty, cancellationToken)
+            ?? new ProjectRuntimeConfiguration
+            {
+                ProjectId = Guid.Empty,
+                UpdatedAtUtc = DateTimeOffset.MinValue
+            };
+        return Results.Ok(ProjectRuntimeConfigurationResponse.FromConfiguration(configuration));
+    })
+    .WithName("GetGlobalRuntimeConfiguration")
+    .WithOpenApi();
+
+app.MapPut(
+    "/api/system/runtime-configuration",
+    async (
+        UpdateProjectRuntimeConfigurationRequest request,
+        AppDbContext dbContext,
+        CancellationToken cancellationToken) =>
+    {
+        var values = new[]
+        {
+            request.VmHost,
+            request.VmUsername,
+            request.SshPrivateKeyPath,
+            request.ComfyUiPath,
+            request.ComfyUiPythonPath,
+            request.WorkflowDirectory,
+            request.OutputDirectory
+        };
+        if (values.Any(value => string.IsNullOrWhiteSpace(value))
+            || request.VmHost.Trim().Length > 260
+            || request.VmUsername.Trim().Length > 100
+            || values.Skip(2).Any(value => value.Trim().Length > 500))
+        {
+            return Results.BadRequest(new { error = "VM、SSH 与 ComfyUI 配置不能为空或超过长度限制。" });
+        }
+        if (request.VmPort is < 1 or > 65535
+            || request.ComfyUiPort is < 1 or > 65535
+            || request.LocalProxyPort is < 1 or > 65535)
+        {
+            return Results.BadRequest(new { error = "端口必须在 1 到 65535 之间。" });
+        }
+
+        var configuration = await dbContext.ProjectRuntimeConfigurations
+            .SingleOrDefaultAsync(item => item.ProjectId == Guid.Empty, cancellationToken);
+        if (configuration is null)
+        {
+            configuration = new ProjectRuntimeConfiguration { ProjectId = Guid.Empty };
+            dbContext.ProjectRuntimeConfigurations.Add(configuration);
+        }
+        configuration.VmHost = request.VmHost.Trim();
+        configuration.VmPort = request.VmPort;
+        configuration.VmUsername = request.VmUsername.Trim();
+        configuration.SshPrivateKeyPath = request.SshPrivateKeyPath.Trim();
+        configuration.ComfyUiPath = request.ComfyUiPath.Trim();
+        configuration.ComfyUiPythonPath = request.ComfyUiPythonPath.Trim();
+        configuration.ComfyUiPort = request.ComfyUiPort;
+        configuration.LocalProxyPort = request.LocalProxyPort;
+        configuration.WorkflowDirectory = request.WorkflowDirectory.Trim();
+        configuration.OutputDirectory = request.OutputDirectory.Trim();
+        configuration.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Results.Ok(ProjectRuntimeConfigurationResponse.FromConfiguration(configuration));
+    })
+    .WithName("UpdateGlobalRuntimeConfiguration")
+    .WithOpenApi();
+
+app.MapGet(
+    "/api/system/foundry-configuration",
+    async (AppDbContext dbContext, CancellationToken cancellationToken) =>
+    {
+        var configuration = await dbContext.GlobalFoundryConfigurations.AsNoTracking()
+            .SingleAsync(item => item.Id == 1, cancellationToken);
+        return Results.Ok(GlobalFoundryConfigurationResponse.FromConfiguration(configuration));
+    })
+    .WithName("GetGlobalFoundryConfiguration")
+    .WithOpenApi();
+
+app.MapPut(
+    "/api/system/foundry-configuration",
+    async (
+        UpdateGlobalFoundryConfigurationRequest request,
+        AppDbContext dbContext,
+        IDataProtectionProvider dataProtectionProvider,
+        CancellationToken cancellationToken) =>
+    {
+        var openAiEndpoint = request.OpenAiEndpoint.Trim();
+        var imageEndpoint = request.ImageEndpoint.Trim();
+        if ((!string.IsNullOrWhiteSpace(openAiEndpoint) && !Uri.TryCreate(openAiEndpoint, UriKind.Absolute, out _))
+            || (!string.IsNullOrWhiteSpace(imageEndpoint) && !Uri.TryCreate(imageEndpoint, UriKind.Absolute, out _)))
+            return Results.BadRequest(new { error = "Foundry Endpoint 必须为空或有效的绝对 URL。" });
+        if (request.OpenAiDeployment.Trim().Length is 0 or > 100
+            || request.ImageDeployment.Trim().Length is 0 or > 100
+            || request.ImageApiVersion.Trim().Length is 0 or > 100
+            || request.ImageQuality is not ("low" or "medium" or "high"))
+            return Results.BadRequest(new { error = "部署名称、API 版本或图片质量无效。" });
+
+        var configuration = await dbContext.GlobalFoundryConfigurations
+            .SingleAsync(item => item.Id == 1, cancellationToken);
+        var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
+        configuration.OpenAiEndpoint = openAiEndpoint;
+        configuration.OpenAiDeployment = request.OpenAiDeployment.Trim();
+        configuration.ImageEndpoint = imageEndpoint;
+        configuration.ImageDeployment = request.ImageDeployment.Trim();
+        configuration.ImageApiVersion = request.ImageApiVersion.Trim();
+        configuration.ImageQuality = request.ImageQuality;
+        if (request.ClearOpenAiApiKey) configuration.ProtectedOpenAiApiKey = string.Empty;
+        else if (!string.IsNullOrWhiteSpace(request.OpenAiApiKey)) configuration.ProtectedOpenAiApiKey = protector.Protect(request.OpenAiApiKey.Trim());
+        if (request.ClearImageApiKey) configuration.ProtectedImageApiKey = string.Empty;
+        else if (!string.IsNullOrWhiteSpace(request.ImageApiKey)) configuration.ProtectedImageApiKey = protector.Protect(request.ImageApiKey.Trim());
+        configuration.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        ApplyFoundryEnvironment(configuration, protector);
+        return Results.Ok(GlobalFoundryConfigurationResponse.FromConfiguration(configuration));
+    })
+    .WithName("UpdateGlobalFoundryConfiguration")
+    .WithOpenApi();
+
+app.MapGet(
+    "/api/skills",
+    async (
+        AppDbContext dbContext,
+        IProjectSkillCatalog skillCatalog,
+        CancellationToken cancellationToken) =>
+    {
+        var definitions = await dbContext.SkillDefinitions
             .AsNoTracking()
             .OrderBy(skill => skill.Name)
-            .Select(skill => new SkillDefinitionResponse(
+            .ToListAsync(cancellationToken);
+        var skills = definitions.Select(skill =>
+        {
+            var catalogSkill = skillCatalog.Get(skill.Id);
+            return new SkillDefinitionResponse(
                 skill.Id,
                 skill.Name,
                 skill.Description,
                 skill.Version,
                 skill.IsEnabled,
-                skill.IsSystem))
-            .ToListAsync(cancellationToken);
+                skill.IsSystem,
+                catalogSkill?.Title ?? skill.Name,
+                catalogSkill?.AllowedTools ?? [],
+                catalogSkill?.Content ?? string.Empty);
+        });
         return Results.Ok(skills);
     })
     .WithName("GetSkills")
@@ -131,6 +359,7 @@ app.MapPatch(
         string skillId,
         UpdateSkillRequest request,
         AppDbContext dbContext,
+        IProjectSkillCatalog skillCatalog,
         CancellationToken cancellationToken) =>
     {
         var skill = await dbContext.SkillDefinitions
@@ -143,13 +372,17 @@ app.MapPatch(
         skill.IsEnabled = request.IsEnabled;
         skill.UpdatedAtUtc = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+        var catalogSkill = skillCatalog.Get(skill.Id);
         return Results.Ok(new SkillDefinitionResponse(
             skill.Id,
             skill.Name,
             skill.Description,
             skill.Version,
             skill.IsEnabled,
-            skill.IsSystem));
+            skill.IsSystem,
+            catalogSkill?.Title ?? skill.Name,
+            catalogSkill?.AllowedTools ?? [],
+            catalogSkill?.Content ?? string.Empty));
     })
     .WithName("UpdateSkill")
     .WithOpenApi();
@@ -356,6 +589,71 @@ app.MapGet(
     .WithOpenApi();
 
 app.MapGet(
+    "/api/assets/{shotAssetId:guid}/linked-assets",
+    async (
+        Guid shotAssetId,
+        AppDbContext dbContext,
+        CancellationToken cancellationToken) =>
+    {
+        var shot = await dbContext.Assets
+            .AsNoTracking()
+            .SingleOrDefaultAsync(asset => asset.Id == shotAssetId && asset.Type == "shot", cancellationToken);
+        if (shot is null)
+        {
+            return Results.NotFound();
+        }
+
+        var links = await dbContext.ShotAssetLinks
+            .AsNoTracking()
+            .Where(link => link.ProjectId == shot.ProjectId && link.ShotResourceId == shot.ResourceId)
+            .ToListAsync(cancellationToken);
+        links = links
+            .OrderBy(link => link.Role)
+            .ThenByDescending(link => link.CreatedAtUtc)
+            .ToList();
+        var assetIds = links.Select(link => link.AssetId).Distinct().ToArray();
+        var assets = await dbContext.Assets
+            .AsNoTracking()
+            .Where(asset => assetIds.Contains(asset.Id))
+            .ToDictionaryAsync(asset => asset.Id, cancellationToken);
+        var validLinks = links
+            .Where(link => assets.ContainsKey(link.AssetId))
+            .ToList();
+        var exclusiveRoles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "first-frame",
+            "last-frame",
+            "video"
+        };
+        var responseLinks = validLinks
+            .Where(link => exclusiveRoles.Contains(link.Role))
+            .GroupBy(link => link.Role, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderByDescending(link => link.CreatedAtUtc)
+                .ThenByDescending(link => assets[link.AssetId].Version)
+                .First())
+            .Concat(validLinks
+                .Where(link => !exclusiveRoles.Contains(link.Role))
+            .GroupBy(link => new { link.Role, assets[link.AssetId].ResourceId })
+            .Select(group => group
+                .OrderByDescending(link => assets[link.AssetId].Version)
+                .ThenByDescending(link => link.CreatedAtUtc)
+                .First()))
+            .OrderBy(link => link.Role)
+            .ThenByDescending(link => link.CreatedAtUtc);
+        var response = responseLinks
+            .Select(link => new ShotAssetLinkResponse(
+                link.Id,
+                link.Role,
+                link.CreatedAtUtc,
+                AssetResponse.FromAsset(assets[link.AssetId])))
+            .ToArray();
+        return Results.Ok(response);
+    })
+    .WithName("GetShotLinkedAssets")
+    .WithOpenApi();
+
+app.MapGet(
     "/api/projects/{projectId:guid}/messages",
     async (Guid projectId, AppDbContext dbContext, CancellationToken cancellationToken) =>
     {
@@ -545,6 +843,8 @@ app.MapPost(
         IDirectorAgent directorAgent,
         IAzureFoundryImageGenerator imageGenerator,
         IAgentSkillExecutor skillExecutor,
+        IRemoteComfyUiService remoteComfyUiService,
+        IComfyUiVideoGenerator comfyUiVideoGenerator,
         IProjectSkillCatalog skillCatalog,
         IDirectorToolRegistry toolRegistry,
         IBlobStorage blobStorage,
@@ -556,6 +856,13 @@ app.MapPost(
         {
             response.StatusCode = StatusCodes.Status400BadRequest;
             await response.WriteAsJsonAsync(new { error = "Message is required and cannot exceed 20,000 characters." }, cancellationToken);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.ImageModel) && request.ImageModel.Trim().Length > 100)
+        {
+            response.StatusCode = StatusCodes.Status400BadRequest;
+            await response.WriteAsJsonAsync(new { error = "Image model deployment name cannot exceed 100 characters." }, cancellationToken);
             return;
         }
 
@@ -639,6 +946,12 @@ app.MapPost(
                 ProjectId = projectId,
                 Content = content,
                 RequestedModel = request.Model,
+                ImageSize = request.ImageSize is "1536x1024" or "1024x1536"
+                    ? request.ImageSize
+                    : "1024x1024",
+                ImageDeployment = string.IsNullOrWhiteSpace(request.ImageModel)
+                    ? imageGenerator.Deployment
+                    : request.ImageModel.Trim(),
                 CurrentAsset = currentAsset,
                 CurrentAssetContent = currentAssetContent,
                 DbContext = dbContext,
@@ -646,6 +959,8 @@ app.MapPost(
                 BlobStorage = blobStorage,
                 ImageGenerator = imageGenerator,
                 SkillExecutor = skillExecutor
+                ,RemoteComfyUiService = remoteComfyUiService,
+                ComfyUiVideoGenerator = comfyUiVideoGenerator
             };
             var tools = toolRegistry.CreateTools(toolContext).ToList();
 
@@ -667,7 +982,20 @@ app.MapPost(
                     最近对话生成的图片（从新到旧，续作或修改时由 Agent 自行判断引用哪一张）：
                     {string.Join(Environment.NewLine, recentGeneratedImages.Select(asset => $"- ID：{asset.Id}；名称：{asset.Name}；版本：v{asset.Version}；文件：{asset.FileName}"))}
                     """;
-            var agentContext = $"{recentImageContext}\n\n{selectedResourceContext}";
+            var projectFormatContext = $"""
+                当前项目成片画面规格：
+                - 项目名称：{request.ProjectName ?? "未设置"}
+                - 项目描述：{request.ProjectDescription ?? "未设置"}
+                - 画幅比例：{request.ProjectAspectRatio ?? "未设置"}
+                - 成片分辨率：{request.ProjectResolution ?? "未设置"}
+                - 快速拉片分辨率：{request.PreviewResolution ?? "未设置"}
+                - Image 模型部署：{toolContext.ImageDeployment}
+                - 视频模型部署：{(string.IsNullOrWhiteSpace(request.VideoModel) ? "未配置" : request.VideoModel.Trim())}
+                - 成片类图片的模型原生生成尺寸：{toolContext.ImageSize}
+
+                项目画幅只用于 shot 首帧、关键帧、分镜图和其他成片画面。人物三视图、人物设定图、场景设定图、道具设定图及其他视觉参考素材不继承项目画幅，固定使用 1:1（1024x1024）。调用图片生成或编辑工具时必须按此用途选择 imagePurpose。成片类图片的模型原生尺寸与交付分辨率不同时，按项目画幅构图，并以成片分辨率作为后期交付目标。
+                """;
+            var agentContext = $"{projectFormatContext}\n\n{recentImageContext}\n\n{selectedResourceContext}";
             await WriteStreamEventAsync(response, new
             {
                 type = "process",
@@ -699,6 +1027,48 @@ app.MapPost(
                     type = "assistant.delta",
                     delta
                 }, cancellationToken);
+            }
+            if (toolContext.ImagePrompts.Count > 0)
+            {
+                var promptAppendix = new StringBuilder();
+                foreach (var (operation, resourceName, prompt) in toolContext.ImagePrompts)
+                {
+                    promptAppendix
+                        .AppendLine()
+                        .AppendLine()
+                        .AppendLine($"### {operation}完整提示词：{resourceName}")
+                        .AppendLine()
+                        .AppendLine("```text")
+                        .AppendLine(prompt)
+                        .Append("```");
+                }
+                var promptOutput = promptAppendix.ToString();
+                replyBuilder.Append(promptOutput);
+                await WriteStreamEventAsync(response, new
+                {
+                    type = "assistant.delta",
+                    delta = promptOutput
+                }, cancellationToken);
+            }
+            if (toolContext.VideoPrompts.Count > 0)
+            {
+                var promptAppendix = new StringBuilder();
+                foreach (var record in toolContext.VideoPrompts)
+                {
+                    promptAppendix
+                        .AppendLine()
+                        .AppendLine()
+                        .AppendLine($"### 生成视频完整提示词：{record.ResourceName}")
+                        .AppendLine()
+                        .AppendLine($"Workflow：`{record.Workflow}` · {record.Width}×{record.Height} · {record.FrameCount} 帧 · {record.Fps} FPS")
+                        .AppendLine()
+                        .AppendLine("```text")
+                        .AppendLine(record.Prompt)
+                        .Append("```");
+                }
+                var promptOutput = promptAppendix.ToString();
+                replyBuilder.Append(promptOutput);
+                await WriteStreamEventAsync(response, new { type = "assistant.delta", delta = promptOutput }, cancellationToken);
             }
             var execution = toolContext.Execution;
             if (execution is not null)
@@ -858,6 +1228,128 @@ static async Task BackfillAssetVersionsAsync(AppDbContext dbContext)
     await dbContext.SaveChangesAsync();
 }
 
+static async Task RepairGeneratedImageResourcesAsync(AppDbContext dbContext)
+{
+    var generatedImages = (await dbContext.Assets
+            .Where(asset => asset.Type == "media"
+                && asset.ContentType.StartsWith("image/")
+                && asset.Name.Contains("AI 图片"))
+            .ToListAsync())
+        .Select(asset => new
+        {
+            Asset = asset,
+            ResourceKey = GetGeneratedImageResourceKey(asset.FileName)
+        })
+        .Where(item => item.ResourceKey is not null)
+        .ToList();
+    var changed = false;
+    foreach (var group in generatedImages.GroupBy(
+        item => new { item.Asset.ProjectId, ResourceKey = item.ResourceKey! }))
+    {
+        var versions = group
+            .OrderBy(item => item.Asset.CreatedAtUtc)
+            .ThenBy(item => item.Asset.Id)
+            .Select(item => item.Asset)
+            .ToList();
+        var resourceId = versions[0].Id;
+        var canonicalName = $"{group.Key.ResourceKey} · AI 图片";
+        for (var index = 0; index < versions.Count; index++)
+        {
+            var asset = versions[index];
+            var version = index + 1;
+            if (asset.ResourceId == resourceId
+                && asset.Version == version
+                && asset.Name.Equals(canonicalName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            asset.ResourceId = resourceId;
+            asset.Version = version;
+            asset.Name = canonicalName;
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        await dbContext.SaveChangesAsync();
+    }
+}
+
+static string? GetGeneratedImageResourceKey(string fileName)
+{
+    var withoutExtension = Path.GetFileNameWithoutExtension(fileName);
+    var withoutVersion = Regex.Replace(
+        withoutExtension,
+        "-v\\d+$",
+        string.Empty,
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    if (withoutVersion.Equals(withoutExtension, StringComparison.Ordinal))
+    {
+        return null;
+    }
+    var segments = withoutVersion
+        .Split('·', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .ToList();
+    while (segments.Count > 0
+        && segments[^1].Equals("AI 图片", StringComparison.OrdinalIgnoreCase))
+    {
+        segments.RemoveAt(segments.Count - 1);
+    }
+    return segments.Count == 0 ? null : string.Join(" · ", segments);
+}
+
+static async Task RemoveStaticShotSourcesAsync(
+    AppDbContext dbContext,
+    IBlobStorage blobStorage)
+{
+    var shots = await dbContext.Assets
+        .Where(asset => asset.Type == "shot"
+            && asset.ContentType.StartsWith("text/"))
+        .ToListAsync();
+    var changed = false;
+    var replacedBlobKeys = new List<string>();
+    foreach (var shot in shots)
+    {
+        await using var source = await blobStorage.OpenReadAsync(shot.BlobKey, CancellationToken.None);
+        if (source is null)
+        {
+            continue;
+        }
+        using var reader = new StreamReader(source, detectEncodingFromByteOrderMarks: true);
+        var content = await reader.ReadToEndAsync();
+        var headingIndex = content.IndexOf(
+            $"{Environment.NewLine}## 来源资源",
+            StringComparison.Ordinal);
+        if (headingIndex < 0)
+        {
+            headingIndex = content.IndexOf("\n## 来源资源", StringComparison.Ordinal);
+        }
+        if (headingIndex < 0)
+        {
+            continue;
+        }
+        var revisedContent = content[..headingIndex].TrimEnd() + Environment.NewLine;
+        var bytes = Encoding.UTF8.GetBytes(revisedContent);
+        var revisedBlobKey = $"{shot.ProjectId:N}/shot/{shot.Id:N}-dynamic.md";
+        await blobStorage.DeleteAsync(revisedBlobKey, CancellationToken.None);
+        await using var revisedStream = new MemoryStream(bytes, writable: false);
+        await blobStorage.SaveAsync(revisedBlobKey, revisedStream, CancellationToken.None);
+        replacedBlobKeys.Add(shot.BlobKey);
+        shot.BlobKey = revisedBlobKey;
+        shot.SizeBytes = bytes.LongLength;
+        shot.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        changed = true;
+    }
+    if (changed)
+    {
+        await dbContext.SaveChangesAsync();
+        foreach (var blobKey in replacedBlobKeys)
+        {
+            await blobStorage.DeleteAsync(blobKey, CancellationToken.None);
+        }
+    }
+}
+
 static async Task EnsureSystemSkillsAsync(
     AppDbContext dbContext,
     IProjectSkillCatalog skillCatalog)
@@ -903,6 +1395,91 @@ static async Task EnsureSystemSkillsAsync(
         await dbContext.SaveChangesAsync();
     }
 }
+
+static async Task EnsureGlobalRuntimeConfigurationAsync(AppDbContext dbContext)
+{
+    var configurations = (await dbContext.ProjectRuntimeConfigurations.ToListAsync())
+        .OrderByDescending(configuration => configuration.UpdatedAtUtc)
+        .ToList();
+    var global = configurations.FirstOrDefault(configuration => configuration.ProjectId == Guid.Empty);
+    var source = global ?? configurations.FirstOrDefault();
+    if (source is not null && global is null)
+    {
+        global = new ProjectRuntimeConfiguration
+        {
+            ProjectId = Guid.Empty,
+            VmHost = source.VmHost,
+            VmPort = source.VmPort,
+            VmUsername = source.VmUsername,
+            SshPrivateKeyPath = source.SshPrivateKeyPath,
+            ComfyUiPath = source.ComfyUiPath,
+            ComfyUiPythonPath = source.ComfyUiPythonPath,
+            ComfyUiPort = source.ComfyUiPort,
+            LocalProxyPort = source.LocalProxyPort,
+            WorkflowDirectory = source.WorkflowDirectory,
+            OutputDirectory = source.OutputDirectory,
+            UpdatedAtUtc = source.UpdatedAtUtc
+        };
+        dbContext.ProjectRuntimeConfigurations.Add(global);
+    }
+    dbContext.ProjectRuntimeConfigurations.RemoveRange(
+        configurations.Where(configuration => configuration.ProjectId != Guid.Empty));
+    await dbContext.SaveChangesAsync();
+}
+
+static async Task EnsureAndLoadGlobalFoundryConfigurationAsync(
+    AppDbContext dbContext,
+    IDataProtectionProvider dataProtectionProvider,
+    IConfiguration applicationConfiguration)
+{
+    var configuration = await dbContext.GlobalFoundryConfigurations.SingleOrDefaultAsync(item => item.Id == 1);
+    var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
+    if (configuration is null)
+    {
+        var openAiApiKey = Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY")
+            ?? applicationConfiguration["AzureOpenAI:ApiKey"];
+        var imageApiKey = Environment.GetEnvironmentVariable("AZURE_IMAGE_API_KEY")
+            ?? applicationConfiguration["AzureImage:ApiKey"];
+        configuration = new GlobalFoundryConfiguration
+        {
+            OpenAiEndpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT")
+                ?? applicationConfiguration["AzureOpenAI:Endpoint"] ?? string.Empty,
+            OpenAiDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT")
+                ?? applicationConfiguration["AzureOpenAI:Deployment"] ?? "gpt-5.4",
+            ProtectedOpenAiApiKey = string.IsNullOrWhiteSpace(openAiApiKey) ? string.Empty : protector.Protect(openAiApiKey),
+            ImageEndpoint = Environment.GetEnvironmentVariable("AZURE_IMAGE_ENDPOINT")
+                ?? applicationConfiguration["AzureImage:Endpoint"] ?? string.Empty,
+            ImageDeployment = Environment.GetEnvironmentVariable("AZURE_IMAGE_DEPLOYMENT")
+                ?? applicationConfiguration["AzureImage:Deployment"] ?? "gpt-image-2",
+            ImageApiVersion = Environment.GetEnvironmentVariable("AZURE_IMAGE_API_VERSION")
+                ?? applicationConfiguration["AzureImage:ApiVersion"] ?? "2025-04-01-preview",
+            ImageQuality = Environment.GetEnvironmentVariable("AZURE_IMAGE_QUALITY")
+                ?? applicationConfiguration["AzureImage:Quality"] ?? "medium",
+            ProtectedImageApiKey = string.IsNullOrWhiteSpace(imageApiKey) ? string.Empty : protector.Protect(imageApiKey),
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        dbContext.GlobalFoundryConfigurations.Add(configuration);
+        await dbContext.SaveChangesAsync();
+    }
+    ApplyFoundryEnvironment(configuration, protector);
+}
+
+static void ApplyFoundryEnvironment(GlobalFoundryConfiguration configuration, IDataProtector protector)
+{
+    Environment.SetEnvironmentVariable("AZURE_OPENAI_ENDPOINT", NullIfEmpty(configuration.OpenAiEndpoint));
+    Environment.SetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT", configuration.OpenAiDeployment);
+    Environment.SetEnvironmentVariable("AZURE_OPENAI_API_KEY", UnprotectOrNull(configuration.ProtectedOpenAiApiKey, protector));
+    Environment.SetEnvironmentVariable("AZURE_IMAGE_ENDPOINT", NullIfEmpty(configuration.ImageEndpoint));
+    Environment.SetEnvironmentVariable("AZURE_IMAGE_DEPLOYMENT", configuration.ImageDeployment);
+    Environment.SetEnvironmentVariable("AZURE_IMAGE_API_VERSION", configuration.ImageApiVersion);
+    Environment.SetEnvironmentVariable("AZURE_IMAGE_QUALITY", configuration.ImageQuality);
+    Environment.SetEnvironmentVariable("AZURE_IMAGE_API_KEY", UnprotectOrNull(configuration.ProtectedImageApiKey, protector));
+}
+
+static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+static string? UnprotectOrNull(string protectedValue, IDataProtector protector) =>
+    string.IsNullOrWhiteSpace(protectedValue) ? null : protector.Unprotect(protectedValue);
 
 static string? FindFileUpward(string fileName, string startPath)
 {

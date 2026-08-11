@@ -30,3 +30,9 @@ public sealed record AssetResponse(
         asset.CreatedAtUtc,
         $"/api/assets/{asset.Id}/content");
 }
+
+public sealed record ShotAssetLinkResponse(
+    Guid Id,
+    string Role,
+    DateTimeOffset CreatedAtUtc,
+    AssetResponse Asset);

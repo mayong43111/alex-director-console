@@ -10,6 +10,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<ConversationMessage> ConversationMessages => Set<ConversationMessage>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<SkillRun> SkillRuns => Set<SkillRun>();
+    public DbSet<ShotAssetLink> ShotAssetLinks => Set<ShotAssetLink>();
+    public DbSet<ProjectRuntimeConfiguration> ProjectRuntimeConfigurations => Set<ProjectRuntimeConfiguration>();
+    public DbSet<GlobalFoundryConfiguration> GlobalFoundryConfigurations => Set<GlobalFoundryConfiguration>();
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
@@ -37,6 +40,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(project => project.Name)
                 .HasMaxLength(200)
                 .IsRequired();
+            entity.Property(project => project.Description).HasMaxLength(4000);
+            entity.Property(project => project.FormatPreset).HasMaxLength(40).IsRequired();
+            entity.Property(project => project.PreviewResolution).HasMaxLength(40).IsRequired();
+            entity.Property(project => project.LanguageModel).HasMaxLength(100).IsRequired();
+            entity.Property(project => project.ImageModel).HasMaxLength(100).IsRequired();
+            entity.Property(project => project.VideoModel).HasMaxLength(100).IsRequired();
         });
 
         modelBuilder.Entity<Asset>(entity =>
@@ -84,6 +93,43 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(run => run.Status).HasMaxLength(30).IsRequired();
             entity.Property(run => run.DirectorInstruction).HasMaxLength(20000).IsRequired();
             entity.Property(run => run.Model).HasMaxLength(100).IsRequired();
+        });
+
+        modelBuilder.Entity<ShotAssetLink>(entity =>
+        {
+            entity.ToTable("ShotAssetLinks");
+            entity.HasKey(link => link.Id);
+            entity.HasIndex(link => new { link.ProjectId, link.ShotResourceId });
+            entity.HasIndex(link => new { link.ShotResourceId, link.AssetId, link.Role }).IsUnique();
+            entity.Property(link => link.Role).HasMaxLength(40).IsRequired();
+        });
+
+        modelBuilder.Entity<ProjectRuntimeConfiguration>(entity =>
+        {
+            entity.ToTable("ProjectRuntimeConfigurations");
+            entity.HasKey(configuration => configuration.ProjectId);
+            entity.Property(configuration => configuration.ProjectId).ValueGeneratedNever();
+            entity.Property(configuration => configuration.VmHost).HasMaxLength(260).IsRequired();
+            entity.Property(configuration => configuration.VmUsername).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.SshPrivateKeyPath).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.ComfyUiPath).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.ComfyUiPythonPath).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.WorkflowDirectory).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.OutputDirectory).HasMaxLength(500).IsRequired();
+        });
+
+        modelBuilder.Entity<GlobalFoundryConfiguration>(entity =>
+        {
+            entity.ToTable("GlobalFoundryConfigurations");
+            entity.HasKey(configuration => configuration.Id);
+            entity.Property(configuration => configuration.OpenAiEndpoint).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.OpenAiDeployment).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.ProtectedOpenAiApiKey).HasMaxLength(4000).IsRequired();
+            entity.Property(configuration => configuration.ImageEndpoint).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.ImageDeployment).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.ImageApiVersion).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.ImageQuality).HasMaxLength(20).IsRequired();
+            entity.Property(configuration => configuration.ProtectedImageApiKey).HasMaxLength(4000).IsRequired();
         });
     }
 }

@@ -23,16 +23,22 @@ public interface IAzureFoundryImageGenerator
     string Quality { get; }
     Task<GeneratedImage> GenerateAsync(
         string prompt,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default);
     Task<GeneratedImage> EditAsync(
         string prompt,
         Stream sourceImage,
         string sourceContentType,
         string sourceFileName,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default);
     Task<GeneratedImage> GenerateFromReferencesAsync(
         string prompt,
         IReadOnlyList<ReferenceImageInput> referenceImages,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default);
 }
 
@@ -76,6 +82,8 @@ public sealed class AzureFoundryImageGenerator(
 
     public async Task<GeneratedImage> GenerateAsync(
         string prompt,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
@@ -84,14 +92,14 @@ public sealed class AzureFoundryImageGenerator(
         }
 
         var endpoint = Endpoint.TrimEnd('/');
-        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(Deployment)}/images/generations?api-version={Uri.EscapeDataString(ApiVersion)}";
+        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/images/generations?api-version={Uri.EscapeDataString(ApiVersion)}";
         using var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
         request.Headers.Add("api-key", ApiKey);
         request.Content = JsonContent.Create(new
         {
             prompt,
             n = 1,
-            size = "1024x1024",
+            size,
             quality = Quality,
             output_format = "png"
         });
@@ -116,7 +124,7 @@ public sealed class AzureFoundryImageGenerator(
                 Convert.FromBase64String(base64Element.GetString()!),
                 "image/png",
                 ".png",
-                Deployment,
+                deployment,
                 Quality,
                 revisedPrompt);
         }
@@ -131,7 +139,7 @@ public sealed class AzureFoundryImageGenerator(
             var extension = contentType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase)
                 ? ".jpg"
                 : ".png";
-            return new GeneratedImage(bytes, contentType, extension, Deployment, Quality, revisedPrompt);
+            return new GeneratedImage(bytes, contentType, extension, deployment, Quality, revisedPrompt);
         }
 
         throw new InvalidOperationException("Azure image response did not contain image data.");
@@ -142,6 +150,8 @@ public sealed class AzureFoundryImageGenerator(
         Stream sourceImage,
         string sourceContentType,
         string sourceFileName,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
@@ -150,7 +160,7 @@ public sealed class AzureFoundryImageGenerator(
         }
 
         var endpoint = Endpoint.TrimEnd('/');
-        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(Deployment)}/images/edits?api-version={Uri.EscapeDataString(ApiVersion)}";
+        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/images/edits?api-version={Uri.EscapeDataString(ApiVersion)}";
         using var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
         request.Headers.Add("api-key", ApiKey);
         using var form = new MultipartFormDataContent();
@@ -159,7 +169,7 @@ public sealed class AzureFoundryImageGenerator(
         form.Add(imageContent, "image", sourceFileName);
         form.Add(new StringContent(prompt), "prompt");
         form.Add(new StringContent("1"), "n");
-        form.Add(new StringContent("1024x1024"), "size");
+        form.Add(new StringContent(size), "size");
         form.Add(new StringContent(Quality), "quality");
         form.Add(new StringContent("png"), "output_format");
         request.Content = form;
@@ -172,12 +182,14 @@ public sealed class AzureFoundryImageGenerator(
                 $"Azure image edit failed ({(int)response.StatusCode}): {GetErrorMessage(responseBody)}");
         }
 
-        return ParseGeneratedImage(responseBody);
+        return ParseGeneratedImage(responseBody, deployment);
     }
 
     public async Task<GeneratedImage> GenerateFromReferencesAsync(
         string prompt,
         IReadOnlyList<ReferenceImageInput> referenceImages,
+        string size,
+        string deployment,
         CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
@@ -190,7 +202,7 @@ public sealed class AzureFoundryImageGenerator(
         }
 
         var endpoint = Endpoint.TrimEnd('/');
-        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(Deployment)}/images/edits?api-version={Uri.EscapeDataString(ApiVersion)}";
+        var requestUri = $"{endpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/images/edits?api-version={Uri.EscapeDataString(ApiVersion)}";
         using var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
         request.Headers.Add("api-key", ApiKey);
         using var form = new MultipartFormDataContent();
@@ -202,7 +214,7 @@ public sealed class AzureFoundryImageGenerator(
         }
         form.Add(new StringContent(prompt), "prompt");
         form.Add(new StringContent("1"), "n");
-        form.Add(new StringContent("1024x1024"), "size");
+        form.Add(new StringContent(size), "size");
         form.Add(new StringContent(Quality), "quality");
         form.Add(new StringContent("png"), "output_format");
         request.Content = form;
@@ -215,10 +227,10 @@ public sealed class AzureFoundryImageGenerator(
                 $"Azure reference image generation failed ({(int)response.StatusCode}): {GetErrorMessage(responseBody)}");
         }
 
-        return ParseGeneratedImage(responseBody);
+        return ParseGeneratedImage(responseBody, deployment);
     }
 
-    private GeneratedImage ParseGeneratedImage(string responseBody)
+    private GeneratedImage ParseGeneratedImage(string responseBody, string deployment)
     {
         using var document = JsonDocument.Parse(responseBody);
         var image = document.RootElement.GetProperty("data")[0];
@@ -232,7 +244,7 @@ public sealed class AzureFoundryImageGenerator(
                 Convert.FromBase64String(base64Element.GetString()!),
                 "image/png",
                 ".png",
-                Deployment,
+                deployment,
                 Quality,
                 revisedPrompt);
         }

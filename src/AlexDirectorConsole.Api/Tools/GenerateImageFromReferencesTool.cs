@@ -13,9 +13,10 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
     public bool IsAvailable(DirectorToolContext context) => context.ImageGenerator.IsConfigured;
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<string, string, string, CancellationToken, Task<string>>)(async (
+        (Func<string, string, string, string, CancellationToken, Task<string>>)(async (
             imagePrompt,
             referenceImageAssetIds,
+            referenceImageDescriptions,
             resourceName,
             cancellationToken) =>
         {
@@ -39,6 +40,11 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
             if (ids.Length == 0)
             {
                 throw new ArgumentException("首帧生成必须提供至少一个真实参考图片资产 ID。", nameof(referenceImageAssetIds));
+            }
+            var descriptions = ParseDescriptions(referenceImageDescriptions);
+            if (descriptions.Length != ids.Length)
+            {
+                throw new ArgumentException("referenceImageDescriptions 必须是与参考图 ID 同序、同数量的 JSON 字符串数组。", nameof(referenceImageDescriptions));
             }
 
             var assets = await context.DbContext.Assets
@@ -67,15 +73,25 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
                 stage = "tool.started",
                 message = $"Agent 正在使用 {assets.Count} 张人物/场景/道具参考图生成首帧（{context.ImageGenerator.Quality}）"
             }, cancellationToken);
+            var describedPrompt = $"""
+                参考图说明（严格按上传顺序对应）：
+                {string.Join(Environment.NewLine, descriptions.Select((description, index) => $"- 参考图 {index + 1}：{description}"))}
+
+                生成要求：
+                {prompt}
+                """;
             var generatedImage = await context.ImageGenerator.GenerateFromReferencesAsync(
-                prompt,
+                describedPrompt,
                 referenceImages,
+                context.ImageSize,
+                context.ImageDeployment,
                 cancellationToken);
             var imageAsset = await ImageAssetWriter.SaveAsync(context, name, generatedImage, cancellationToken);
             var versionCount = await context.DbContext.Assets.CountAsync(
                 asset => asset.ResourceId == imageAsset.ResourceId,
                 cancellationToken);
             context.RevisedAssets.Add(imageAsset);
+            context.ImagePrompts.Add(new("参考图生成图片", imageAsset.Name, describedPrompt));
             await context.WriteEventAsync(new
             {
                 type = "process",
@@ -84,16 +100,35 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
                 data = new
                 {
                     referenceAssets = assets.Select(asset => AssetResponse.FromAsset(asset)),
-                    asset = AssetResponse.FromAsset(imageAsset, versionCount)
+                    asset = AssetResponse.FromAsset(imageAsset, versionCount),
+                    imagePrompt = describedPrompt
                 }
             }, cancellationToken);
             return JsonSerializer.Serialize(new
             {
                 asset = AssetResponse.FromAsset(imageAsset, versionCount),
-                referenceAssets = assets.Select(AssetResponse.FromAsset)
+                referenceAssets = assets.Select(AssetResponse.FromAsset),
+                imagePrompt = describedPrompt
             }, context.JsonOptions);
         }),
         name: Name,
-        description: "使用明确选择的人物、场景、道具图片资产作为多张真实参考图生成 shot 首帧。不能用纯文本替代参考图；referenceImageAssetIds 用逗号分隔。",
+        description: "使用明确选择的人物、场景、道具图片资产生成 shot 首帧，并按当前项目画幅输出。referenceImageAssetIds 用逗号分隔；referenceImageDescriptions 必须是同序 JSON 字符串数组，逐项明确每张参考图是什么、对应哪个人物/场景/道具以及要继承的视觉内容。返回的 imagePrompt 是包含全部逐图说明、实际提交给图片模型的最终完整提示词；系统会将其完整输出到最终回复，不得省略或改写。",
         serializerOptions: context.JsonOptions);
+
+    private static string[] ParseDescriptions(string value)
+    {
+        try
+        {
+            var descriptions = JsonSerializer.Deserialize<string[]>(value) ?? [];
+            if (descriptions.Any(description => string.IsNullOrWhiteSpace(description) || description.Length > 500))
+            {
+                throw new ArgumentException("每条参考图说明必须非空且不能超过 500 个字符。", nameof(value));
+            }
+            return descriptions.Select(description => description.Trim()).ToArray();
+        }
+        catch (JsonException exception)
+        {
+            throw new ArgumentException("referenceImageDescriptions 必须是 JSON 字符串数组。", nameof(value), exception);
+        }
+    }
 }

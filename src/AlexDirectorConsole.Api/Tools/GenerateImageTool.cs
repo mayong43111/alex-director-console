@@ -13,9 +13,10 @@ public sealed class GenerateImageTool : IDirectorTool
     public bool IsAvailable(DirectorToolContext context) => context.ImageGenerator.IsConfigured;
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<string, string, CancellationToken, Task<string>>)(async (
+        (Func<string, string, string, CancellationToken, Task<string>>)(async (
             imagePrompt,
             resourceName,
+            imagePurpose,
             cancellationToken) =>
         {
             var prompt = imagePrompt.Trim();
@@ -33,12 +34,16 @@ public sealed class GenerateImageTool : IDirectorTool
             {
                 type = "process",
                 stage = "tool.started",
-                message = $"Agent 正在使用 {context.ImageGenerator.Deployment} 生成图片（{context.ImageGenerator.Quality}）"
+                message = $"Agent 正在使用 {context.ImageDeployment} 生成图片（{context.ImageGenerator.Quality}）"
             }, cancellationToken);
             GeneratedImage generatedImage;
             try
             {
-                generatedImage = await context.ImageGenerator.GenerateAsync(prompt, cancellationToken);
+                generatedImage = await context.ImageGenerator.GenerateAsync(
+                    prompt,
+                    ImageOutputSize.Resolve(imagePurpose, context.ImageSize),
+                    context.ImageDeployment,
+                    cancellationToken);
             }
             catch (Exception exception)
             {
@@ -59,6 +64,7 @@ public sealed class GenerateImageTool : IDirectorTool
             {
                 context.RevisedAssets.Add(imageAsset);
             }
+            context.ImagePrompts.Add(new("生成图片", imageAsset.Name, prompt));
             await context.WriteEventAsync(new
             {
                 type = "process",
@@ -68,12 +74,17 @@ public sealed class GenerateImageTool : IDirectorTool
                 {
                     asset = AssetResponse.FromAsset(imageAsset, versionCount),
                     deployment = generatedImage.Deployment,
-                    quality = generatedImage.Quality
+                    quality = generatedImage.Quality,
+                    imagePrompt = prompt
                 }
             }, cancellationToken);
-            return JsonSerializer.Serialize(AssetResponse.FromAsset(imageAsset, versionCount), context.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                asset = AssetResponse.FromAsset(imageAsset, versionCount),
+                imagePrompt = prompt
+            }, context.JsonOptions);
         }),
         name: Name,
-        description: "使用 Azure Foundry 的 gpt-image-2 部署生成一张 1024x1024 图片并保存为项目素材。默认质量为 medium。导演要求生成、绘制或出图时调用。",
+        description: "使用 Azure Foundry 的 gpt-image-2 部署生成图片并保存。imagePurpose 必须说明用途：人物三视图、人物/场景/道具设定图或其他视觉参考素材使用 asset（固定 1:1）；shot 首帧、关键帧、分镜图及成片画面使用 project-frame（遵循项目画幅）。默认质量为 medium。返回实际提交给图片模型的完整 imagePrompt；系统会将其完整输出到最终回复，不得省略或改写。",
         serializerOptions: context.JsonOptions);
 }

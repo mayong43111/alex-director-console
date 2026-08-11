@@ -18,8 +18,11 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Server,
+  Settings2,
   Upload,
   Users,
+  Video,
   WandSparkles,
   X,
   type LucideIcon,
@@ -43,7 +46,42 @@ interface AgentStatus {
 interface Project {
   id: string
   name: string
+  description: string
   createdAt: string
+  formatPreset: string
+  outputWidth: number
+  outputHeight: number
+  previewResolution: string
+  languageModel: string
+  imageModel: string
+  videoModel: string
+}
+
+interface ProjectRuntimeConfiguration {
+  projectId: string
+  vmHost: string
+  vmPort: number
+  vmUsername: string
+  sshPrivateKeyPath: string
+  comfyUiPath: string
+  comfyUiPythonPath: string
+  comfyUiPort: number
+  localProxyPort: number
+  workflowDirectory: string
+  outputDirectory: string
+  updatedAtUtc: string
+}
+
+interface GlobalFoundryConfiguration {
+  openAiEndpoint: string
+  openAiDeployment: string
+  openAiApiKeyConfigured: boolean
+  imageEndpoint: string
+  imageDeployment: string
+  imageApiVersion: string
+  imageQuality: 'low' | 'medium' | 'high'
+  imageApiKeyConfigured: boolean
+  updatedAtUtc: string
 }
 
 interface ConversationMessageRecord {
@@ -92,6 +130,13 @@ interface AssetRecord {
   contentUrl: string
 }
 
+interface ShotAssetLinkRecord {
+  id: string
+  role: 'first-frame' | 'last-frame' | 'reference' | 'video' | 'other'
+  createdAtUtc: string
+  asset: AssetRecord
+}
+
 interface SkillDefinitionRecord {
   id: string
   name: string
@@ -99,6 +144,9 @@ interface SkillDefinitionRecord {
   version: string
   isEnabled: boolean
   isSystem: boolean
+  title: string
+  allowedTools: string[]
+  content: string
 }
 
 interface ScriptEntityRecord {
@@ -141,6 +189,49 @@ interface SkillRunRecord {
 }
 
 const projectStorageKey = 'alex-director-console.projects'
+const defaultProjectSettings = {
+  description: '',
+  formatPreset: '16:9',
+  outputWidth: 1920,
+  outputHeight: 1080,
+  previewResolution: '960x540',
+  languageModel: 'gpt-5.4',
+  imageModel: 'gpt-image-2',
+  videoModel: '',
+}
+const defaultRuntimeConfiguration: ProjectRuntimeConfiguration = {
+  projectId: '',
+  vmHost: '',
+  vmPort: 22,
+  vmUsername: 'azureuser',
+  sshPrivateKeyPath: '%USERPROFILE%\\.ssh\\id_rsa',
+  comfyUiPath: '/home/azureuser/ComfyUI',
+  comfyUiPythonPath: '/home/azureuser/envs/comfy311/bin/python',
+  comfyUiPort: 8188,
+  localProxyPort: 8188,
+  workflowDirectory: '/home/azureuser/ComfyUI/user/default/workflows',
+  outputDirectory: '/home/azureuser/ComfyUI/output',
+  updatedAtUtc: '',
+}
+const defaultFoundryConfiguration: GlobalFoundryConfiguration = {
+  openAiEndpoint: '',
+  openAiDeployment: 'gpt-5.4',
+  openAiApiKeyConfigured: false,
+  imageEndpoint: '',
+  imageDeployment: 'gpt-image-2',
+  imageApiVersion: '2025-04-01-preview',
+  imageQuality: 'medium',
+  imageApiKeyConfigured: false,
+  updatedAtUtc: '',
+}
+const projectFormatPresets = [
+  { id: '16:9', label: '16:9 · 1920×1080', width: 1920, height: 1080, imageSize: '1536x1024' },
+  { id: '9:16', label: '9:16 · 1080×1920', width: 1080, height: 1920, imageSize: '1024x1536' },
+  { id: '2.39:1', label: '2.39:1 · 2048×858', width: 2048, height: 858, imageSize: '1536x1024' },
+  { id: '1:1', label: '1:1 · 1080×1080', width: 1080, height: 1080, imageSize: '1024x1024' },
+  { id: '4:3', label: '4:3 · 1440×1080', width: 1440, height: 1080, imageSize: '1536x1024' },
+  { id: 'custom', label: '自定义', width: 1920, height: 1080, imageSize: '1536x1024' },
+] as const
 const mobilePanels: Array<{ id: MobilePanel; label: string }> = [
   { id: 'assets', label: '资产' },
   { id: 'director', label: '导演台' },
@@ -153,10 +244,12 @@ const assetSections: Array<{
   label: string
   accept: string
   icon: LucideIcon
+  contentTypePrefix?: string
 }> = [
   { id: 'scripts', type: 'script', label: '剧本', accept: '.md,.txt,.pdf,.doc,.docx', icon: FileText },
   { id: 'analyses', type: 'analysis', label: '分析', accept: '.md,.json', icon: FileSearch },
-  { id: 'media', type: 'media', label: '素材', accept: 'image/*,video/*,audio/*', icon: Images },
+  { id: 'images', type: 'media', label: '图片素材', accept: 'image/*', icon: Images, contentTypePrefix: 'image/' },
+  { id: 'videos', type: 'media', label: '视频素材', accept: 'video/*', icon: Video, contentTypePrefix: 'video/' },
   { id: 'characters', type: 'character', label: '人物', accept: '.md,image/*,.pdf', icon: Users },
   { id: 'scenes', type: 'scene', label: '场景', accept: '.md,image/*,video/*,.pdf', icon: MapPinned },
   { id: 'props', type: 'prop', label: '道具', accept: '.md,image/*,.pdf', icon: Box },
@@ -184,10 +277,52 @@ function formatDate(value: string) {
 function loadProjects(): Project[] {
   try {
     const storedProjects = localStorage.getItem(projectStorageKey)
-    return storedProjects ? (JSON.parse(storedProjects) as Project[]) : []
+    const parsedProjects = storedProjects ? (JSON.parse(storedProjects) as Partial<Project>[]) : []
+    return parsedProjects
+      .filter((project): project is Partial<Project> & Pick<Project, 'id' | 'name' | 'createdAt'> =>
+        Boolean(project.id && project.name && project.createdAt))
+      .map((project) => ({ ...defaultProjectSettings, ...project }))
   } catch {
     return []
   }
+}
+
+async function upsertProject(project: Project, signal?: AbortSignal): Promise<Project> {
+  const response = await fetch(`/api/projects/${project.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project),
+    signal,
+  })
+  if (!response.ok) throw new Error('项目保存失败')
+  return response.json() as Promise<Project>
+}
+
+function greatestCommonDivisor(left: number, right: number): number {
+  return right === 0 ? left : greatestCommonDivisor(right, left % right)
+}
+
+function getProjectFormat(project: Project) {
+  const preset = projectFormatPresets.find((item) => item.id === project.formatPreset)
+    ?? projectFormatPresets[0]
+  const divisor = greatestCommonDivisor(project.outputWidth, project.outputHeight)
+  return {
+    aspectRatio: project.formatPreset === 'custom'
+      ? `${project.outputWidth / divisor}:${project.outputHeight / divisor}`
+      : preset.id,
+    resolution: `${project.outputWidth}x${project.outputHeight}`,
+    imageSize: project.outputWidth === project.outputHeight
+      ? '1024x1024'
+      : project.outputWidth > project.outputHeight ? '1536x1024' : '1024x1536',
+  }
+}
+
+function getPreviewResolutionOptions(formatPreset: string, outputWidth: number, outputHeight: number) {
+  if (outputWidth === outputHeight) return ['720x720', '1080x1080']
+  if (outputWidth < outputHeight) return ['540x960', '720x1280', '1080x1920']
+  if (formatPreset === '2.39:1') return ['1024x428', '2048x858']
+  if (formatPreset === '4:3') return ['960x720', '1440x1080']
+  return ['960x540', '1280x720', '1920x1080']
 }
 
 function App() {
@@ -195,16 +330,20 @@ function App() {
   const navigate = useNavigate()
   const conversationRef = useRef<HTMLElement>(null)
   const scrollToLatestAfterLoadRef = useRef(false)
+  const stickToLatestRef = useRef(true)
   const [apiState, setApiState] = useState<ServiceState>('checking')
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
-  const [projects, setProjects] = useState<Project[]>(loadProjects)
+  const [projects, setProjects] = useState<Project[]>([])
+  const [projectsLoading, setProjectsLoading] = useState(true)
   const [newProjectName, setNewProjectName] = useState('')
-  const [activeAssetSection, setActiveAssetSection] = useState('media')
+  const [activeAssetSection, setActiveAssetSection] = useState('images')
   const [expandedAssetSections, setExpandedAssetSections] = useState<Set<string>>(
-    () => new Set(['scripts', 'analyses', 'media']),
+    () => new Set(['scripts', 'analyses', 'images', 'videos']),
   )
   const [directorOrder, setDirectorOrder] = useState('')
   const [selectedModel, setSelectedModel] = useState('gpt-5.4')
+  const [selectingCustomImageModel, setSelectingCustomImageModel] = useState(false)
+  const [selectingCustomVideoModel, setSelectingCustomVideoModel] = useState(false)
   const [attachments, setAttachments] = useState<File[]>([])
   const [messages, setMessages] = useState<ConversationMessageRecord[]>([])
   const [messagesLoading, setMessagesLoading] = useState(false)
@@ -219,6 +358,7 @@ function App() {
   const [assetPreviewText, setAssetPreviewText] = useState<string | null>(null)
   const [assetPreviewLoading, setAssetPreviewLoading] = useState(false)
   const [assetPreviewError, setAssetPreviewError] = useState<string | null>(null)
+  const [shotAssetLinks, setShotAssetLinks] = useState<ShotAssetLinkRecord[]>([])
   const [previewImage, setPreviewImage] = useState<AssetRecord | null>(null)
   const [previewZoom, setPreviewZoom] = useState(1)
   const [previewOffset, setPreviewOffset] = useState({ x: 0, y: 0 })
@@ -226,9 +366,16 @@ function App() {
   const [assetDetailExpanded, setAssetDetailExpanded] = useState(true)
   const [serviceStatusExpanded, setServiceStatusExpanded] = useState(false)
   const [skills, setSkills] = useState<SkillDefinitionRecord[]>([])
+  const [selectedSkill, setSelectedSkill] = useState<SkillDefinitionRecord | null>(null)
   const [selectedSkillRun, setSelectedSkillRun] = useState<SkillRunRecord | null>(null)
   const [skillsLoading, setSkillsLoading] = useState(false)
   const [skillError, setSkillError] = useState<string | null>(null)
+  const [runtimeConfiguration, setRuntimeConfiguration] = useState(defaultRuntimeConfiguration)
+  const [runtimeConfigurationState, setRuntimeConfigurationState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
+  const [foundryConfiguration, setFoundryConfiguration] = useState(defaultFoundryConfiguration)
+  const [openAiApiKey, setOpenAiApiKey] = useState('')
+  const [imageApiKey, setImageApiKey] = useState('')
+  const [foundryConfigurationState, setFoundryConfigurationState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>('director')
   const projectRoute = matchPath('/projects/:projectId/*', location.pathname)
     ?? matchPath('/projects/:projectId', location.pathname)
@@ -236,20 +383,33 @@ function App() {
     (project) => project.id === projectRoute?.params.projectId,
   )
   const sidebarMode = location.pathname === `/projects/${projectRoute?.params.projectId}/skills`
-    ? 'skills'
-    : 'assets'
+    || location.pathname === `/projects/${projectRoute?.params.projectId}/configuration`
+    ? 'configuration'
+    : location.pathname === `/projects/${projectRoute?.params.projectId}/settings`
+      ? 'settings'
+      : 'assets'
   const selectedAssetSection =
     assetSections.find((section) => section.id === activeAssetSection) ?? assetSections[0]
   const groupedAssetSections = assetSections.filter((section) => groupedAssetSectionIds.has(section.id))
   const isGroupedAssetSection = groupedAssetSectionIds.has(selectedAssetSection.id)
   const visibleAssets = assets
-    .filter((asset) => asset.type === selectedAssetSection.type)
+    .filter((asset) => asset.type === selectedAssetSection.type
+      && (!selectedAssetSection.contentTypePrefix
+        || asset.contentType.startsWith(selectedAssetSection.contentTypePrefix)))
     .sort((left, right) => selectedAssetSection.type === 'shot'
       ? left.name.localeCompare(right.name, 'zh-CN')
       : new Date(right.createdAtUtc).getTime() - new Date(left.createdAtUtc).getTime())
   const groupedAssetCount = assets.filter((asset) =>
     groupedAssetSections.some((section) => section.type === asset.type)).length
   const mobilePanelIndex = mobilePanels.findIndex((panel) => panel.id === mobilePanel)
+  const projectFormat = selectedProject ? getProjectFormat(selectedProject) : null
+  const previewResolutionOptions = selectedProject
+    ? getPreviewResolutionOptions(
+        selectedProject.formatPreset,
+        selectedProject.outputWidth,
+        selectedProject.outputHeight,
+      )
+    : []
 
   const resetImagePreview = () => {
     setPreviewZoom(1)
@@ -282,10 +442,12 @@ function App() {
 
   useEffect(() => {
     if (!previewImage) return
+    const isImagePreview = previewImage.contentType.startsWith('image/')
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeImagePreview()
+      if (!isImagePreview) return
       if (event.key === '+' || event.key === '=') changePreviewZoom(previewZoom + 0.25)
       if (event.key === '-') changePreviewZoom(previewZoom - 0.25)
       if (event.key === '0') resetImagePreview()
@@ -325,7 +487,54 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const controller = new AbortController()
+    const localProjects = loadProjects()
+
+    const loadPersistedProjects = async () => {
+      try {
+        const response = await fetch('/api/projects', { signal: controller.signal })
+        if (!response.ok) throw new Error('项目列表加载失败')
+
+        if (localProjects.length > 0) {
+          await Promise.all(localProjects.map((project) => upsertProject(project, controller.signal)))
+          localStorage.removeItem(projectStorageKey)
+        }
+
+        const refreshedResponse = localProjects.length > 0
+          ? await fetch('/api/projects', { signal: controller.signal })
+          : response
+        if (!refreshedResponse.ok) throw new Error('项目列表加载失败')
+        setProjects(await refreshedResponse.json() as Project[])
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setProjects(localProjects)
+        console.warn('后端项目加载失败，暂时使用浏览器本地项目', error)
+      } finally {
+        if (!controller.signal.aborted) setProjectsLoading(false)
+      }
+    }
+
+    void loadPersistedProjects()
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (projectsLoading || !selectedProject) return
+    const timeoutId = window.setTimeout(() => {
+      void upsertProject(selectedProject).catch((error) => {
+        console.warn('项目设置保存失败', error)
+      })
+    }, 400)
+    return () => window.clearTimeout(timeoutId)
+  }, [projectsLoading, selectedProject])
+
+  useEffect(() => {
     if (!selectedProject) return
+
+    setSelectingCustomImageModel(false)
+    setSelectingCustomVideoModel(false)
+    setRuntimeConfigurationState('loading')
+    setFoundryConfigurationState('loading')
 
     const controller = new AbortController()
     setAssets([])
@@ -349,8 +558,98 @@ function App() {
         if (!controller.signal.aborted) setAssetsLoading(false)
       })
 
+    fetch('/api/system/runtime-configuration', { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error('VM 配置加载失败')
+        return response.json() as Promise<ProjectRuntimeConfiguration>
+      })
+      .then((configuration) => {
+        setRuntimeConfiguration(configuration.vmHost
+          ? configuration
+          : defaultRuntimeConfiguration)
+        setRuntimeConfigurationState('idle')
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setRuntimeConfigurationState('error')
+      })
+
+    fetch('/api/system/foundry-configuration', { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error('Azure Foundry 配置加载失败')
+        return response.json() as Promise<GlobalFoundryConfiguration>
+      })
+      .then((configuration) => {
+        setFoundryConfiguration(configuration)
+        setOpenAiApiKey('')
+        setImageApiKey('')
+        setFoundryConfigurationState('idle')
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setFoundryConfigurationState('error')
+      })
+
     return () => controller.abort()
   }, [selectedProject])
+
+  useEffect(() => {
+    if (selectedProject) setSelectedModel(selectedProject.languageModel)
+  }, [selectedProject?.id])
+
+  useEffect(() => {
+    if (!selectedProject) return
+
+    const controller = new AbortController()
+    let refreshing = false
+    const refreshAssets = async () => {
+      if (refreshing || document.visibilityState !== 'visible') return
+      refreshing = true
+      try {
+        const response = await fetch(`/api/projects/${selectedProject.id}/assets`, {
+          signal: controller.signal,
+        })
+        if (!response.ok) return
+        setAssets(await response.json() as AssetRecord[])
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          console.warn('资产列表自动同步失败', error)
+        }
+      } finally {
+        refreshing = false
+      }
+    }
+    const handleVisibilityChange = () => void refreshAssets()
+    const intervalId = window.setInterval(() => void refreshAssets(), 10_000)
+    window.addEventListener('focus', handleVisibilityChange)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      controller.abort()
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', handleVisibilityChange)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [selectedProject])
+
+  useEffect(() => {
+    if (!selectedAsset) return
+
+    const latestAsset = assets.find((asset) => asset.resourceId === selectedAsset.resourceId)
+    if (!latestAsset || latestAsset.id === selectedAsset.id) return
+
+    setSelectedAsset(latestAsset)
+    setAssetVersions([latestAsset])
+    void fetch(`/api/assets/${latestAsset.id}/versions`)
+      .then((response) => {
+        if (!response.ok) throw new Error('资源版本加载失败')
+        return response.json() as Promise<AssetRecord[]>
+      })
+      .then(setAssetVersions)
+      .catch((error: unknown) => {
+        setAssetPreviewError(error instanceof Error ? error.message : '资源版本加载失败')
+      })
+  }, [assets, selectedAsset])
 
   useEffect(() => {
     if (!selectedProject) return
@@ -379,13 +678,15 @@ function App() {
   }, [selectedProject])
 
   useLayoutEffect(() => {
-    if (messagesLoading || !scrollToLatestAfterLoadRef.current || messages.length === 0) return
+    if (messagesLoading || messages.length === 0) return
+    if (!scrollToLatestAfterLoadRef.current && !stickToLatestRef.current) return
 
     const conversation = conversationRef.current
     if (!conversation) return
 
     conversation.scrollTop = conversation.scrollHeight
     scrollToLatestAfterLoadRef.current = false
+    stickToLatestRef.current = true
   }, [messages, messagesLoading])
 
   useEffect(() => {
@@ -399,7 +700,12 @@ function App() {
         if (!response.ok) throw new Error('技能列表加载失败')
         return response.json() as Promise<SkillDefinitionRecord[]>
       })
-      .then(setSkills)
+      .then((loadedSkills) => {
+        setSkills(loadedSkills)
+        setSelectedSkill((current) => current
+          ? loadedSkills.find((skill) => skill.id === current.id) ?? null
+          : null)
+      })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
         setSkillError(error instanceof Error ? error.message : '技能加载失败')
@@ -411,7 +717,7 @@ function App() {
     return () => controller.abort()
   }, [selectedProject])
 
-  function createProject(event: FormEvent<HTMLFormElement>) {
+  async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const name = newProjectName.trim()
     if (!name) return
@@ -420,12 +726,89 @@ function App() {
       id: crypto.randomUUID(),
       name,
       createdAt: new Date().toISOString(),
+      ...defaultProjectSettings,
     }
-    const nextProjects = [project, ...projects]
-    localStorage.setItem(projectStorageKey, JSON.stringify(nextProjects))
-    setProjects(nextProjects)
-    setNewProjectName('')
-    navigate(`/projects/${project.id}`)
+    try {
+      const savedProject = await upsertProject(project)
+      setProjects((current) => [savedProject, ...current])
+      setNewProjectName('')
+      navigate(`/projects/${savedProject.id}`)
+    } catch (error) {
+      console.warn('项目创建失败', error)
+    }
+  }
+
+  function updateProjectFormat(formatPreset: string, outputWidth: number, outputHeight: number) {
+    if (!selectedProject) return
+    const compatiblePreviewResolutions = getPreviewResolutionOptions(
+      formatPreset,
+      outputWidth,
+      outputHeight,
+    )
+    updateProject({
+      formatPreset,
+      outputWidth,
+      outputHeight,
+      previewResolution: compatiblePreviewResolutions.includes(selectedProject.previewResolution)
+        ? selectedProject.previewResolution
+        : compatiblePreviewResolutions[0],
+    })
+  }
+
+  function updateProject(changes: Partial<Project>) {
+    if (!selectedProject) return
+    setProjects((current) => current.map((project) => project.id === selectedProject.id
+      ? { ...project, ...changes }
+      : project))
+  }
+
+  async function saveRuntimeConfiguration() {
+    if (!selectedProject) return
+    setRuntimeConfigurationState('saving')
+    try {
+      const response = await fetch('/api/system/runtime-configuration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(runtimeConfiguration),
+      })
+      if (!response.ok) {
+        const problem = await response.json().catch(() => null) as { error?: string } | null
+        throw new Error(problem?.error ?? 'VM 配置保存失败')
+      }
+      setRuntimeConfiguration(await response.json() as ProjectRuntimeConfiguration)
+      setRuntimeConfigurationState('saved')
+    } catch {
+      setRuntimeConfigurationState('error')
+    }
+  }
+
+  async function saveFoundryConfiguration() {
+    setFoundryConfigurationState('saving')
+    try {
+      const response = await fetch('/api/system/foundry-configuration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...foundryConfiguration,
+          openAiApiKey: openAiApiKey || null,
+          imageApiKey: imageApiKey || null,
+          clearOpenAiApiKey: false,
+          clearImageApiKey: false,
+        }),
+      })
+      if (!response.ok) {
+        const problem = await response.json().catch(() => null) as { error?: string } | null
+        throw new Error(problem?.error ?? 'Azure Foundry 配置保存失败')
+      }
+      setFoundryConfiguration(await response.json() as GlobalFoundryConfiguration)
+      setOpenAiApiKey('')
+      setImageApiKey('')
+      setFoundryConfigurationState('saved')
+      const statusResponse = await fetch('/api/agent/status')
+      if (statusResponse.ok) setAgentStatus(await statusResponse.json() as AgentStatus)
+    } catch {
+      setFoundryConfigurationState('error')
+    }
   }
 
   async function submitDirectorOrder(event: FormEvent<HTMLFormElement>) {
@@ -468,6 +851,8 @@ function App() {
   async function sendDirectorMessage(message: string, model: string, assetId?: string) {
     if (!selectedProject || !agentStatus?.configured) return
 
+    const sourceShot = selectedAsset?.type === 'shot' ? selectedAsset : null
+    stickToLatestRef.current = true
     setSendingMessage(true)
     setConversationError(null)
     const now = new Date().toISOString()
@@ -494,6 +879,7 @@ function App() {
     setMessages((current) => [...current, temporaryUser, temporaryAssistant])
 
     try {
+      const projectFormat = getProjectFormat(selectedProject)
       const response = await fetch(`/api/projects/${selectedProject.id}/messages/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -501,6 +887,14 @@ function App() {
           message,
           model,
           assetId,
+          projectAspectRatio: projectFormat.aspectRatio,
+          projectResolution: projectFormat.resolution,
+          imageSize: projectFormat.imageSize,
+          projectName: selectedProject.name,
+          projectDescription: selectedProject.description,
+          previewResolution: selectedProject.previewResolution,
+          imageModel: selectedProject.imageModel,
+          videoModel: selectedProject.videoModel,
         }),
       })
       if (!response.ok) {
@@ -556,18 +950,24 @@ function App() {
           }
           if (streamEvent.generatedAssets && streamEvent.generatedAssets.length > 0) {
             const firstAsset = streamEvent.updatedAsset ?? streamEvent.generatedAssets[0]
-            const targetSection = assetSections.find((section) => section.type === firstAsset.type)
+            const targetSection = assetSections.find((section) => section.type === firstAsset.type
+              && (!section.contentTypePrefix
+                || firstAsset.contentType.startsWith(section.contentTypePrefix)))
             setAssets((current) => [
               ...streamEvent.generatedAssets!,
               ...current.filter((asset) =>
                 !streamEvent.generatedAssets!.some((generated) => generated.resourceId === asset.resourceId)),
             ])
-            navigate(`/projects/${selectedProject.id}`)
-            if (targetSection) {
-              setActiveAssetSection(targetSection.id)
-              setExpandedAssetSections((current) => new Set(current).add(targetSection.id))
+            if (sourceShot) {
+              void reviewAsset(sourceShot)
+            } else {
+              navigate(`/projects/${selectedProject.id}`)
+              if (targetSection) {
+                setActiveAssetSection(targetSection.id)
+                setExpandedAssetSections((current) => new Set(current).add(targetSection.id))
+              }
+              void reviewAsset(firstAsset)
             }
-            void reviewAsset(firstAsset)
           } else if (streamEvent.updatedAsset) {
             setAssets((current) => [
               streamEvent.updatedAsset!,
@@ -584,6 +984,8 @@ function App() {
             navigate(`/projects/${selectedProject.id}`)
             setActiveAssetSection('analyses')
             setExpandedAssetSections((current) => new Set(current).add('analyses'))
+          } else if (sourceShot) {
+            void reviewAsset(sourceShot)
           }
         } else if (streamEvent.type === 'error') {
           throw new Error(streamEvent.detail ?? streamEvent.message ?? '执行副导演响应失败')
@@ -657,16 +1059,19 @@ function App() {
   }
 
   async function reviewAsset(asset: AssetRecord) {
-    const section = assetSections.find((item) => item.type === asset.type)
+    const section = assetSections.find((item) => item.type === asset.type
+      && (!item.contentTypePrefix || asset.contentType.startsWith(item.contentTypePrefix)))
     if (section) {
       setActiveAssetSection(section.id)
       setExpandedAssetSections((current) => new Set(current).add(section.id))
     }
     setSelectedAsset(asset)
     setAssetVersions([asset])
+    setSelectedSkill(null)
     setSelectedSkillRun(null)
     setAssetPreviewText(null)
     setAssetPreviewError(null)
+    setShotAssetLinks([])
     setMobilePanel('review')
 
     void fetch(`/api/assets/${asset.id}/versions`)
@@ -678,6 +1083,18 @@ function App() {
       .catch((error: unknown) => {
         setAssetPreviewError(error instanceof Error ? error.message : '资源版本加载失败')
       })
+
+    if (asset.type === 'shot') {
+      void fetch(`/api/assets/${asset.id}/linked-assets`)
+        .then((response) => {
+          if (!response.ok) throw new Error('镜头素材加载失败')
+          return response.json() as Promise<ShotAssetLinkRecord[]>
+        })
+        .then(setShotAssetLinks)
+        .catch((error: unknown) => {
+          setAssetPreviewError(error instanceof Error ? error.message : '镜头素材加载失败')
+        })
+    }
 
     const isTextAsset = asset.type === 'script'
       || asset.type === 'analysis'
@@ -716,6 +1133,7 @@ function App() {
       if (!response.ok) throw new Error('技能状态更新失败')
       const updated = await response.json() as SkillDefinitionRecord
       setSkills((current) => current.map((item) => item.id === updated.id ? updated : item))
+      setSelectedSkill((current) => current?.id === updated.id ? updated : current)
     } catch (error) {
       setSkillError(error instanceof Error ? error.message : '技能状态更新失败')
     }
@@ -737,6 +1155,200 @@ function App() {
   }
 
   const selectedAnalysis = parseSkillAnalysis(selectedSkillRun)
+  const projectSettingsPanel = selectedProject ? (
+    <section className="assets-panel project-settings-panel" aria-labelledby="project-settings-title">
+      <header className="assets-header">
+        <div>
+          <p className="section-label">PROJECT</p>
+          <h2 id="project-settings-title">项目信息</h2>
+        </div>
+        <button className="switch-project" type="button" onClick={() => navigate('/')}>
+          切换
+        </button>
+      </header>
+      <div className="project-settings-form">
+        <section className="project-settings-group">
+          <h3>基本信息</h3>
+          <label htmlFor="project-settings-name">项目名称</label>
+          <input
+            id="project-settings-name"
+            value={selectedProject.name}
+            maxLength={100}
+            onChange={(event) => updateProject({ name: event.target.value })}
+          />
+          <label htmlFor="project-settings-description">项目描述</label>
+          <textarea
+            id="project-settings-description"
+            value={selectedProject.description}
+            maxLength={1000}
+            rows={4}
+            placeholder="故事类型、制作目标或项目范围"
+            onChange={(event) => updateProject({ description: event.target.value })}
+          />
+        </section>
+
+        <section className="project-settings-group">
+          <h3>画面与交付</h3>
+          <label htmlFor="project-settings-format">成片画面比例（分辨率）</label>
+          <select
+            id="project-settings-format"
+            value={selectedProject.formatPreset}
+            onChange={(event) => {
+              const preset = projectFormatPresets.find((item) => item.id === event.target.value)
+                ?? projectFormatPresets[0]
+              updateProjectFormat(
+                preset.id,
+                preset.id === 'custom' ? selectedProject.outputWidth : preset.width,
+                preset.id === 'custom' ? selectedProject.outputHeight : preset.height,
+              )
+            }}
+          >
+            {projectFormatPresets.map((preset) => (
+              <option value={preset.id} key={preset.id}>{preset.label}</option>
+            ))}
+          </select>
+          {selectedProject.formatPreset === 'custom' && (
+            <div className="project-resolution-inputs">
+              <input
+                type="number"
+                min="64"
+                max="8192"
+                step="2"
+                value={selectedProject.outputWidth}
+                aria-label="画面宽度"
+                onChange={(event) => updateProjectFormat(
+                  'custom',
+                  Math.min(8192, Math.max(64, Number(event.target.value))),
+                  selectedProject.outputHeight,
+                )}
+              />
+              <span aria-hidden="true">×</span>
+              <input
+                type="number"
+                min="64"
+                max="8192"
+                step="2"
+                value={selectedProject.outputHeight}
+                aria-label="画面高度"
+                onChange={(event) => updateProjectFormat(
+                  'custom',
+                  selectedProject.outputWidth,
+                  Math.min(8192, Math.max(64, Number(event.target.value))),
+                )}
+              />
+            </div>
+          )}
+          <label htmlFor="project-settings-preview-resolution">快速拉片分辨率</label>
+          <select
+            id="project-settings-preview-resolution"
+            value={previewResolutionOptions.includes(selectedProject.previewResolution)
+              ? selectedProject.previewResolution
+              : previewResolutionOptions[0]}
+            onChange={(event) => updateProject({ previewResolution: event.target.value })}
+          >
+            {previewResolutionOptions.map((resolution) => (
+              <option value={resolution} key={resolution}>{resolution.replace('x', ' × ')}</option>
+            ))}
+          </select>
+        </section>
+
+        <section className="project-settings-group">
+          <h3>生成模型</h3>
+          <label htmlFor="project-settings-language-model">语言模型</label>
+          <select
+            id="project-settings-language-model"
+            value={selectedProject.languageModel}
+            onChange={(event) => {
+              updateProject({ languageModel: event.target.value })
+              setSelectedModel(event.target.value)
+            }}
+          >
+            <option value="gpt-5.4">GPT-5.4</option>
+            <option value="gpt-5.4-mini">GPT-5.4 mini</option>
+            <option value="gpt-4.1">GPT-4.1</option>
+          </select>
+          <label htmlFor="project-settings-image-model">Image 模型</label>
+          <select
+            id="project-settings-image-model"
+            value={!selectingCustomImageModel
+              && selectedProject.imageModel === (agentStatus?.imageDeployment ?? 'gpt-image-2')
+              ? 'configured'
+              : 'custom'}
+            onChange={(event) => {
+              const isCustom = event.target.value === 'custom'
+              setSelectingCustomImageModel(isCustom)
+              if (!isCustom) {
+                updateProject({ imageModel: agentStatus?.imageDeployment ?? 'gpt-image-2' })
+              }
+            }}
+          >
+            <option value="configured">
+              系统配置 · {agentStatus?.imageDeployment ?? 'gpt-image-2'}
+            </option>
+            <option value="custom">自定义 Azure 部署</option>
+          </select>
+          {(selectingCustomImageModel
+            || selectedProject.imageModel !== (agentStatus?.imageDeployment ?? 'gpt-image-2')) && (
+            <>
+              <label htmlFor="project-settings-custom-image-model">图片部署名称</label>
+              <input
+                id="project-settings-custom-image-model"
+                value={selectedProject.imageModel}
+                maxLength={100}
+                placeholder="Azure 部署名称"
+                onChange={(event) => updateProject({ imageModel: event.target.value })}
+              />
+            </>
+          )}
+          <div className="project-setting-readout">
+            <span>模型生成尺寸</span>
+            <strong>{projectFormat?.imageSize.replace('x', ' × ')}</strong>
+          </div>
+
+          <label htmlFor="project-settings-video-model">视频模型</label>
+          <select
+            id="project-settings-video-model"
+            value={selectingCustomVideoModel || selectedProject.videoModel ? 'custom' : 'none'}
+            onChange={(event) => {
+              const isCustom = event.target.value === 'custom'
+              setSelectingCustomVideoModel(isCustom)
+              if (!isCustom) updateProject({ videoModel: '' })
+            }}
+          >
+            <option value="none">未配置</option>
+            <option value="custom">自定义 Azure 部署</option>
+          </select>
+          {(selectingCustomVideoModel || selectedProject.videoModel) && (
+            <>
+              <label htmlFor="project-settings-custom-video-model">视频部署名称</label>
+              <input
+                id="project-settings-custom-video-model"
+                value={selectedProject.videoModel}
+                maxLength={100}
+                placeholder="Azure 部署名称"
+                onChange={(event) => updateProject({ videoModel: event.target.value })}
+              />
+            </>
+          )}
+          <div className="project-setting-readout">
+            <span>视频生成</span>
+            <strong>{selectedProject.videoModel.trim() ? '使用项目部署' : '未配置'}</strong>
+          </div>
+        </section>
+
+      </div>
+    </section>
+  ) : null
+
+  if (projectsLoading) {
+    return (
+      <main className="project-gate">
+        <div className="no-projects">
+          <p>正在加载项目...</p>
+        </div>
+      </main>
+    )
+  }
 
   if (!selectedProject) {
     if (location.pathname !== '/') {
@@ -821,8 +1433,18 @@ function App() {
         </header>
         <div className="sidebar-middle">
           <nav className="icon-menu" aria-label="制作资源与技能">
+            <button
+              type="button"
+              className={sidebarMode === 'settings' ? 'active' : undefined}
+              aria-label="项目信息"
+              aria-pressed={sidebarMode === 'settings'}
+              title="项目信息"
+              onClick={() => navigate(`/projects/${selectedProject.id}/settings`)}
+            >
+              <Settings2 size={19} strokeWidth={1.7} aria-hidden="true" />
+            </button>
             {assetSections
-              .filter((section) => ['scripts', 'media'].includes(section.id))
+              .filter((section) => section.id === 'scripts')
               .map((section) => {
                 const Icon = section.icon
                 const isActive = sidebarMode === 'assets' && selectedAssetSection.id === section.id
@@ -858,6 +1480,28 @@ function App() {
               <Box size={19} strokeWidth={1.7} aria-hidden="true" />
             </button>
             {assetSections
+              .filter((section) => ['images', 'videos'].includes(section.id))
+              .map((section) => {
+                const Icon = section.icon
+                const isActive = sidebarMode === 'assets' && selectedAssetSection.id === section.id
+                return (
+                  <button
+                    type="button"
+                    className={isActive ? 'active' : undefined}
+                    key={section.id}
+                    aria-label={section.label}
+                    aria-pressed={isActive}
+                    title={section.label}
+                    onClick={() => {
+                      setActiveAssetSection(section.id)
+                      navigate(`/projects/${selectedProject.id}`)
+                    }}
+                  >
+                    <Icon size={19} strokeWidth={1.7} aria-hidden="true" />
+                  </button>
+                )
+              })}
+            {assetSections
               .filter((section) => section.id === 'shots')
               .map((section) => {
                 const Icon = section.icon
@@ -881,17 +1525,17 @@ function App() {
               })}
             <button
               type="button"
-              className={sidebarMode === 'skills' ? 'active skill-menu-button' : 'skill-menu-button'}
-              aria-label="技能"
-              aria-pressed={sidebarMode === 'skills'}
-              title="技能管理"
-              onClick={() => navigate(`/projects/${selectedProject.id}/skills`)}
+              className={sidebarMode === 'configuration' ? 'active skill-menu-button' : 'skill-menu-button'}
+              aria-label="系统配置"
+              aria-pressed={sidebarMode === 'configuration'}
+              title="系统配置"
+              onClick={() => navigate(`/projects/${selectedProject.id}/configuration`)}
             >
               <WandSparkles size={19} strokeWidth={1.7} aria-hidden="true" />
             </button>
           </nav>
 
-          {sidebarMode === 'assets' ? (
+          {sidebarMode === 'settings' ? projectSettingsPanel : sidebarMode === 'assets' ? (
           <section className="assets-panel" aria-labelledby="assets-title">
             <header className="assets-header">
               <div>
@@ -938,7 +1582,8 @@ function App() {
                 {(isGroupedAssetSection ? groupedAssetSections : [selectedAssetSection]).map((section) => {
                   const Icon = section.icon
                   const sectionAssets = assets
-                    .filter((asset) => asset.type === section.type)
+                    .filter((asset) => asset.type === section.type
+                      && (!section.contentTypePrefix || asset.contentType.startsWith(section.contentTypePrefix)))
                     .sort((left, right) => section.type === 'shot'
                       ? left.name.localeCompare(right.name, 'zh-CN')
                       : new Date(right.createdAtUtc).getTime() - new Date(left.createdAtUtc).getTime())
@@ -956,7 +1601,16 @@ function App() {
                             aria-pressed={selectedAsset?.id === asset.id}
                             onClick={() => reviewAsset(asset)}
                           >
-                            <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
+                            {asset.contentType.startsWith('image/') ? (
+                              <img
+                                className="asset-row-thumbnail"
+                                src={asset.contentUrl}
+                                alt=""
+                                loading="lazy"
+                              />
+                            ) : (
+                              <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
+                            )}
                             <span>
                               <strong>{asset.name}</strong>
                               <small>
@@ -1025,7 +1679,16 @@ function App() {
                               aria-pressed={selectedAsset?.id === asset.id}
                               onClick={() => reviewAsset(asset)}
                             >
-                              <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
+                              {asset.contentType.startsWith('image/') ? (
+                                <img
+                                  className="asset-row-thumbnail"
+                                  src={asset.contentUrl}
+                                  alt=""
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
+                              )}
                               <span>
                                 <strong>{asset.name}</strong>
                                 <small>
@@ -1048,53 +1711,115 @@ function App() {
             )}
           </section>
           ) : (
-          <section className="assets-panel skills-panel" aria-labelledby="skills-title">
+          <section className="assets-panel project-settings-panel system-configuration-panel" aria-labelledby="system-configuration-title">
             <header className="assets-header">
               <div>
-                <p className="section-label">当前项目</p>
-                <p className="current-project-name">{selectedProject.name}</p>
+                <p className="section-label">GLOBAL</p>
+                <h2 id="system-configuration-title">系统配置</h2>
               </div>
-              <button className="switch-project" type="button" onClick={() => navigate('/')}>
-                切换
-              </button>
             </header>
-            <div className="assets-title-row">
-              <div>
-                <p className="section-label">AGENT CAPABILITIES</p>
-                <h2 id="skills-title">技能</h2>
-              </div>
-              <span className="asset-count">{skills.filter((skill) => skill.isEnabled).length}</span>
+            <div className="project-settings-form">
+              <section className="project-settings-group">
+                <h3>Azure AI Foundry</h3>
+                <label htmlFor="system-openai-endpoint">语言模型 Endpoint</label>
+                <input id="system-openai-endpoint" value={foundryConfiguration.openAiEndpoint} placeholder="https://资源名.openai.azure.com" onChange={(event) => setFoundryConfiguration((current) => ({ ...current, openAiEndpoint: event.target.value }))} />
+                <label htmlFor="system-openai-deployment">语言模型部署</label>
+                <input id="system-openai-deployment" value={foundryConfiguration.openAiDeployment} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, openAiDeployment: event.target.value }))} />
+                <label htmlFor="system-openai-key">语言模型 API Key</label>
+                <input id="system-openai-key" type="password" value={openAiApiKey} autoComplete="new-password" placeholder={foundryConfiguration.openAiApiKeyConfigured ? '已配置，留空则保持不变' : '输入 API Key'} onChange={(event) => setOpenAiApiKey(event.target.value)} />
+
+                <label htmlFor="system-image-endpoint">图片模型 Endpoint</label>
+                <input id="system-image-endpoint" value={foundryConfiguration.imageEndpoint} placeholder="留空则复用语言模型 Endpoint" onChange={(event) => setFoundryConfiguration((current) => ({ ...current, imageEndpoint: event.target.value }))} />
+                <label htmlFor="system-image-deployment">图片模型部署</label>
+                <input id="system-image-deployment" value={foundryConfiguration.imageDeployment} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, imageDeployment: event.target.value }))} />
+                <label htmlFor="system-image-key">图片模型 API Key</label>
+                <input id="system-image-key" type="password" value={imageApiKey} autoComplete="new-password" placeholder={foundryConfiguration.imageApiKeyConfigured ? '已配置，留空则保持不变' : '留空则复用语言模型 API Key'} onChange={(event) => setImageApiKey(event.target.value)} />
+                <label htmlFor="system-image-api-version">图片 API 版本</label>
+                <input id="system-image-api-version" value={foundryConfiguration.imageApiVersion} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, imageApiVersion: event.target.value }))} />
+                <label htmlFor="system-image-quality">默认图片质量</label>
+                <select id="system-image-quality" value={foundryConfiguration.imageQuality} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, imageQuality: event.target.value as GlobalFoundryConfiguration['imageQuality'] }))}>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+                <button className="project-settings-save" type="button" disabled={foundryConfigurationState === 'loading' || foundryConfigurationState === 'saving'} onClick={() => void saveFoundryConfiguration()}>
+                  {foundryConfigurationState === 'saving' ? '保存中…' : '保存 Foundry 配置'}
+                </button>
+                <div className="project-setting-readout">
+                  <span>连接状态</span>
+                  <strong>{foundryConfigurationState === 'error' ? '保存失败' : agentStatus?.configured ? '语言模型已配置' : '语言模型待配置'}</strong>
+                </div>
+              </section>
+
+              <section className="project-settings-group">
+                <h3><Server size={14} aria-hidden="true" /> VM 与 ComfyUI</h3>
+                <label htmlFor="system-vm-host">VM 主机或 IP</label>
+                <input id="system-vm-host" value={runtimeConfiguration.vmHost} placeholder="20.0.0.1" onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, vmHost: event.target.value }))} />
+                <div className="project-resolution-inputs">
+                  <input type="number" min="1" max="65535" value={runtimeConfiguration.vmPort} aria-label="SSH 端口" onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, vmPort: Number(event.target.value) }))} />
+                  <span>用户</span>
+                  <input value={runtimeConfiguration.vmUsername} aria-label="SSH 用户" onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, vmUsername: event.target.value }))} />
+                </div>
+                <label htmlFor="system-ssh-key">本机 SSH 私钥路径</label>
+                <input id="system-ssh-key" value={runtimeConfiguration.sshPrivateKeyPath} onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, sshPrivateKeyPath: event.target.value }))} />
+                <label htmlFor="system-comfy-path">远端 ComfyUI 目录</label>
+                <input id="system-comfy-path" value={runtimeConfiguration.comfyUiPath} onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, comfyUiPath: event.target.value }))} />
+                <label htmlFor="system-python-path">远端 Python</label>
+                <input id="system-python-path" value={runtimeConfiguration.comfyUiPythonPath} onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, comfyUiPythonPath: event.target.value }))} />
+                <div className="project-resolution-inputs">
+                  <input type="number" min="1" max="65535" value={runtimeConfiguration.comfyUiPort} aria-label="远端 ComfyUI 端口" onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, comfyUiPort: Number(event.target.value) }))} />
+                  <span>代理到</span>
+                  <input type="number" min="1" max="65535" value={runtimeConfiguration.localProxyPort} aria-label="本地代理端口" onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, localProxyPort: Number(event.target.value) }))} />
+                </div>
+                <label htmlFor="system-workflow-path">远端 Workflow 目录</label>
+                <input id="system-workflow-path" value={runtimeConfiguration.workflowDirectory} onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, workflowDirectory: event.target.value }))} />
+                <label htmlFor="system-output-path">远端输出目录</label>
+                <input id="system-output-path" value={runtimeConfiguration.outputDirectory} onChange={(event) => setRuntimeConfiguration((current) => ({ ...current, outputDirectory: event.target.value }))} />
+                <button className="project-settings-save" type="button" disabled={runtimeConfigurationState === 'loading' || runtimeConfigurationState === 'saving'} onClick={() => void saveRuntimeConfiguration()}>
+                  {runtimeConfigurationState === 'saving' ? '保存中…' : '保存 VM 配置'}
+                </button>
+                <div className="project-setting-readout">
+                  <span>配置状态</span>
+                  <strong>{runtimeConfigurationState === 'error' ? '保存失败' : runtimeConfiguration.vmHost ? runtimeConfigurationState === 'saved' ? '已保存' : '已配置' : '未配置'}</strong>
+                </div>
+              </section>
+
+              <section className="project-settings-group system-skills-group">
+                <div className="system-section-heading">
+                  <h3>Agent 技能</h3>
+                  <span className="asset-count">{skills.filter((skill) => skill.isEnabled).length}</span>
+                </div>
+                {skillError && <p className="asset-error">{skillError}</p>}
+                {skillsLoading ? (
+                  <div className="asset-empty">
+                    <LoaderCircle className="spin" size={22} aria-hidden="true" />
+                    <p>正在加载技能…</p>
+                  </div>
+                ) : (
+                  <div className="skill-list">
+                    {skills.map((skill) => (
+                      <article className={`skill-card ${selectedSkill?.id === skill.id ? 'active' : ''}`} key={skill.id}>
+                        <header>
+                          <button className="skill-card-select" type="button" aria-pressed={selectedSkill?.id === skill.id} onClick={() => {
+                            setSelectedSkill(skill)
+                            setSelectedSkillRun(null)
+                            setMobilePanel('review')
+                          }}>
+                            <strong>{skill.title}</strong>
+                            <small>{skill.name} · v{skill.version}</small>
+                            <p>{skill.description}</p>
+                          </button>
+                          <label className="skill-switch">
+                            <input type="checkbox" checked={skill.isEnabled} aria-label={`${skill.isEnabled ? '停用' : '启用'}${skill.name}`} onChange={(event) => updateSkill(skill, event.target.checked)} />
+                            <span aria-hidden="true" />
+                          </label>
+                        </header>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
             </div>
-            {skillError && <p className="asset-error">{skillError}</p>}
-            {skillsLoading ? (
-              <div className="asset-empty">
-                <LoaderCircle className="spin" size={22} aria-hidden="true" />
-                <p>正在加载技能…</p>
-              </div>
-            ) : (
-              <div className="skill-list">
-                {skills.map((skill) => (
-                  <article className="skill-card" key={skill.id}>
-                    <header>
-                      <div>
-                        <strong>{skill.name}</strong>
-                        <small>v{skill.version} · {skill.isSystem ? '系统技能' : '项目技能'}</small>
-                      </div>
-                      <label className="skill-switch">
-                        <input
-                          type="checkbox"
-                          checked={skill.isEnabled}
-                          aria-label={`${skill.isEnabled ? '停用' : '启用'}${skill.name}`}
-                          onChange={(event) => updateSkill(skill, event.target.checked)}
-                        />
-                        <span aria-hidden="true" />
-                      </label>
-                    </header>
-                    <p>{skill.description}</p>
-                  </article>
-                ))}
-              </div>
-            )}
           </section>
           )}
         </div>
@@ -1145,6 +1870,12 @@ function App() {
           ref={conversationRef}
           className={`conversation ${messages.length > 0 ? 'has-messages' : ''}`}
           aria-label="导演工作区"
+          onScroll={(event) => {
+            const conversation = event.currentTarget
+            stickToLatestRef.current = conversation.scrollHeight
+              - conversation.scrollTop
+              - conversation.clientHeight < 80
+          }}
         >
           {messagesLoading ? (
             <div className="empty-conversation">
@@ -1297,7 +2028,9 @@ function App() {
 
       <aside className="context-panel">
         <header>
-          <h2>{selectedSkillRun ? '剧本拆解结果' : selectedAsset?.name ?? '当前审阅'}</h2>
+          <h2>{selectedSkillRun
+            ? '剧本拆解结果'
+            : selectedSkill?.title ?? selectedAsset?.name ?? '当前审阅'}</h2>
         </header>
         {selectedSkillRun && selectedAnalysis ? (
           <div className="skill-result">
@@ -1343,6 +2076,16 @@ function App() {
             <WandSparkles size={24} aria-hidden="true" />
             <p>{selectedSkillRun.error ?? '技能结果无法解析'}</p>
           </div>
+        ) : selectedSkill ? (
+          <div className="skill-preview">
+            <div className="skill-preview-summary">
+              <span className={selectedSkill.isEnabled ? 'enabled' : 'disabled'}>
+                {selectedSkill.isEnabled ? '已启用' : '已停用'}
+              </span>
+              <p>{selectedSkill.description}</p>
+            </div>
+            <pre>{selectedSkill.content || '此技能没有可显示的 SKILL.md 内容。'}</pre>
+          </div>
         ) : assetPreviewLoading ? (
           <div className="empty-review">
             <LoaderCircle className="spin" size={24} aria-hidden="true" />
@@ -1377,6 +2120,55 @@ function App() {
                 <small>{formatFileSize(selectedAsset.sizeBytes)}</small>
               </div>
             </div>
+            {selectedAsset.type === 'shot' && (
+              <section className="shot-linked-assets" aria-labelledby="shot-linked-assets-title">
+                <header>
+                  <h3 id="shot-linked-assets-title">镜头素材</h3>
+                  <span>{shotAssetLinks.length}</span>
+                </header>
+                {shotAssetLinks.length > 0 ? (
+                  <div className="shot-linked-assets-grid">
+                    {shotAssetLinks.map((link) => (
+                      <article className="shot-linked-asset" key={link.id}>
+                        {link.asset.contentType.startsWith('image/') ? (
+                          <button
+                            type="button"
+                            className="shot-linked-media"
+                            onClick={() => openImagePreview(link.asset)}
+                            aria-label={`全屏预览${link.asset.name}`}
+                          >
+                            <img src={link.asset.contentUrl} alt={link.asset.name} />
+                          </button>
+                        ) : link.asset.contentType.startsWith('video/') ? (
+                          <button
+                            type="button"
+                            className="shot-linked-media"
+                            onClick={() => openImagePreview(link.asset)}
+                            aria-label={`播放预览${link.asset.name}`}
+                          >
+                            <video src={link.asset.contentUrl} preload="metadata" muted />
+                          </button>
+                        ) : link.asset.contentType.startsWith('audio/') ? (
+                          <audio src={link.asset.contentUrl} controls preload="metadata" />
+                        ) : null}
+                        <div>
+                          <span>{({
+                            'first-frame': '首帧',
+                            'last-frame': '尾帧',
+                            reference: '关键帧 / 参考',
+                            video: '镜头视频',
+                            other: '其他',
+                          } as const)[link.role]}</span>
+                          <strong>{link.asset.name}</strong>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p>暂无关联素材。生成首帧、尾帧或视频后，Agent 会通过技能绑定到这里。</p>
+                )}
+              </section>
+            )}
             {assetPreviewText !== null ? (
               <pre>{assetPreviewText}</pre>
             ) : selectedAsset.contentType.startsWith('image/') ? (
@@ -1420,7 +2212,7 @@ function App() {
             title={assetDetailExpanded ? '收起资源信息' : '展开资源信息'}
             onClick={() => setAssetDetailExpanded((expanded) => !expanded)}
           >
-            <span>{selectedSkillRun ? '技能运行信息' : '当前资源信息'}</span>
+            <span>{selectedSkillRun ? '技能运行信息' : selectedSkill ? '技能信息' : '当前资源信息'}</span>
             {assetDetailExpanded
               ? <ChevronDown size={16} aria-hidden="true" />
               : <ChevronUp size={16} aria-hidden="true" />}
@@ -1434,6 +2226,14 @@ function App() {
                 <div><dt>输入资源</dt><dd>{selectedAsset?.fileName ?? selectedSkillRun.inputAssetId}</dd></div>
                 <div><dt>开始时间</dt><dd>{formatDate(selectedSkillRun.startedAtUtc)}</dd></div>
                 <div><dt>运行 ID</dt><dd>{selectedSkillRun.id}</dd></div>
+              </dl>
+            ) : selectedSkill ? (
+              <dl>
+                <div><dt>名称</dt><dd>{selectedSkill.name}</dd></div>
+                <div><dt>版本</dt><dd>v{selectedSkill.version}</dd></div>
+                <div><dt>类型</dt><dd>{selectedSkill.isSystem ? '系统技能' : '项目技能'}</dd></div>
+                <div><dt>状态</dt><dd>{selectedSkill.isEnabled ? '已启用' : '已停用'}</dd></div>
+                <div><dt>允许工具</dt><dd>{selectedSkill.allowedTools.join('、') || '无'}</dd></div>
               </dl>
             ) : selectedAsset ? (
               <dl>
@@ -1458,62 +2258,72 @@ function App() {
           className="image-lightbox"
           role="dialog"
           aria-modal="true"
-          aria-label={`图片预览：${previewImage.name}`}
+          aria-label={`媒体预览：${previewImage.name}`}
         >
           <header className="image-lightbox-header">
             <div>
               <strong>{previewImage.name}</strong>
-              <span>{Math.round(previewZoom * 100)}%</span>
+              {previewImage.contentType.startsWith('image/') && <span>{Math.round(previewZoom * 100)}%</span>}
             </div>
             <div className="image-lightbox-tools">
-              <button type="button" title="缩小" aria-label="缩小" onClick={() => changePreviewZoom(previewZoom - 0.25)}>
-                <Minus size={18} aria-hidden="true" />
-              </button>
-              <button type="button" title="适应窗口" aria-label="适应窗口" onClick={resetImagePreview}>
-                <Maximize2 size={18} aria-hidden="true" />
-              </button>
-              <button type="button" title="放大" aria-label="放大" onClick={() => changePreviewZoom(previewZoom + 0.25)}>
-                <Plus size={18} aria-hidden="true" />
-              </button>
-              <a href={previewImage.contentUrl} download={previewImage.fileName} title="下载原图" aria-label="下载原图">
+              {previewImage.contentType.startsWith('image/') && (
+                <>
+                  <button type="button" title="缩小" aria-label="缩小" onClick={() => changePreviewZoom(previewZoom - 0.25)}>
+                    <Minus size={18} aria-hidden="true" />
+                  </button>
+                  <button type="button" title="适应窗口" aria-label="适应窗口" onClick={resetImagePreview}>
+                    <Maximize2 size={18} aria-hidden="true" />
+                  </button>
+                  <button type="button" title="放大" aria-label="放大" onClick={() => changePreviewZoom(previewZoom + 0.25)}>
+                    <Plus size={18} aria-hidden="true" />
+                  </button>
+                </>
+              )}
+              <a href={previewImage.contentUrl} download={previewImage.fileName} title="下载文件" aria-label="下载文件">
                 <Download size={18} aria-hidden="true" />
               </a>
-              <button type="button" title="关闭" aria-label="关闭图片预览" onClick={closeImagePreview}>
+              <button type="button" title="关闭" aria-label="关闭媒体预览" onClick={closeImagePreview}>
                 <X size={19} aria-hidden="true" />
               </button>
             </div>
           </header>
-          <div
-            className={`image-lightbox-stage ${previewZoom > 1 ? 'zoomed' : ''}`}
-            onDoubleClick={() => changePreviewZoom(previewZoom === 1 ? 2 : 1)}
-            onWheel={(event) => {
-              event.preventDefault()
-              changePreviewZoom(previewZoom + (event.deltaY < 0 ? 0.25 : -0.25))
-            }}
-            onPointerDown={(event) => {
-              if (previewZoom <= 1) return
-              previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
-              event.currentTarget.setPointerCapture(event.pointerId)
-            }}
-            onPointerMove={(event) => {
-              const drag = previewDragRef.current
-              if (!drag || drag.pointerId !== event.pointerId) return
-              setPreviewOffset((offset) => ({
-                x: offset.x + event.clientX - drag.x,
-                y: offset.y + event.clientY - drag.y,
-              }))
-              previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
-            }}
-            onPointerUp={() => { previewDragRef.current = null }}
-            onPointerCancel={() => { previewDragRef.current = null }}
-          >
-            <img
-              src={previewImage.contentUrl}
-              alt={previewImage.name}
-              draggable={false}
-              style={{ transform: `translate(${previewOffset.x}px, ${previewOffset.y}px) scale(${previewZoom})` }}
-            />
-          </div>
+          {previewImage.contentType.startsWith('video/') ? (
+            <div className="image-lightbox-stage video-lightbox-stage">
+              <video src={previewImage.contentUrl} controls autoPlay preload="metadata" />
+            </div>
+          ) : (
+            <div
+              className={`image-lightbox-stage ${previewZoom > 1 ? 'zoomed' : ''}`}
+              onDoubleClick={() => changePreviewZoom(previewZoom === 1 ? 2 : 1)}
+              onWheel={(event) => {
+                event.preventDefault()
+                changePreviewZoom(previewZoom + (event.deltaY < 0 ? 0.25 : -0.25))
+              }}
+              onPointerDown={(event) => {
+                if (previewZoom <= 1) return
+                previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+                event.currentTarget.setPointerCapture(event.pointerId)
+              }}
+              onPointerMove={(event) => {
+                const drag = previewDragRef.current
+                if (!drag || drag.pointerId !== event.pointerId) return
+                setPreviewOffset((offset) => ({
+                  x: offset.x + event.clientX - drag.x,
+                  y: offset.y + event.clientY - drag.y,
+                }))
+                previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+              }}
+              onPointerUp={() => { previewDragRef.current = null }}
+              onPointerCancel={() => { previewDragRef.current = null }}
+            >
+              <img
+                src={previewImage.contentUrl}
+                alt={previewImage.name}
+                draggable={false}
+                style={{ transform: `translate(${previewOffset.x}px, ${previewOffset.y}px) scale(${previewZoom})` }}
+              />
+            </div>
+          )}
         </div>
       )}
 

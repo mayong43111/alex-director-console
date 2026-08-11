@@ -13,13 +13,13 @@ internal static class ImageAssetWriter
         CancellationToken cancellationToken)
     {
         var assetId = Guid.NewGuid();
-        var canonicalName = $"{resourceName} · AI 图片";
-        var subject = GetResourceSubject(canonicalName);
+        var resourceKey = GetResourceKey(resourceName);
+        var canonicalName = $"{resourceKey} · AI 图片";
         var versions = (await context.DbContext.Assets
                 .Where(asset => asset.ProjectId == context.ProjectId && asset.Type == "media")
                 .ToListAsync(cancellationToken))
-            .Where(asset => GetResourceSubject(asset.Name)
-                .Equals(subject, StringComparison.OrdinalIgnoreCase))
+            .Where(asset => GetResourceKey(asset.Name)
+                .Equals(resourceKey, StringComparison.OrdinalIgnoreCase))
             .OrderBy(asset => asset.Version)
             .ToList();
         var latestVersion = versions.LastOrDefault();
@@ -55,8 +55,18 @@ internal static class ImageAssetWriter
         }
     }
 
-    private static string GetResourceSubject(string value) =>
-        value.Split('·', StringSplitOptions.TrimEntries)[0];
+    private static string GetResourceKey(string value)
+    {
+        var segments = value
+            .Split('·', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        while (segments.Count > 0
+            && segments[^1].Equals("AI 图片", StringComparison.OrdinalIgnoreCase))
+        {
+            segments.RemoveAt(segments.Count - 1);
+        }
+        return string.Join(" · ", segments);
+    }
 
     private static string SanitizeFileName(string value)
     {

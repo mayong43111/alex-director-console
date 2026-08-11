@@ -62,7 +62,7 @@ public sealed class InspectVisualReferencesTool : IDirectorTool
             return JsonSerializer.Serialize(results, context.JsonOptions);
         }),
         name: Name,
-        description: "检查人物、场景、道具的最新设定资源和已有图片候选。生成 shot 首帧前必须调用；任何必要对象没有图片时，先询问导演是否生成缺失参考图。",
+        description: "检查人物、场景、道具的最新设定资源和已有图片候选。默认在生成 shot 首帧前调用；必要对象没有图片时首次需提示导演。导演随后允许不补缺失项，只豁免已列出的缺失对象，仍须返回并尽可能使用其他已有候选；只有导演明确要求所有参考图都不用时，才跳过本检查并改为文字直出。",
         serializerOptions: context.JsonOptions);
 
     private static bool IsSetupAsset(Asset asset) =>

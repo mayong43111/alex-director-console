@@ -7,7 +7,15 @@ public sealed record SendMessageRequest(
     string Message,
     string? Model,
     string? SkillId = null,
-    Guid? AssetId = null);
+    Guid? AssetId = null,
+    string? ProjectAspectRatio = null,
+    string? ProjectResolution = null,
+    string? ImageSize = null,
+    string? ProjectName = null,
+    string? ProjectDescription = null,
+    string? PreviewResolution = null,
+    string? ImageModel = null,
+    string? VideoModel = null);
 
 public sealed record ConversationMessageResponse(
     Guid Id,
@@ -59,7 +67,10 @@ public sealed record SkillDefinitionResponse(
     string Description,
     string Version,
     bool IsEnabled,
-    bool IsSystem);
+    bool IsSystem,
+    string Title,
+    IReadOnlyList<string> AllowedTools,
+    string Content);
 
 public sealed record UpdateSkillRequest(bool IsEnabled);
 
