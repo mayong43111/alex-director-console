@@ -2,8 +2,8 @@
 name: shot-first-frame
 title: 镜头画面生成
 description: Generate and bind one or more shots' first frames, last frames, keyframes, or storyboard images, preserving all available references unless the director explicitly rejects every reference. Use for 首帧、尾帧、关键帧、分镜图 or batch shot image generation.
-version: 1.7.0
-allowed-tools: list_project_resources read_project_resource_contents read_project_resources inspect_visual_references merge_reference_images generate_image generate_image_from_references bind_shot_asset
+version: 1.9.0
+allowed-tools: list_project_resources list_shot_first_frame_status read_project_resource_contents read_project_resources inspect_visual_references merge_reference_images generate_image generate_image_from_references bind_shot_asset
 ---
 # 镜头首帧
 
@@ -13,6 +13,7 @@ allowed-tools: list_project_resources read_project_resource_contents read_projec
 
 ## Procedure
 
+0. 导演询问哪些镜头已有或缺少首帧、首帧完成数量或进度时，必须先调用 `list_shot_first_frame_status`，以持久化的 `first-frame` 绑定和仍存在的图片素材为唯一事实来源，然后直接按工具返回的统计与镜头名称回答。不得根据最近生成图片、聊天记录、生成失败记录或当前选中镜头推断状态。只查询状态时不需要执行后续生成步骤。
 1. 确定目标镜头：
    - 单镜任务且导演指向界面当前 shot：直接使用系统提供的当前 shot ID 和完整正文。
    - 导演指定其他镜头、编号范围、场次或“全部镜头”：调用 `list_project_resources`，以 `resourceType=shot` 和名称条件发现全部目标 shot；再调用 `read_project_resource_contents`，按返回的资产 ID 分批读取每个目标 shot 的完整正文。不得要求导演逐个切换资源或粘贴已有正文。
@@ -34,8 +35,8 @@ allowed-tools: list_project_resources read_project_resource_contents read_projec
 8. 逐镜整理最终生成提示词：除镜头构图、景别、机位、动作、空间、光线、色彩和连续性外，必须为每个实际传入的参考图写一条明确说明。说明包含：该图是什么；对应哪个人物、场景或道具；要继承哪些身份、造型、材质、空间或状态；合并图还要按返回的区域/序号逐项解释内容。不得只写“参考附件”或“保持一致”。
 9. 只要该镜存在任何可用且未被导演明确拒绝的参考图，就调用 `generate_image_from_references`。`referenceImageAssetIds` 与 `referenceImageDescriptions` 必须严格同序、同数量；缺失对象使用步骤 3 的文字设定补充到生成要求中，不得因为部分对象缺图而放弃其他已有参考图。记录工具返回的新媒体资产 ID。
 10. 只有导演明确放弃所有参考图时，才逐镜把 shot 正文与步骤 3 的文字设定整理成完整提示词，调用 `generate_image`，`imagePurpose` 使用 `project-frame`，记录返回的媒体资产 ID。
-11. 每张图片生成成功后，必须立即调用 `bind_shot_asset`：`shotAssetId` 传该镜头的资产 ID；首帧使用 `first-frame`，尾帧使用 `last-frame`，关键帧或分镜图使用 `reference`。单镜任务也应传明确的 shot ID。只有该镜绑定成功后才继续下一镜并最终声明完成。
-12. 系统会在最终回复末尾按镜头逐张原样附加图片工具返回的完整 `imagePrompt`，并标明图片资源和操作类型。Agent 不得手工重复、摘要或改写该提示词；使用参考图时，系统附加的是包含“参考图说明”和“生成要求”的最终实际拼接提示词。
+11. 批量镜头必须严格串行：一次只允许为一个镜头调用一个图片生成工具，不得并行发起多个 `generate_image` 或 `generate_image_from_references`。每张图片生成并成功保存后，工具完成事件必须立即事实输出该镜头完整 `imagePrompt`；随后立即调用 `bind_shot_asset`。`shotAssetId` 传该镜头的资产 ID；首帧使用 `first-frame`，尾帧使用 `last-frame`，关键帧或分镜图使用 `reference`。只有该镜绑定成功后才可开始下一镜并最终声明完成。
+12. 最终回复只汇报实际生成和绑定结果，不得再次重复、摘要或改写已经逐张即时输出的提示词。使用参考图时，即时输出的是包含“参考图说明”和“生成要求”的最终实际拼接提示词。
 
 ## Rules
 
@@ -49,8 +50,8 @@ allowed-tools: list_project_resources read_project_resource_contents read_projec
 - 不要只在回复中说图片属于当前镜头；镜头与素材的关系必须由 `bind_shot_asset` 持久化。
 - 批量任务不得因当前界面只选中一个 shot 而停止；先用资源目录和正文读取工具取得其余目标 shot。
 - 镜头资源只描述拍摄内容，不拥有固定的制作资源依赖；人物、场景、道具及其参考图必须在每次生成前动态发现并选用最新版本。
-- 图片结果与系统自动附加的完整提示词必须同时交付；批量生成时每一张图片都要有自己对应的完整提示词，不能用一份公共摘要代替，也不能重复抄写。
+- 图片结果与完成事件即时输出的完整提示词必须同时交付；批量生成时每一张图片都要有自己对应的完整提示词，不能用一份公共摘要代替，也不能并行或在最终回复重复抄写。
 
 ## Verification
 
-逐镜确认图片工具返回媒体资源及非空 `imagePrompt`，且 `bind_shot_asset` 返回对应 `shotAssetId` 的绑定记录；最终回复须完整包含每张图的该提示词。使用参考图时确认 `referenceAssets` 与逐图说明同序同数量；道具或多人合并图需能从 `merge_reference_images` 返回的 layout 追溯全部源图。只有导演明确放弃所有参考图时才确认使用 `generate_image + project-frame`。批量完成数量必须与目标 shot 数量一致，阻断项需按镜号列出。
+逐镜确认图片工具返回媒体资源及非空 `imagePrompt`、完成事件已立即输出提示词，且 `bind_shot_asset` 返回对应 `shotAssetId` 的绑定记录；确认绑定成功后才开始下一镜。使用参考图时确认 `referenceAssets` 与逐图说明同序同数量；道具或多人合并图需能从 `merge_reference_images` 返回的 layout 追溯全部源图。只有导演明确放弃所有参考图时才确认使用 `generate_image + project-frame`。批量完成数量必须与目标 shot 数量一致，阻断项需按镜号列出。

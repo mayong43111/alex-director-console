@@ -1,15 +1,15 @@
 ---
 name: storyboard-design
 title: 分镜设计
-description: Design and persist production-ready storyboards without embedding mutable production-resource snapshots in each shot. Use when the director asks for 分镜、镜头表、shot list、画面拆分、机位设计、镜头调度 or rough storyboard planning.
-version: 1.2.0
-allowed-tools: read_project_resources write_storyboard
+description: Design, revise, verify, and clean up production-ready storyboards. Use when the director asks for 分镜、镜头表、shot list、画面拆分、机位设计、镜头调度、删除旧分镜、清理 V1、只保留新版 or rough storyboard planning.
+version: 1.4.0
+allowed-tools: list_project_resources read_project_resources write_storyboard delete_project_resource
 ---
 # 分镜设计
 
 ## When to Use
 
-用于把一集、一个场次或一段剧本拆成可执行的分镜稿、镜头表或粗分镜方案。输出必须基于剧本文本以及项目中最新的人物、场景和关键道具设定，不凭空补写剧情事实。
+用于把一集、一个场次或一段剧本拆成可执行的分镜稿、镜头表或粗分镜方案，也用于按导演明确指令清理旧分镜或旧 shot。新分镜输出必须基于剧本文本以及项目中最新的人物、场景和关键道具设定，不凭空补写剧情事实。
 
 ## Required Inputs
 
@@ -19,6 +19,17 @@ allowed-tools: read_project_resources write_storyboard
 - 只有无法从当前资源、导演令、最近对话和项目资源确定目标剧本时，才向导演询问一个必要问题。
 
 ## Procedure
+
+导演要求删除、清理旧分镜或只保留指定版本时，执行清理流程：
+
+1. 只要导演话语包含“删除、删掉、清理、移除、只保留”等处置含义，就先调用 `list_project_resources` 列出 `shot` 资源；用名称、镜号和导演指定的版本识别保留集合与删除集合。不能把导演的话直接当成已完成状态。
+   - “V1 的都删除了”“旧版都删了”这类省略“把”字的口语，默认按立即删除命令处理。
+   - 只有导演明确说“我已经删除、不用操作、只是告知”时才按状态说明处理，但仍须列出资源验证是否确实不存在。
+2. 如果导演已经明确了保留版本，不再要求重复确认。若存在两个同名或无法区分的候选版本，只询问一个必要问题，不得猜测。
+3. 待删除集合非空时，调用一次 `delete_project_resource`，将全部待删除 shot 的资源 ID 以逗号或换行分隔传入；不要逐个调用。集合为空时不得调用删除工具，也不得声称本轮执行过删除。
+4. 再次调用 `list_project_resources`，确认保留集合仍存在、删除集合已消失。只有删除工具成功且复查通过，才汇报“已删除”；目标原本就不存在时，明确汇报“未找到匹配资源，本轮删除 0 项”。
+
+导演要求新建设计或改写分镜时，执行设计流程：
 
 1. 调用 `read_project_resources` 读取目标剧本完整正文。
 2. 调用 `read_project_resources` 读取剧本涉及的人物、场景和关键道具最新设定；不存在的设定应在分镜稿中标记为待确认，不得自行补全。
@@ -53,10 +64,16 @@ allowed-tools: read_project_resources write_storyboard
 ## Pitfalls
 
 - 不因界面未选择资源就立即要求导演重新提供内容；先查阅最近对话和项目资源。
+- 不把“V1 的都删除了”误判为无需操作的状态澄清；默认按删除命令执行查询、删除和复查。
+- 不依据导演口述或对话历史声称资源已删除；“已删除”必须有本轮删除工具结果和复查结果支撑。
+- 导演明确要求清理旧分镜时，不得以“工具不支持删除”为由只做口头标记；使用 `delete_project_resource` 实际删除。
+- 只能删除当前项目中由 `list_project_resources` 返回的资源；不得引用、发现或清理其他项目的资源 ID。
+- 清理时不得删除导演指定保留的 shot，不得把不同分镜版本仅凭创建时间混为一组。
 - 不只输出建议或示例，必须调用 `write_storyboard` 持久化完整稿件。
 - 不把人物设定、场景设定或道具设定中的推测当成剧本事实。
 - 不创建工具未返回的资源，不声称已生成分镜图片。
 
 ## Verification
 
-确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，每个返回项都是独立 `shot` 资源；检查所有剧本场次均被覆盖、镜号无重复，并确认生成的 shot 不含“来源资源”章节或资源 ID 快照。
+- 清理任务：记录删除工具实际返回数量，再次列出 shot，确认待删资源为零且保留版本完整；若初次查询即为零，报告本轮删除 0 项。
+- 设计任务：确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，每个返回项都是独立 `shot` 资源；检查所有剧本场次均被覆盖、镜号无重复，并确认生成的 shot 不含“来源资源”章节或资源 ID 快照。

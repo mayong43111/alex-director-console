@@ -1,12 +1,18 @@
 using System.Text;
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
+using AlexDirectorConsole.Api.Application.Configuration;
 using AlexDirectorConsole.Api.Contracts;
-using Microsoft.EntityFrameworkCore;
+using AlexDirectorConsole.Api.Services;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class AssembleVideoClipsTool : IDirectorTool
+public sealed class AssembleVideoClipsTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter,
+    IRuntimeConfigurationReader configurationReader,
+    IRemoteComfyUiService remoteComfyUiService) : IDirectorTool
 {
     public string Name => "assemble_video_clips";
 
@@ -33,16 +39,18 @@ public sealed class AssembleVideoClipsTool : IDirectorTool
                 throw new ArgumentException("视频宽高必须是有效偶数，且不超过 3840x2160。");
             if (fps is < 12 or > 60) throw new ArgumentException("FPS 必须为 12 到 60。");
 
-            var assets = await context.DbContext.Assets.AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId && ids.Contains(asset.Id))
-                .ToListAsync(cancellationToken);
+            var assets = (await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken))
+                .Where(asset => ids.Contains(asset.Id))
+                .ToList();
             if (assets.Count != ids.Length || assets.Any(asset => !asset.ContentType.StartsWith("video/")))
                 throw new ArgumentException("所有 ID 都必须是当前项目中真实存在的视频资产。", nameof(videoAssetIds));
             var orderedAssets = ids.Select(id => assets.Single(asset => asset.Id == id)).ToArray();
             var clipBytes = new List<byte[]>(orderedAssets.Length);
             foreach (var asset in orderedAssets)
             {
-                await using var stream = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+                await using var stream = await assetReader.OpenReadAsync(context.ProjectId, asset, cancellationToken)
                     ?? throw new FileNotFoundException($"视频文件不存在：{asset.FileName}");
                 await using var buffer = new MemoryStream();
                 await stream.CopyToAsync(buffer, cancellationToken);
@@ -52,8 +60,7 @@ public sealed class AssembleVideoClipsTool : IDirectorTool
                 clipBytes.Add(bytes);
             }
 
-            var configuration = await context.DbContext.ProjectRuntimeConfigurations.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.ProjectId == Guid.Empty, cancellationToken)
+            var configuration = await configurationReader.GetAsync(context.ProjectId, cancellationToken)
                 ?? throw new InvalidOperationException("尚未配置全局 VM。");
             await context.WriteEventAsync(new
             {
@@ -61,9 +68,14 @@ public sealed class AssembleVideoClipsTool : IDirectorTool
                 stage = "video-assembly.started",
                 message = $"Agent 正在拼接 {ids.Length} 个视频片段"
             }, cancellationToken);
-            var generatedVideo = await context.RemoteComfyUiService.AssembleVideoClipsAsync(
+            var generatedVideo = await remoteComfyUiService.AssembleVideoClipsAsync(
                 configuration, clipBytes, width, height, fps, cancellationToken);
-            var videoAsset = await VideoAssetWriter.SaveAsync(context, name, generatedVideo, cancellationToken);
+            var videoAsset = await VideoAssetWriter.SaveAsync(
+                assetWriter,
+                context.ProjectId,
+                name,
+                generatedVideo,
+                cancellationToken);
             context.RevisedAssets.Add(videoAsset);
             await context.WriteEventAsync(new
             {

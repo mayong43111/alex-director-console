@@ -19,6 +19,7 @@ public sealed record ReferenceImageInput(
 public interface IAzureFoundryImageGenerator
 {
     bool IsConfigured { get; }
+    string ApiVersion { get; }
     string Deployment { get; }
     string Quality { get; }
     Task<GeneratedImage> GenerateAsync(
@@ -60,7 +61,7 @@ public sealed class AzureFoundryImageGenerator(
         ?? configuration["AzureOpenAI:ApiKey"]
         ?? string.Empty;
 
-    private string ApiVersion =>
+    public string ApiVersion =>
         Environment.GetEnvironmentVariable("AZURE_IMAGE_API_VERSION")
         ?? configuration["AzureImage:ApiVersion"]
         ?? "2025-04-01-preview";

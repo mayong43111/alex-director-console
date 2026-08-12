@@ -1,12 +1,14 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class BindShotAssetTool : IDirectorTool
+public sealed class BindShotAssetTool(
+    IAssetReader assetReader,
+    IShotAssetBinder shotAssetBinder) : IDirectorTool
 {
     private static readonly HashSet<string> ExclusiveRoles = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -57,23 +59,23 @@ public sealed class BindShotAssetTool : IDirectorTool
                 {
                     throw new ArgumentException("shotAssetId 必须是有效的镜头资产 ID。", nameof(shotAssetId));
                 }
-                shot = await context.DbContext.Assets
-                    .AsNoTracking()
-                    .SingleOrDefaultAsync(item =>
-                        item.Id == parsedShotAssetId
-                        && item.ProjectId == context.ProjectId
-                        && item.Type == "shot",
-                        cancellationToken);
+                shot = await assetReader.GetAsync(
+                    context.ProjectId,
+                    parsedShotAssetId,
+                    cancellationToken);
+                if (shot?.Type != "shot")
+                {
+                    shot = null;
+                }
             }
             if (shot is null)
             {
                 throw new InvalidOperationException("找不到当前项目中的目标镜头；请传入 shotAssetId 或在界面选择镜头。");
             }
-            var asset = await context.DbContext.Assets
-                .AsNoTracking()
-                .SingleOrDefaultAsync(item =>
-                    item.Id == parsedAssetId && item.ProjectId == context.ProjectId,
-                    cancellationToken)
+            var asset = await assetReader.GetAsync(
+                context.ProjectId,
+                parsedAssetId,
+                cancellationToken)
                 ?? throw new InvalidOperationException("找不到当前项目中的目标素材。");
             if (asset.Type != "media" || (!asset.ContentType.StartsWith("image/")
                 && !asset.ContentType.StartsWith("video/")
@@ -82,34 +84,13 @@ public sealed class BindShotAssetTool : IDirectorTool
                 throw new ArgumentException("只能把当前项目中的图片、视频或音频素材绑定到镜头。", nameof(assetId));
             }
 
-            var existing = await context.DbContext.ShotAssetLinks
-                .SingleOrDefaultAsync(link =>
-                    link.ShotResourceId == shot.ResourceId
-                    && link.AssetId == asset.Id
-                    && link.Role == normalizedRole,
-                    cancellationToken);
-            if (existing is null)
-            {
-                if (ExclusiveRoles.Contains(normalizedRole))
-                {
-                    var replacedLinks = await context.DbContext.ShotAssetLinks
-                        .Where(link => link.ShotResourceId == shot.ResourceId
-                            && link.Role == normalizedRole)
-                        .ToListAsync(cancellationToken);
-                    context.DbContext.ShotAssetLinks.RemoveRange(replacedLinks);
-                }
-                existing = new ShotAssetLink
-                {
-                    Id = Guid.NewGuid(),
-                    ProjectId = context.ProjectId,
-                    ShotResourceId = shot.ResourceId,
-                    AssetId = asset.Id,
-                    Role = normalizedRole,
-                    CreatedAtUtc = DateTimeOffset.UtcNow
-                };
-                context.DbContext.ShotAssetLinks.Add(existing);
-                await context.DbContext.SaveChangesAsync(cancellationToken);
-            }
+            var existing = await shotAssetBinder.BindAsync(
+                context.ProjectId,
+                shot.ResourceId,
+                asset.Id,
+                normalizedRole,
+                ExclusiveRoles.Contains(normalizedRole),
+                cancellationToken);
 
             await context.WriteEventAsync(new
             {

@@ -1,22 +1,23 @@
 using AlexDirectorConsole.Api.Models;
+using AlexDirectorConsole.Api.Services;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class RunScriptBreakdownTool : IDirectorTool
+public sealed class RunScriptBreakdownTool(IAgentSkillExecutor skillExecutor) : IDirectorTool
 {
     public string Name => "run_script_breakdown";
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<CancellationToken, Task<string>>)(async cancellationToken =>
+        (Func<string, CancellationToken, Task<string>>)(async (scriptAssetId, cancellationToken) =>
         {
-            if (context.CurrentAsset?.Type != "script")
+            if (!Guid.TryParse(scriptAssetId, out var parsedScriptAssetId))
             {
-                throw new InvalidOperationException("run_script_breakdown 需要界面当前资源为剧本文本。");
+                throw new ArgumentException("scriptAssetId 必须是有效 UUID。", nameof(scriptAssetId));
             }
-            context.Execution = await context.SkillExecutor.ExecuteScriptBreakdownAsync(
+            context.Execution = await skillExecutor.ExecuteScriptBreakdownAsync(
                 context.ProjectId,
-                context.CurrentAsset.Id,
+                parsedScriptAssetId,
                 context.Content,
                 context.RequestedModel,
                 async progress => await context.WriteEventAsync(new
@@ -30,7 +31,7 @@ public sealed class RunScriptBreakdownTool : IDirectorTool
             return BuildSummary(context.Execution.GeneratedAssets, context.Execution.Run.Id);
         }),
         name: Name,
-        description: "分析界面当前选中的剧本，并由 Script Agent 建立分析、人物、场景和关键道具资源。调用时当前资源必须是剧本文本。",
+        description: "分析当前项目中指定的剧本文本，并由 Script Agent 建立分析、人物、场景和关键道具资源。scriptAssetId 可使用界面当前剧本 ID；未选择剧本时，先通过 list_project_resources 定位并用 read_project_resource_contents 读取目标剧本，再传入其 ID。目标必须属于当前项目且类型为 script。",
         serializerOptions: context.JsonOptions);
 
     private static string BuildSummary(IReadOnlyList<Asset> assets, Guid runId)

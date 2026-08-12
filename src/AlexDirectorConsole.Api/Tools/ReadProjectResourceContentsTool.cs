@@ -1,12 +1,12 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class ReadProjectResourceContentsTool : IDirectorTool
+public sealed class ReadProjectResourceContentsTool(IAssetReader assetReader) : IDirectorTool
 {
     public string Name => "read_project_resource_contents";
 
@@ -25,10 +25,11 @@ public sealed class ReadProjectResourceContentsTool : IDirectorTool
                 throw new ArgumentException("至少需要一个有效的资源资产 ID。", nameof(assetIds));
             }
 
-            var assets = await context.DbContext.Assets
-                .AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId && ids.Contains(asset.Id))
-                .ToListAsync(cancellationToken);
+            var assets = (await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken))
+                .Where(asset => ids.Contains(asset.Id))
+                .ToList();
             if (assets.Count != ids.Length)
             {
                 throw new ArgumentException("部分资源不存在或不属于当前项目。", nameof(assetIds));
@@ -43,7 +44,7 @@ public sealed class ReadProjectResourceContentsTool : IDirectorTool
                     throw new ArgumentException($"资源不是可读取的文本：{asset.Name}", nameof(assetIds));
                 }
 
-                await using var source = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+                await using var source = await assetReader.OpenReadAsync(context.ProjectId, asset, cancellationToken)
                     ?? throw new InvalidOperationException($"资源内容不存在：{asset.Name}");
                 using var reader = new StreamReader(source, detectEncodingFromByteOrderMarks: true);
                 results.Add(new

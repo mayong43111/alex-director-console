@@ -53,7 +53,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.ToTable("Assets");
             entity.HasKey(asset => asset.Id);
             entity.HasIndex(asset => new { asset.ProjectId, asset.Type });
-            entity.HasIndex(asset => new { asset.ResourceId, asset.Version }).IsUnique();
+            entity.HasIndex(asset => new { asset.ProjectId, asset.ResourceId, asset.Version }).IsUnique();
             entity.HasIndex(asset => asset.BlobKey).IsUnique();
             entity.Property(asset => asset.Type).HasMaxLength(50).IsRequired();
             entity.Property(asset => asset.Name).HasMaxLength(260).IsRequired();
@@ -100,7 +100,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.ToTable("ShotAssetLinks");
             entity.HasKey(link => link.Id);
             entity.HasIndex(link => new { link.ProjectId, link.ShotResourceId });
-            entity.HasIndex(link => new { link.ShotResourceId, link.AssetId, link.Role }).IsUnique();
+            entity.HasIndex(link => new { link.ProjectId, link.ShotResourceId, link.AssetId, link.Role }).IsUnique();
             entity.Property(link => link.Role).HasMaxLength(40).IsRequired();
         });
 
@@ -108,8 +108,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.ToTable("ProjectRuntimeConfigurations");
             entity.HasKey(configuration => configuration.ProjectId);
+            entity.HasIndex(configuration => configuration.LocalProxyPort)
+                .IsUnique()
+                .HasFilter("\"ProjectId\" <> '00000000-0000-0000-0000-000000000000'");
             entity.Property(configuration => configuration.ProjectId).ValueGeneratedNever();
-            entity.Property(configuration => configuration.VmHost).HasMaxLength(260).IsRequired();
+            entity.Property(configuration => configuration.VmHost).HasMaxLength(260).UseCollation("NOCASE").IsRequired();
             entity.Property(configuration => configuration.VmUsername).HasMaxLength(100).IsRequired();
             entity.Property(configuration => configuration.SshPrivateKeyPath).HasMaxLength(500).IsRequired();
             entity.Property(configuration => configuration.ComfyUiPath).HasMaxLength(500).IsRequired();

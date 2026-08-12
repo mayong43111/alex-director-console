@@ -1,12 +1,12 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class ReadProjectResourcesTool : IDirectorTool
+public sealed class ReadProjectResourcesTool(IAssetReader assetReader) : IDirectorTool
 {
     public string Name => "read_project_resources";
 
@@ -28,10 +28,9 @@ public sealed class ReadProjectResourcesTool : IDirectorTool
                     stage = "tool.started",
                     message = $"Agent 正在读取项目资源：{string.Join("、", names)}"
                 }, cancellationToken);
-                var candidates = await context.DbContext.Assets
-                    .AsNoTracking()
-                    .Where(asset => asset.ProjectId == context.ProjectId)
-                    .ToListAsync(cancellationToken);
+                var candidates = await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken);
                 var matches = candidates
                     .Where(IsTextAsset)
                     .OrderByDescending(asset => asset.CreatedAtUtc)
@@ -44,9 +43,7 @@ public sealed class ReadProjectResourcesTool : IDirectorTool
                 var results = new List<object>();
                 foreach (var match in matches)
                 {
-                    await using var source = await context.BlobStorage.OpenReadAsync(
-                        match.BlobKey,
-                        cancellationToken);
+                    await using var source = await assetReader.OpenReadAsync(context.ProjectId, match, cancellationToken);
                     if (source is null || !IsTextAsset(match))
                     {
                         continue;

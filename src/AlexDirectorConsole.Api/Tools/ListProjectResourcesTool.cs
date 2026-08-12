@@ -1,11 +1,11 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class ListProjectResourcesTool : IDirectorTool
+public sealed class ListProjectResourcesTool(IAssetReader assetReader) : IDirectorTool
 {
     public string Name => "list_project_resources";
 
@@ -17,10 +17,7 @@ public sealed class ListProjectResourcesTool : IDirectorTool
         {
             var normalizedType = resourceType.Trim();
             var normalizedName = nameContains.Trim();
-            var assets = await context.DbContext.Assets
-                .AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId)
-                .ToListAsync(cancellationToken);
+            var assets = await assetReader.ListAsync(context.ProjectId, cancellationToken: cancellationToken);
             var latestResources = assets
                 .GroupBy(asset => asset.ResourceId)
                 .Select(group => group

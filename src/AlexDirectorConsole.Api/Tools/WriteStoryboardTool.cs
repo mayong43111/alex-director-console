@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
 using Microsoft.EntityFrameworkCore;
@@ -9,7 +10,9 @@ using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed partial class WriteStoryboardTool : IDirectorTool
+public sealed partial class WriteStoryboardTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter) : IDirectorTool
 {
     public string Name => "write_storyboard";
 
@@ -51,72 +54,25 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
                 }
 
                 var subject = GetResourceSubject(name);
-                var existingShots = await context.DbContext.Assets
-                    .Where(asset => asset.ProjectId == context.ProjectId && asset.Type == "shot")
-                    .ToListAsync(cancellationToken);
+                var existingShots = await assetReader.ListAsync(
+                    context.ProjectId,
+                    "shot",
+                    cancellationToken);
                 var visualRules = ExtractSection(content, "视觉总则");
-                var persistedShots = new List<Asset>(shots.Count);
-                var newShots = new List<(Asset Asset, byte[] Bytes)>();
-
-                foreach (var shot in shots)
-                {
-                    var shotName = $"{subject} · {shot.Id}";
-                    var versions = existingShots
-                        .Where(asset => asset.Name.Equals(shotName, StringComparison.OrdinalIgnoreCase))
-                        .OrderBy(asset => asset.Version)
-                        .ToList();
-                    var latestVersion = versions.LastOrDefault();
-                    var version = (latestVersion?.Version ?? 0) + 1;
-                    var assetId = CreateAssetId(context.ProjectId, context.Content, shot.Id);
-                    var existing = existingShots.SingleOrDefault(asset => asset.Id == assetId);
-                    if (existing is not null)
-                    {
-                        persistedShots.Add(existing);
-                        continue;
-                    }
-
-                    var bytes = Encoding.UTF8.GetBytes(BuildShotMarkdown(
-                        subject,
-                        shot,
-                        visualRules));
-                    var now = DateTimeOffset.UtcNow;
-                    var asset = new Asset
-                    {
-                        Id = assetId,
-                        ResourceId = latestVersion?.ResourceId ?? assetId,
-                        Version = version,
-                        ProjectId = context.ProjectId,
-                        Type = "shot",
-                        Name = shotName,
-                        BlobKey = $"{context.ProjectId:N}/shot/{assetId:N}.md",
-                        FileName = $"{SanitizeFileName(subject)}-{shot.Id}-v{version}.md",
-                        ContentType = "text/markdown; charset=utf-8",
-                        SizeBytes = bytes.LongLength,
-                        CreatedAtUtc = now,
-                        UpdatedAtUtc = now
-                    };
-                    newShots.Add((asset, bytes));
-                    persistedShots.Add(asset);
-                }
-
-                foreach (var (asset, bytes) in newShots)
-                {
-                    await using var stream = new MemoryStream(bytes, writable: false);
-                    await context.BlobStorage.SaveAsync(asset.BlobKey, stream, cancellationToken);
-                }
-                try
-                {
-                    context.DbContext.Assets.AddRange(newShots.Select(item => item.Asset));
-                    await context.DbContext.SaveChangesAsync(cancellationToken);
-                }
-                catch
-                {
-                    foreach (var (asset, _) in newShots)
-                    {
-                        await context.BlobStorage.DeleteAsync(asset.BlobKey, CancellationToken.None);
-                    }
-                    throw;
-                }
+                var writeRequests = shots.Select(shot => new AssetWriteRequest(
+                    context.ProjectId,
+                    "shot",
+                    $"{subject} · {shot.Id}",
+                    $"{subject}-{shot.Id}",
+                    ".md",
+                    "text/markdown; charset=utf-8",
+                    Encoding.UTF8.GetBytes(BuildShotMarkdown(subject, shot, visualRules)),
+                    AssetVersionTarget.CaseInsensitiveName,
+                    AssetId: CreateAssetId(context.ProjectId, context.Content, shot.Id),
+                    FileNameFallback: "未命名")).ToArray();
+                var persistedShots = await assetWriter.WriteVersionsAsync(
+                    writeRequests,
+                    cancellationToken);
 
                 var legacyStoryboards = existingShots
                     .Where(asset => !ShotNamePattern().IsMatch(asset.Name)
@@ -124,12 +80,10 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
                     .ToList();
                 if (legacyStoryboards.Count > 0)
                 {
-                    context.DbContext.Assets.RemoveRange(legacyStoryboards);
-                    await context.DbContext.SaveChangesAsync(cancellationToken);
-                    foreach (var legacy in legacyStoryboards)
-                    {
-                        await context.BlobStorage.DeleteAsync(legacy.BlobKey, cancellationToken);
-                    }
+                    await assetWriter.DeleteAsync(
+                        context.ProjectId,
+                        legacyStoryboards.Select(asset => asset.Id).ToArray(),
+                        cancellationToken);
                 }
 
                 foreach (var asset in persistedShots)
@@ -319,13 +273,6 @@ public sealed partial class WriteStoryboardTool : IDirectorTool
         return subject.EndsWith("分镜稿", StringComparison.Ordinal)
             ? subject[..^3].Trim()
             : subject;
-    }
-
-    private static string SanitizeFileName(string value)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sanitized = new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
-        return string.IsNullOrWhiteSpace(sanitized) ? "未命名" : sanitized.Trim();
     }
 
     private static Guid CreateAssetId(Guid projectId, string instruction, string shotId)

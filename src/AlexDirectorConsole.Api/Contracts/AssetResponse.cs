@@ -12,6 +12,7 @@ public sealed record AssetResponse(
     string Name,
     string FileName,
     string ContentType,
+    string? GenerationMetadataJson,
     long SizeBytes,
     DateTimeOffset CreatedAtUtc,
     string ContentUrl)
@@ -26,9 +27,10 @@ public sealed record AssetResponse(
         asset.Name,
         asset.FileName,
         asset.ContentType,
+        asset.GenerationMetadataJson,
         asset.SizeBytes,
         asset.CreatedAtUtc,
-        $"/api/assets/{asset.Id}/content");
+        $"/api/projects/{asset.ProjectId}/assets/{asset.Id}/content");
 }
 
 public sealed record ShotAssetLinkResponse(

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using System.Text;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Data;
 using AlexDirectorConsole.Api.Models;
 using AlexDirectorConsole.Api.Storage;
@@ -37,6 +38,7 @@ public interface IAgentSkillExecutor
 
 public sealed class AgentSkillExecutor(
     AppDbContext dbContext,
+    IAssetReader assetReader,
     IBlobStorage blobStorage,
     IDirectorAgent directorAgent) : IAgentSkillExecutor
 {
@@ -94,7 +96,7 @@ public sealed class AgentSkillExecutor(
         try
         {
             await ReportAsync(progress, new("tool.started", $"正在读取剧本资源：{asset.FileName}"));
-            await using var content = await blobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+            await using var content = await assetReader.OpenReadAsync(projectId, asset, cancellationToken)
                 ?? throw new InvalidOperationException("剧本 Blob 不存在。");
             using var reader = new StreamReader(content, detectEncodingFromByteOrderMarks: true);
             var script = await reader.ReadToEndAsync(cancellationToken);
@@ -199,7 +201,9 @@ public sealed class AgentSkillExecutor(
         {
             var inputAsset = await dbContext.Assets
                 .AsNoTracking()
-                .SingleOrDefaultAsync(asset => asset.Id == run.InputAssetId, cancellationToken);
+                .SingleOrDefaultAsync(
+                    asset => asset.ProjectId == run.ProjectId && asset.Id == run.InputAssetId,
+                    cancellationToken);
             if (inputAsset is null)
             {
                 continue;
@@ -251,7 +255,9 @@ public sealed class AgentSkillExecutor(
     {
         var assetId = requestedAssetId ?? Guid.NewGuid();
         var existing = await dbContext.Assets
-            .SingleOrDefaultAsync(asset => asset.Id == assetId, cancellationToken);
+            .SingleOrDefaultAsync(
+                asset => asset.ProjectId == projectId && asset.Id == assetId,
+                cancellationToken);
         if (existing is not null)
         {
             return existing;
@@ -339,7 +345,9 @@ public sealed class AgentSkillExecutor(
         var assetId = CreateDeterministicAssetId(runId, type, name);
         var existing = await dbContext.Assets
             .AsNoTracking()
-            .SingleOrDefaultAsync(asset => asset.Id == assetId, cancellationToken);
+            .SingleOrDefaultAsync(
+                asset => asset.ProjectId == projectId && asset.Id == assetId,
+                cancellationToken);
         if (existing is not null)
         {
             await ReportAsync(progress, new("tool.completed", $"资源已存在：{existing.Name}"));

@@ -1,16 +1,19 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Services;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class GenerateImageFromReferencesTool : IDirectorTool
+public sealed class GenerateImageFromReferencesTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter,
+    IAzureFoundryImageGenerator imageGenerator) : IDirectorTool
 {
     public string Name => "generate_image_from_references";
 
-    public bool IsAvailable(DirectorToolContext context) => context.ImageGenerator.IsConfigured;
+    public bool IsAvailable(DirectorToolContext context) => imageGenerator.IsConfigured;
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
         (Func<string, string, string, string, CancellationToken, Task<string>>)(async (
@@ -20,6 +23,9 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
             resourceName,
             cancellationToken) =>
         {
+            await context.ResourceLock.WaitAsync(cancellationToken);
+            try
+            {
             var prompt = imagePrompt.Trim();
             var name = resourceName.Trim();
             var ids = referenceImageAssetIds
@@ -47,10 +53,11 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
                 throw new ArgumentException("referenceImageDescriptions 必须是与参考图 ID 同序、同数量的 JSON 字符串数组。", nameof(referenceImageDescriptions));
             }
 
-            var assets = await context.DbContext.Assets
-                .AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId && ids.Contains(asset.Id))
-                .ToListAsync(cancellationToken);
+            var assets = (await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken))
+                .Where(asset => ids.Contains(asset.Id))
+                .ToList();
             if (assets.Count != ids.Length || assets.Any(asset => !asset.ContentType.StartsWith("image/")))
             {
                 throw new ArgumentException("所有参考 ID 都必须是当前项目中的真实图片资产。", nameof(referenceImageAssetIds));
@@ -60,7 +67,7 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
             foreach (var id in ids)
             {
                 var asset = assets.Single(item => item.Id == id);
-                await using var stream = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+                await using var stream = await assetReader.OpenReadAsync(context.ProjectId, asset, cancellationToken)
                     ?? throw new InvalidOperationException($"参考图 Blob 不存在：{asset.Name}");
                 using var memory = new MemoryStream();
                 await stream.CopyToAsync(memory, cancellationToken);
@@ -71,7 +78,7 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
             {
                 type = "process",
                 stage = "tool.started",
-                message = $"Agent 正在使用 {assets.Count} 张人物/场景/道具参考图生成首帧（{context.ImageGenerator.Quality}）"
+                message = $"Agent 正在使用 {assets.Count} 张人物/场景/道具参考图生成首帧（{imageGenerator.Quality}）"
             }, cancellationToken);
             var describedPrompt = $"""
                 参考图说明（严格按上传顺序对应）：
@@ -80,18 +87,40 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
                 生成要求：
                 {prompt}
                 """;
-            var generatedImage = await context.ImageGenerator.GenerateFromReferencesAsync(
+            var generatedImage = await imageGenerator.GenerateFromReferencesAsync(
                 describedPrompt,
                 referenceImages,
                 context.ImageSize,
                 context.ImageDeployment,
                 cancellationToken);
-            var imageAsset = await ImageAssetWriter.SaveAsync(context, name, generatedImage, cancellationToken);
-            var versionCount = await context.DbContext.Assets.CountAsync(
-                asset => asset.ResourceId == imageAsset.ResourceId,
+            var imageAsset = await ImageAssetWriter.SaveAsync(
+                assetWriter,
+                context.ProjectId,
+                name,
+                generatedImage,
+                new ImageGenerationMetadata(
+                    1,
+                    "generate-from-references",
+                    "azure-openai",
+                    generatedImage.Deployment,
+                    describedPrompt,
+                    generatedImage.RevisedPrompt,
+                    new(context.ImageSize, generatedImage.Quality, 1, "png", imageGenerator.ApiVersion),
+                    ids.Select((id, index) =>
+                    {
+                        var asset = assets.Single(item => item.Id == id);
+                        return new ImageGenerationSource(
+                            asset.Id,
+                            asset.Name,
+                            asset.Version,
+                            descriptions[index]);
+                    }).ToArray()),
+                cancellationToken);
+            var versionCount = await assetReader.CountVersionsAsync(
+                context.ProjectId,
+                imageAsset.ResourceId,
                 cancellationToken);
             context.RevisedAssets.Add(imageAsset);
-            context.ImagePrompts.Add(new("参考图生成图片", imageAsset.Name, describedPrompt));
             await context.WriteEventAsync(new
             {
                 type = "process",
@@ -110,9 +139,14 @@ public sealed class GenerateImageFromReferencesTool : IDirectorTool
                 referenceAssets = assets.Select(AssetResponse.FromAsset),
                 imagePrompt = describedPrompt
             }, context.JsonOptions);
+            }
+            finally
+            {
+                context.ResourceLock.Release();
+            }
         }),
         name: Name,
-        description: "使用明确选择的人物、场景、道具图片资产生成 shot 首帧，并按当前项目画幅输出。referenceImageAssetIds 用逗号分隔；referenceImageDescriptions 必须是同序 JSON 字符串数组，逐项明确每张参考图是什么、对应哪个人物/场景/道具以及要继承的视觉内容。返回的 imagePrompt 是包含全部逐图说明、实际提交给图片模型的最终完整提示词；系统会将其完整输出到最终回复，不得省略或改写。",
+        description: "使用明确选择的人物、场景、道具图片资产生成并立即保存一张 shot 首帧，按当前项目画幅输出。referenceImageAssetIds 用逗号分隔；referenceImageDescriptions 必须是同序 JSON 字符串数组，逐项明确每张参考图是什么、对应哪个人物/场景/道具以及要继承的视觉内容。工具完成事件会立即事实输出包含全部逐图说明、实际提交给图片模型的最终完整 imagePrompt。批量任务必须严格串行，收到保存和绑定成功回执后才能生成下一张；最终回复不得重复提示词。",
         serializerOptions: context.JsonOptions);
 
     private static string[] ParseDescriptions(string value)

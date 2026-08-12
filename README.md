@@ -1,156 +1,474 @@
-# alex 导演台
+# Alex Director Console / Alex 导演台
 
-面向 AI 影视制作的导演工作台。用户是导演，Agent 是执行副导演；系统按导演的即时指令执行，不预设制作计划。
+[简体中文](#简体中文) | [English](#english)
 
-当前纵向切片支持项目资产、Foundry 对话、Agent 技能管理，以及从文本剧本提取人物、场景、道具、场次事件和歧义信息。
+An AI filmmaking workspace where the user directs and an agent executes.
 
-## 技术栈
+一个面向 AI 影视制作的导演工作台：用户下达导演令，Agent 作为执行副导演调用技能与工具完成工作。
 
-- 前端：React 19、TypeScript、Vite
-- 后端：ASP.NET Core 8
-- Agent：Microsoft Agent Framework `HarnessAgent`、官方 `AgentSkillsProvider`、Azure OpenAI
+> [!IMPORTANT]
+> This repository does not currently include an open-source license. Public source availability does not grant permission to use, modify, or redistribute the code. See [License](#许可证--license).
 
-## 环境要求
+---
 
-- .NET SDK 8.0.423
-- Node.js 24+
+## 简体中文
+
+### 项目简介
+
+Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和视频组织在同一工作区。执行副导演会结合当前资源、项目画幅和对话历史，自主选择 Agent Skill 与工具，并通过 NDJSON 实时返回执行过程。
+
+项目目前处于积极开发阶段，适合本地开发和工作流验证；用于生产环境前请自行完成安全与可靠性评估。
+
+### 核心能力
+
+- **项目化制作**：在 SQLite 中持久化项目设置、资源、版本、对话和技能运行记录。
+- **流式导演对话**：通过 Azure AI Foundry / Azure OpenAI 接收导演令并实时呈现 Agent、技能和工具进度。
+- **剧本创作与改写**：从零创作完整剧本，或自主定位并读取已有剧本后，将重写结果保存为不可变新版本。
+- **剧本拆解**：从文本剧本提取分析稿、人物、场景和关键道具资源。
+- **不可变资源版本**：修改资源时创建新版本，保留历史 Blob，支持版本审阅。
+- **图片工作流**：生成、编辑、合并参考图，并按视觉参考或项目画幅选择输出尺寸。
+- **ComfyUI 视频工作流**：检查和管理远端 ComfyUI，执行 MiniMax H3 首尾帧视频、静帧组装和片段拼接。
+- **可管理技能**：从 `Skills/**/SKILL.md` 发现 Agent Skill，并支持启停与运行审计。
+
+### 技术栈
+
+| 层 | 技术 |
+| --- | --- |
+| Web | React 19、TypeScript 6、Vite 8、React Router、Lucide |
+| API | ASP.NET Core 8 Minimal API、EF Core 8、SQLite |
+| Agent | Microsoft Agent Framework Harness、Azure AI OpenAI |
+| 媒体 | Azure Image、ComfyUI、MiniMax H3、ImageSharp |
+| 存储 | SQLite 元数据、本地文件 Blob |
+
+### 环境要求
+
+- Windows 10/11（开发启动脚本使用 PowerShell）
+- [.NET SDK 8.0.423](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [Node.js 24+](https://nodejs.org/)
 - npm 11+
+- Azure AI Foundry 中可用的 Azure OpenAI 部署
+- 可选：用于视频工作流的远端 VM、ComfyUI 和对应模型
 
-## 本地启动
+版本由 [global.json](global.json) 和 [package.json](src/web/package.json) 约束。
 
-启动后端：
+### 快速开始
+
+1. 克隆仓库：
+
+   ```powershell
+   git clone https://github.com/mayong43111/alex-director-console.git
+   cd alex-director-console
+   ```
+
+2. 创建本地环境文件：
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+3. 编辑 `.env`，至少填写：
+
+   ```dotenv
+   AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com/
+   AZURE_OPENAI_API_KEY=<api-key>
+   AZURE_OPENAI_DEPLOYMENT=gpt-5.4
+
+   AZURE_IMAGE_DEPLOYMENT=gpt-image-2
+   AZURE_IMAGE_QUALITY=medium
+   AZURE_IMAGE_API_VERSION=2025-04-01-preview
+   ```
+
+4. 一键启动开发环境：
+
+   ```powershell
+   .\start-dev.ps1
+   ```
+
+   已安装前端依赖时可跳过安装：
+
+   ```powershell
+   .\start-dev.ps1 -SkipInstall
+   ```
+
+5. 打开以下地址：
+
+   - Web：<http://localhost:5173>
+   - API：<http://localhost:5055>
+   - Swagger：<http://localhost:5055/swagger>
+
+也可以分别启动：
 
 ```powershell
-cd src/AlexDirectorConsole.Api
-dotnet run
+dotnet run --project src/AlexDirectorConsole.Api --launch-profile http
+npm install --prefix src/web
+npm run dev --prefix src/web
 ```
 
-后端运行于 `http://localhost:5055`，开发环境 Swagger 位于 `http://localhost:5055/swagger`。
+### 配置
 
-另开终端启动前端：
+`.env` 仅用于数据库中尚无对应全局配置时的首次初始化。之后以系统配置页面保存的数据库值为准，重启不会用 `.env` 覆盖。
 
-```powershell
-cd src/web
-npm install
-npm run dev
+#### Azure AI
+
+| 变量 | 必需 | 说明 |
+| --- | --- | --- |
+| `AZURE_OPENAI_ENDPOINT` | 是 | Azure OpenAI Endpoint |
+| `AZURE_OPENAI_API_KEY` | 是 | Azure OpenAI API Key；不要提交到 Git |
+| `AZURE_OPENAI_DEPLOYMENT` | 是 | 对话模型部署名 |
+| `AZURE_IMAGE_DEPLOYMENT` | 图片功能 | 图片模型部署名 |
+| `AZURE_IMAGE_QUALITY` | 否 | `low`、`medium` 或 `high`，默认 `medium` |
+| `AZURE_IMAGE_API_VERSION` | 否 | 图片 API 版本 |
+
+#### VM 与 ComfyUI
+
+视频工作流需要以下首次初始化变量：
+
+```dotenv
+VM_HOST=
+VM_PORT=22
+VM_USERNAME=azureuser
+SSH_PRIVATE_KEY_PATH=%USERPROFILE%\.ssh\id_rsa
+COMFYUI_PATH=/home/azureuser/ComfyUI
+COMFYUI_PYTHON_PATH=/home/azureuser/envs/comfy311/bin/python
+COMFYUI_PORT=8188
+COMFYUI_LOCAL_PROXY_PORT=8188
+COMFYUI_WORKFLOW_DIRECTORY=/home/azureuser/ComfyUI/user/default/workflows
+COMFYUI_OUTPUT_DIRECTORY=/home/azureuser/ComfyUI/output
 ```
 
-前端运行于 `http://localhost:5173`，`/api` 请求由 Vite 代理至后端。
+完整模板见 [.env.example](.env.example)。
 
-页面路由：
+### 项目结构
 
-- `/`：选择或创建项目
-- `/projects/:projectId`：指定项目的导演台，刷新后保持当前项目
+```text
+alex-director-console/
+├─ src/
+│  ├─ AlexDirectorConsole.Api/
+│  │  ├─ Application/       # 用例、资产边界、维护任务
+│  │  ├─ Contracts/         # HTTP DTO
+│  │  ├─ Data/              # EF Core 与迁移
+│  │  ├─ Endpoints/         # Minimal API 路由
+│  │  ├─ Models/            # 持久化模型
+│  │  ├─ Services/          # Foundry、ComfyUI、Agent Skill
+│  │  ├─ Storage/           # Blob 存储
+│  │  ├─ Tools/             # Agent Tool 适配器
+│  │  └─ Skills/            # Agent Skill 文件
+│  └─ web/
+│     └─ src/
+│        ├─ api/            # HTTP 与 NDJSON 客户端
+│        ├─ features/       # 业务功能与 hooks
+│        └─ models/         # 前端契约
+├─ docs/                    # 设计与重构文档
+├─ .env.example
+└─ start-dev.ps1
+```
 
-## 数据库
+架构演进和边界约束见 [重构计划](docs/refactoring-plan.md)。
 
-后端使用 EF Core 8 + SQLite。开发数据库在 API 启动时自动迁移，文件位于：
+### 数据与维护
+
+开发数据默认保存在：
 
 ```text
 src/AlexDirectorConsole.Api/alex-director-console.db
-```
-
-当前包含 `Projects` 表：
-
-- `Id`：GUID 主键
-- `Name`：项目名称，必填，最长 200 字符
-- `CreatedAtUtc`：创建时间
-- `UpdatedAtUtc`：更新时间
-
-`Assets` 是所有资产类型共用的基础表：
-
-- `Id`：GUID 主键
-- `ProjectId`：所属项目 ID
-- `Type`：开放字符串类型，例如剧本为 `script`
-- `Name`、`FileName`、`ContentType`、`SizeBytes`：资产与原文件元数据
-- `BlobKey`：Blob 存储键，唯一索引
-- `CreatedAtUtc`、`UpdatedAtUtc`：创建与更新时间
-
-前端项目目前保存在浏览器本地，因此 `Assets.ProjectId` 暂不设置数据库外键；项目 API 接入后再补外键约束。
-
-`ConversationMessages` 保存项目级对话历史：
-
-- `ProjectId`：所属项目 ID
-- `Role`：`user` 或 `assistant`
-- `Content`：消息正文
-- `Model`：响应使用的 Foundry 模型部署名
-- `CreatedAtUtc`：消息时间
-
-`SkillDefinitions` 保存可管理的 Agent 技能定义与版本；`SkillRuns` 保存每次技能调用的项目、输入资源、导演令、模型、状态、工具产物清单和错误。系统启动时会幂等注册并升级 `script-breakdown` 剧本拆解技能。
-
-剧本拆解分为分析、人物、场景、道具四个 Agent 阶段。每个阶段由 Agent 直接调用 `write_project_resource` 工具，将自己编写的完整 Markdown 正文保存为本地 Blob 和 Asset；宿主只校验类型、项目、名称与内容长度，不代写资源内容。每个人物、独立场景和关键道具各有一个逻辑资源；同名输出和后续修改保存为该资源的不可变新版本，分析稿继续保留，并通过 `SkillRuns.OutputAssetId` 关联主输出。
-
-## 资产与 Blob
-
-资产元数据写入 SQLite，文件内容通过 `IBlobStorage` 存储。当前实现为本地文件系统：
-
-```text
 src/AlexDirectorConsole.Api/App_Data/blobs/
 ```
 
-该目录和 SQLite 文件均不进入版本控制。默认单文件上限为 100 MB，可通过 `BlobStorage:MaxUploadBytes` 调整。
+数据库迁移会在 API 启动时自动应用。历史资产维护不会在普通 Web 启动时执行。升级旧数据前请备份 SQLite 和 `App_Data`，然后显式运行：
 
-资产接口：
+```powershell
+dotnet run --project src/AlexDirectorConsole.Api -- --run-maintenance
+```
 
-- `GET /api/projects/{projectId}/assets?type=script`：按项目和类型列出逻辑资源的最新版本
-- `POST /api/projects/{projectId}/assets`：multipart 上传，字段为 `file`、`type` 和可选 `name`
-- `GET /api/assets/{assetId}/versions`：列出该逻辑资源的全部版本
-- `GET /api/assets/{assetId}/content`：读取或下载 Blob 内容
+命令会执行尚未完成的版本化维护任务并退出，状态记录在 `App_Data/maintenance-state.json`。
 
-新增迁移：
+新增 EF Core 迁移：
 
 ```powershell
 dotnet ef migrations add <MigrationName> `
-	--project src/AlexDirectorConsole.Api `
-	--startup-project src/AlexDirectorConsole.Api `
-	--output-dir Data/Migrations
+  --project src/AlexDirectorConsole.Api `
+  --startup-project src/AlexDirectorConsole.Api `
+  --output-dir Data/Migrations
 ```
 
-## Azure AI Foundry 对话
+### API 概览
 
-复制 `.env.example` 为项目根目录的 `.env`，填写 Azure AI Foundry 中 Azure OpenAI 模型部署的连接信息：
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/agent/status` | Agent 与图片模型状态 |
+| `GET` / `PUT` | `/api/projects`、`/api/projects/{id}` | 项目读取与保存 |
+| `GET` / `POST` | `/api/projects/{id}/assets` | 资源列表与上传 |
+| `GET` | `/api/projects/{projectId}/assets/{id}/versions` | 当前项目内的资源版本历史 |
+| `DELETE` | `/api/projects/{projectId}/assets/{assetId}` | 删除逻辑资源、全部版本和镜头绑定 |
+| `GET` | `/api/projects/{projectId}/assets/{id}/content` | 读取或下载当前项目 Blob |
+| `GET` / `POST` | `/api/projects/{id}/messages` | 对话历史与非流式消息 |
+| `POST` | `/api/projects/{id}/messages/stream` | NDJSON 流式导演会话 |
+| `GET` / `PATCH` | `/api/skills`、`/api/skills/{id}` | 技能列表与启停 |
 
-```dotenv
-AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com/
-AZURE_OPENAI_API_KEY=<api-key>
-AZURE_OPENAI_DEPLOYMENT=gpt-5.4
+开发环境可通过 Swagger 查看完整契约。
 
-# 可复用上面的 Endpoint 和 API Key；默认质量为 medium。
-AZURE_IMAGE_DEPLOYMENT=gpt-image-2
-AZURE_IMAGE_QUALITY=medium
-AZURE_IMAGE_API_VERSION=2025-04-01-preview
-```
-
-`.env` 已被 Git 忽略。修改后需要重启 API。后端使用 Azure OpenAI ChatClient，并通过 Microsoft Agent Framework `HarnessAgent` 运行执行副导演。文件技能由官方 `AgentSkillsProvider` 从 `Skills/**/SKILL.md` 发现，按“公布元数据 → `load_skill` 按需加载 → 读取资源或执行工具”的渐进模式工作；Harness 负责函数调用循环、会话内历史和上下文压缩。导演要求生成图片时，Agent 会调用 `generate_image`，通过 Azure Foundry 的 `gpt-image-2` 部署生成 `1024x1024` PNG；默认质量为 `medium`，结果保存为项目素材资源。
-
-对话接口：
-
-- `GET /api/projects/{projectId}/messages`：读取项目对话历史
-- `POST /api/projects/{projectId}/messages`：发送导演指令并获取执行副导演回复
-- `POST /api/projects/{projectId}/messages/stream`：以 `application/x-ndjson` 流式返回接令、技能、工具、Agent、解析、资源创建、文本增量和完成事件
-
-消息请求始终携带界面当前选中版本的 `assetId`，不再由用户提交 `skillId`。统一执行副导演会读取当前资源元数据及文本正文，并根据导演令自行决定直接回复、调用 `run_script_breakdown`，或调用 `update_current_resource` 创建当前逻辑资源的新版本。旧版本 Blob 不覆盖，可在右侧版本菜单中审阅。`SkillRuns.ResultJson` 仅保存实际工具产物的 Asset 审计清单，不作为 Agent 的创作输出。
-
-技能接口：
-
-- `GET /api/skills`：列出系统技能及启停状态
-- `PATCH /api/skills/{skillId}`：启用或停用技能
-- `GET /api/projects/{projectId}/skill-runs`：读取最近 50 次技能运行
-
-场景一使用方式：选择一个剧本资源，输入“分析一下，并建立每个人物、场景和关键道具的设定稿”并发送。Agent 会自行路由到剧本拆解技能；执行期间，对话气泡实时显示四个 Agent 阶段及每次 `write_project_resource` 调用。选择任意文本设定稿后可直接说“修改当前稿”，无需再次说明资源名称，Agent 会基于已载入的完整正文调用更新工具。运行结果可在左侧资源分类和技能审计记录中查看。
-
-未配置时发送接口返回 `503`；Foundry 请求失败时返回 `502`，两种情况都不会写入消息历史。
-
-## 验证
+### 开发与验证
 
 ```powershell
 dotnet build AlexDirectorConsole.sln
-cd src/web
-npm run lint
-npm run build
+npm run lint --prefix src/web
+npm run build --prefix src/web
+git diff --check
 ```
 
-健康检查：
+当前尚未引入自动化测试工程。提交改动前至少应通过以上检查，并手动验证受影响工作流。
 
-- `GET /api/health`
-- `GET /api/agent/status`
+### 贡献
+
+欢迎通过 [Issues](https://github.com/mayong43111/alex-director-console/issues) 提交缺陷和建议。较大改动建议先创建 Issue，说明目标、行为变化和数据迁移影响。
+
+提交 Pull Request 时请：
+
+1. 保持 API、NDJSON 事件、Blob 路径和资源版本语义兼容，或明确记录破坏性变化。
+2. 不提交 `.env`、API Key、SQLite 数据库、Blob、SSH 私钥或生成输出。
+3. 保持 Endpoints、Application、Tools 和前端 feature 的职责边界。
+4. 运行“开发与验证”中的全部命令。
+
+### 安全说明
+
+- 不要把 Azure Key、SSH 私钥或 VM 凭据提交到仓库。
+- `.env` 只适合本地开发；生产部署应使用受控的机密存储。
+- ComfyUI 管理工具可操作远端主机，启用前应限制网络、账号权限和可用 workflow。
+- 发现安全问题时，请避免在公开 Issue 中披露密钥或可利用细节，优先通过仓库所有者的私密渠道联系。
+
+---
+
+## English
+
+### Overview
+
+Alex Director Console brings projects, scripts, characters, scenes, props, storyboards, images, and videos into one workspace. The director agent uses the active asset, project format, and conversation history to select Agent Skills and tools, while execution progress is streamed to the UI over NDJSON.
+
+The project is under active development. It is intended for local development and workflow evaluation and should be reviewed before production use.
+
+### Features
+
+- **Project-based production**: persist project settings, assets, versions, conversations, and skill runs in SQLite.
+- **Streaming director chat**: send instructions through Azure AI Foundry / Azure OpenAI and observe agent, skill, and tool progress in real time.
+- **Script writing and revision**: create complete scripts or discover and read an existing script before persisting the rewrite as an immutable new version.
+- **Script breakdown**: derive analysis, character, scene, and key-prop assets from a text script.
+- **Immutable asset versions**: create a new version for every revision while preserving historical blobs.
+- **Image workflows**: generate, edit, and merge references using either square asset framing or the project aspect ratio.
+- **ComfyUI video workflows**: inspect and manage remote ComfyUI, run MiniMax H3 frame-to-video workflows, assemble slideshows, and concatenate clips.
+- **Manageable skills**: discover Agent Skills from `Skills/**/SKILL.md`, enable or disable them, and audit executions.
+
+### Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Web | React 19, TypeScript 6, Vite 8, React Router, Lucide |
+| API | ASP.NET Core 8 Minimal API, EF Core 8, SQLite |
+| Agent | Microsoft Agent Framework Harness, Azure AI OpenAI |
+| Media | Azure Image, ComfyUI, MiniMax H3, ImageSharp |
+| Storage | SQLite metadata and local file blobs |
+
+### Prerequisites
+
+- Windows 10/11 (the development launcher is a PowerShell script)
+- [.NET SDK 8.0.423](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [Node.js 24+](https://nodejs.org/)
+- npm 11+
+- An Azure OpenAI deployment in Azure AI Foundry
+- Optional: a remote VM, ComfyUI, and the required models for video workflows
+
+Versions are pinned by [global.json](global.json) and [package.json](src/web/package.json).
+
+### Quick Start
+
+1. Clone the repository:
+
+   ```powershell
+   git clone https://github.com/mayong43111/alex-director-console.git
+   cd alex-director-console
+   ```
+
+2. Create the local environment file:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+3. Edit `.env` and provide at least:
+
+   ```dotenv
+   AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com/
+   AZURE_OPENAI_API_KEY=<api-key>
+   AZURE_OPENAI_DEPLOYMENT=gpt-5.4
+
+   AZURE_IMAGE_DEPLOYMENT=gpt-image-2
+   AZURE_IMAGE_QUALITY=medium
+   AZURE_IMAGE_API_VERSION=2025-04-01-preview
+   ```
+
+4. Start the development environment:
+
+   ```powershell
+   .\start-dev.ps1
+   ```
+
+   Skip dependency installation when `node_modules` is already available:
+
+   ```powershell
+   .\start-dev.ps1 -SkipInstall
+   ```
+
+5. Open:
+
+   - Web: <http://localhost:5173>
+   - API: <http://localhost:5055>
+   - Swagger: <http://localhost:5055/swagger>
+
+To start each service separately:
+
+```powershell
+dotnet run --project src/AlexDirectorConsole.Api --launch-profile http
+npm install --prefix src/web
+npm run dev --prefix src/web
+```
+
+### Configuration
+
+`.env` seeds a global configuration only when no corresponding database record exists. Subsequent restarts preserve values saved through the system configuration UI.
+
+#### Azure AI
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `AZURE_OPENAI_ENDPOINT` | Yes | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_KEY` | Yes | Azure OpenAI API key; never commit it |
+| `AZURE_OPENAI_DEPLOYMENT` | Yes | Chat model deployment name |
+| `AZURE_IMAGE_DEPLOYMENT` | For images | Image model deployment name |
+| `AZURE_IMAGE_QUALITY` | No | `low`, `medium`, or `high`; defaults to `medium` |
+| `AZURE_IMAGE_API_VERSION` | No | Image API version |
+
+#### VM and ComfyUI
+
+Video workflows use the following first-run seed values:
+
+```dotenv
+VM_HOST=
+VM_PORT=22
+VM_USERNAME=azureuser
+SSH_PRIVATE_KEY_PATH=%USERPROFILE%\.ssh\id_rsa
+COMFYUI_PATH=/home/azureuser/ComfyUI
+COMFYUI_PYTHON_PATH=/home/azureuser/envs/comfy311/bin/python
+COMFYUI_PORT=8188
+COMFYUI_LOCAL_PROXY_PORT=8188
+COMFYUI_WORKFLOW_DIRECTORY=/home/azureuser/ComfyUI/user/default/workflows
+COMFYUI_OUTPUT_DIRECTORY=/home/azureuser/ComfyUI/output
+```
+
+See [.env.example](.env.example) for the complete template.
+
+### Repository Layout
+
+```text
+alex-director-console/
+├─ src/
+│  ├─ AlexDirectorConsole.Api/
+│  │  ├─ Application/       # Use cases, asset boundaries, maintenance
+│  │  ├─ Contracts/         # HTTP DTOs
+│  │  ├─ Data/              # EF Core and migrations
+│  │  ├─ Endpoints/         # Minimal API routes
+│  │  ├─ Models/            # Persistence models
+│  │  ├─ Services/          # Foundry, ComfyUI, Agent Skills
+│  │  ├─ Storage/           # Blob storage
+│  │  ├─ Tools/             # Agent Tool adapters
+│  │  └─ Skills/            # Agent Skill files
+│  └─ web/
+│     └─ src/
+│        ├─ api/            # HTTP and NDJSON clients
+│        ├─ features/       # Features and hooks
+│        └─ models/         # Frontend contracts
+├─ docs/                    # Design and refactoring notes
+├─ .env.example
+└─ start-dev.ps1
+```
+
+See the [refactoring plan](docs/refactoring-plan.md) for architectural boundaries and evolution.
+
+### Data and Maintenance
+
+Development data is stored in:
+
+```text
+src/AlexDirectorConsole.Api/alex-director-console.db
+src/AlexDirectorConsole.Api/App_Data/blobs/
+```
+
+Database migrations are applied automatically when the API starts. Historical asset maintenance is not part of normal web startup. Back up the SQLite database and `App_Data` before upgrading legacy data, then run:
+
+```powershell
+dotnet run --project src/AlexDirectorConsole.Api -- --run-maintenance
+```
+
+The command runs pending versioned maintenance tasks and exits. Completion state is stored in `App_Data/maintenance-state.json`.
+
+Create an EF Core migration with:
+
+```powershell
+dotnet ef migrations add <MigrationName> `
+  --project src/AlexDirectorConsole.Api `
+  --startup-project src/AlexDirectorConsole.Api `
+  --output-dir Data/Migrations
+```
+
+### API Overview
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | Health check |
+| `GET` | `/api/agent/status` | Agent and image model status |
+| `GET` / `PUT` | `/api/projects`, `/api/projects/{id}` | Read and save projects |
+| `GET` / `POST` | `/api/projects/{id}/assets` | List and upload assets |
+| `GET` | `/api/projects/{projectId}/assets/{id}/versions` | Asset version history within the project |
+| `DELETE` | `/api/projects/{projectId}/assets/{assetId}` | Delete a logical resource, all versions, and shot links |
+| `GET` | `/api/projects/{projectId}/assets/{id}/content` | Read or download a project-scoped blob |
+| `GET` / `POST` | `/api/projects/{id}/messages` | Conversation history and non-streaming messages |
+| `POST` | `/api/projects/{id}/messages/stream` | Streaming director session over NDJSON |
+| `GET` / `PATCH` | `/api/skills`, `/api/skills/{id}` | List, enable, or disable skills |
+
+Swagger exposes the complete contract in development.
+
+### Development and Validation
+
+```powershell
+dotnet build AlexDirectorConsole.sln
+npm run lint --prefix src/web
+npm run build --prefix src/web
+git diff --check
+```
+
+The project does not currently include an automated test project. At minimum, run the checks above and manually verify affected workflows before submitting changes.
+
+### Contributing
+
+Bug reports and proposals are welcome through [Issues](https://github.com/mayong43111/alex-director-console/issues). For substantial changes, open an issue first and describe the goal, behavioral impact, and any data migration requirements.
+
+When submitting a pull request:
+
+1. Preserve API routes, NDJSON events, blob paths, and asset-version semantics, or document breaking changes explicitly.
+2. Do not commit `.env`, API keys, SQLite databases, blobs, SSH keys, or generated output.
+3. Keep responsibilities separated across Endpoints, Application, Tools, and frontend features.
+4. Run every command in “Development and Validation.”
+
+### Security
+
+- Never commit Azure keys, SSH private keys, or VM credentials.
+- `.env` is intended for local development; use managed secret storage in production.
+- ComfyUI management tools can operate a remote host. Restrict network access, account permissions, and available workflows before enabling them.
+- Do not disclose credentials or exploitable details in a public issue. Contact the repository owner privately for sensitive reports.
+
+---
+
+## 许可证 / License
+
+本仓库目前**未包含 LICENSE 文件**。源代码公开可见不代表已授予使用、修改或再分发许可。在许可证补充前，请先联系仓库所有者获得授权。
+
+This repository currently **does not include a LICENSE file**. Source availability does not grant permission to use, modify, or redistribute the code. Contact the repository owner for authorization until a license is added.

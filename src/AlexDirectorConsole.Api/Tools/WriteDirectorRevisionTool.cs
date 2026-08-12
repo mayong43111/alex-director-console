@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
 using Microsoft.EntityFrameworkCore;
@@ -8,7 +9,9 @@ using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class WriteDirectorRevisionTool : IDirectorTool
+public sealed class WriteDirectorRevisionTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter) : IDirectorTool
 {
     public string Name => "write_director_revision";
 
@@ -47,19 +50,19 @@ public sealed class WriteDirectorRevisionTool : IDirectorTool
                 }
 
                 var subject = GetResourceSubject(name);
-                var resourceVersions = (await context.DbContext.Assets
-                        .Where(asset => asset.ProjectId == context.ProjectId && asset.Type == type)
-                        .ToListAsync(cancellationToken))
+                var projectAssets = await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken);
+                var resourceVersions = projectAssets
+                    .Where(asset => asset.Type == type)
                     .Where(asset => GetResourceSubject(asset.Name).Equals(subject, StringComparison.OrdinalIgnoreCase))
                     .OrderBy(asset => asset.Version)
                     .ToList();
-                var latestVersion = resourceVersions.LastOrDefault();
 
                 var sourceIds = SplitAssetIds(sourceAssetIds);
-                var sourceAssets = await context.DbContext.Assets
-                    .AsNoTracking()
-                    .Where(asset => asset.ProjectId == context.ProjectId && sourceIds.Contains(asset.Id))
-                    .ToListAsync(cancellationToken);
+                var sourceAssets = projectAssets
+                    .Where(asset => sourceIds.Contains(asset.Id))
+                    .ToList();
                 if (sourceIds.Count == 0 || sourceAssets.Count != sourceIds.Count)
                 {
                     throw new ArgumentException("sourceAssetIds 必须全部引用当前项目中的真实资源。", nameof(sourceAssetIds));
@@ -68,11 +71,7 @@ public sealed class WriteDirectorRevisionTool : IDirectorTool
                 var sourceSubjects = sourceAssets
                     .Select(asset => GetResourceSubject(asset.Name))
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var rootAssets = (await context.DbContext.Assets
-                        .AsNoTracking()
-                        .Where(asset => asset.ProjectId == context.ProjectId)
-                        .ToListAsync(cancellationToken))
-                    .Where(asset =>
+                var rootAssets = projectAssets.Where(asset =>
                         !asset.Name.Contains("导演修订", StringComparison.Ordinal)
                         && sourceSubjects.Contains(GetResourceSubject(asset.Name)));
                 var provenanceAssets = sourceAssets.Concat(rootAssets).DistinctBy(asset => asset.Id).ToList();
@@ -94,41 +93,19 @@ public sealed class WriteDirectorRevisionTool : IDirectorTool
                     message = $"Agent 正在创建导演修订：{name}"
                 }, cancellationToken);
                 var assetId = CreateRevisionId(context.ProjectId, context.Content, type, name);
-                var revisionAsset = await context.DbContext.Assets
-                    .SingleOrDefaultAsync(asset => asset.Id == assetId, cancellationToken);
-                if (revisionAsset is null)
-                {
-                    var version = (latestVersion?.Version ?? 0) + 1;
-                    var bytes = Encoding.UTF8.GetBytes(persistedRevision + Environment.NewLine);
-                    var now = DateTimeOffset.UtcNow;
-                    revisionAsset = new Asset
-                    {
-                        Id = assetId,
-                        ResourceId = latestVersion?.ResourceId ?? assetId,
-                        Version = version,
-                        ProjectId = context.ProjectId,
-                        Type = type,
-                        Name = latestVersion?.Name ?? $"{subject} · {label}",
-                        BlobKey = $"{context.ProjectId:N}/{type}/{assetId:N}.md",
-                        FileName = $"{SanitizeFileName(subject)}-{label}-v{version}.md",
-                        ContentType = "text/markdown; charset=utf-8",
-                        SizeBytes = bytes.LongLength,
-                        CreatedAtUtc = now,
-                        UpdatedAtUtc = now
-                    };
-                    await using var stream = new MemoryStream(bytes, writable: false);
-                    await context.BlobStorage.SaveAsync(revisionAsset.BlobKey, stream, cancellationToken);
-                    try
-                    {
-                        context.DbContext.Assets.Add(revisionAsset);
-                        await context.DbContext.SaveChangesAsync(cancellationToken);
-                    }
-                    catch
-                    {
-                        await context.BlobStorage.DeleteAsync(revisionAsset.BlobKey, CancellationToken.None);
-                        throw;
-                    }
-                }
+                var revisionAsset = await assetWriter.WriteVersionAsync(
+                    new AssetWriteRequest(
+                        context.ProjectId,
+                        type,
+                        $"{subject} · {label}",
+                        $"{subject}-{label}",
+                        ".md",
+                        "text/markdown; charset=utf-8",
+                        Encoding.UTF8.GetBytes(persistedRevision + Environment.NewLine),
+                        AssetVersionTarget.ResourceSubject,
+                        AssetId: assetId,
+                        FileNameFallback: label),
+                    cancellationToken);
 
                 if (context.RevisedAssets.All(asset => asset.Id != revisionAsset.Id))
                 {
@@ -174,13 +151,6 @@ public sealed class WriteDirectorRevisionTool : IDirectorTool
 
     private static string GetResourceSubject(string value) =>
         value.Split('·', StringSplitOptions.TrimEntries)[0];
-
-    private static string SanitizeFileName(string value)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sanitized = new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
-        return string.IsNullOrWhiteSpace(sanitized) ? "未命名" : sanitized.Trim();
-    }
 
     private static Guid CreateRevisionId(Guid projectId, string instruction, string resourceType, string resourceName)
     {

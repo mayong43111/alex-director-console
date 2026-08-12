@@ -31,12 +31,20 @@ public interface IRemoteComfyUiService : IDisposable
 
 public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) : IRemoteComfyUiService
 {
-    private readonly ConcurrentDictionary<Guid, Process> tunnels = new();
+    private readonly ConcurrentDictionary<Guid, TunnelRegistration> tunnels = new();
+    private readonly ConcurrentDictionary<int, Guid> portOwners = new();
+    private readonly Dictionary<RemoteEndpointKey, Guid> remoteEndpointOwners = [];
+    private readonly Dictionary<RemotePathKey, Guid> remotePathOwners = [];
+    private readonly Dictionary<Guid, RemoteRegistration> projectRemoteRegistrations = [];
+    private readonly object remoteOwnershipGate = new();
+    private readonly SemaphoreSlim tunnelGate = new(1, 1);
 
     public async Task<string> InspectAsync(
         ProjectRuntimeConfiguration configuration,
         CancellationToken cancellationToken)
     {
+        EnsureTunnelOwnership(configuration);
+        EnsureRemoteOwnership(configuration);
         var client = httpClientFactory.CreateClient("ComfyUiProxy");
         var baseUri = GetProxyBaseUri(configuration);
         try
@@ -79,7 +87,8 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
     {
         var normalizedAction = action.Trim().ToLowerInvariant();
         if (normalizedAction == "start-tunnel") return await StartTunnelAsync(configuration, cancellationToken);
-        if (normalizedAction == "stop-tunnel") return StopTunnel(configuration.ProjectId);
+        if (normalizedAction == "stop-tunnel") return await StopTunnelAsync(configuration, cancellationToken);
+        ClaimRemoteOwnership(configuration);
 
         var comfyPath = Quote(configuration.ComfyUiPath);
         var pythonPath = Quote(configuration.ComfyUiPythonPath);
@@ -126,6 +135,7 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         int durationSeconds,
         CancellationToken cancellationToken)
     {
+        ClaimRemoteOwnership(configuration);
         var jobId = $"alex-slideshow-{Guid.NewGuid():N}";
         var localDirectory = Path.Combine(Path.GetTempPath(), jobId);
         var remoteDirectory = $"/tmp/{jobId}";
@@ -184,6 +194,7 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         int fps,
         CancellationToken cancellationToken)
     {
+        ClaimRemoteOwnership(configuration);
         var jobId = $"alex-video-concat-{Guid.NewGuid():N}";
         var localDirectory = Path.Combine(Path.GetTempPath(), jobId);
         var remoteDirectory = $"/tmp/{jobId}";
@@ -235,31 +246,123 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         ProjectRuntimeConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        if (await IsProxyAvailableAsync(configuration, cancellationToken))
-            return $"tunnel=running local={GetProxyBaseUri(configuration)}";
-
-        if (tunnels.TryGetValue(configuration.ProjectId, out var existing) && !existing.HasExited)
+        await tunnelGate.WaitAsync(cancellationToken);
+        try
         {
-            await WaitForTunnelAsync(existing, configuration.LocalProxyPort, cancellationToken);
-            return $"tunnel=running local=http://127.0.0.1:{configuration.LocalProxyPort}";
-        }
-        existing?.Dispose();
+            ClaimRemoteOwnership(configuration);
+            if (tunnels.TryGetValue(configuration.ProjectId, out var existing) && !existing.Process.HasExited)
+            {
+                if (existing.LocalPort != configuration.LocalProxyPort)
+                    throw new InvalidOperationException("当前项目已有使用其他本地端口的隧道，请先停止该隧道再更新配置。");
+                EnsureTunnelOwnership(configuration);
+                if (await IsProxyAvailableAsync(configuration, cancellationToken))
+                    return $"tunnel=running local={GetProxyBaseUri(configuration)}";
+                await WaitForTunnelAsync(existing.Process, configuration.LocalProxyPort, cancellationToken);
+                return $"tunnel=running local=http://127.0.0.1:{configuration.LocalProxyPort}";
+            }
 
-        var startInfo = CreateSshStartInfo(configuration);
-        startInfo.ArgumentList.Add("-N");
-        startInfo.ArgumentList.Add("-o");
-        startInfo.ArgumentList.Add("ExitOnForwardFailure=yes");
-        startInfo.ArgumentList.Add("-o");
-        startInfo.ArgumentList.Add("ServerAliveInterval=30");
-        startInfo.ArgumentList.Add("-o");
-        startInfo.ArgumentList.Add("ServerAliveCountMax=3");
-        startInfo.ArgumentList.Add("-L");
-        startInfo.ArgumentList.Add($"127.0.0.1:{configuration.LocalProxyPort}:127.0.0.1:{configuration.ComfyUiPort}");
-        AddDestination(startInfo, configuration);
-        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 SSH 隧道进程。");
-        if (!tunnels.TryAdd(configuration.ProjectId, process)) process.Dispose();
-        await WaitForTunnelAsync(process, configuration.LocalProxyPort, cancellationToken);
-        return $"tunnel=started local=http://127.0.0.1:{configuration.LocalProxyPort}";
+            RemoveTunnelRegistration(configuration.ProjectId, kill: false);
+            if (portOwners.TryGetValue(configuration.LocalProxyPort, out var ownerProjectId)
+                && ownerProjectId != configuration.ProjectId)
+            {
+                throw new InvalidOperationException("本地代理端口已由其他项目的隧道占用，请为当前项目配置独立端口。");
+            }
+            portOwners[configuration.LocalProxyPort] = configuration.ProjectId;
+
+            try
+            {
+                var startInfo = CreateSshStartInfo(configuration);
+                startInfo.ArgumentList.Add("-N");
+                startInfo.ArgumentList.Add("-o");
+                startInfo.ArgumentList.Add("ExitOnForwardFailure=yes");
+                startInfo.ArgumentList.Add("-o");
+                startInfo.ArgumentList.Add("ServerAliveInterval=30");
+                startInfo.ArgumentList.Add("-o");
+                startInfo.ArgumentList.Add("ServerAliveCountMax=3");
+                startInfo.ArgumentList.Add("-L");
+                startInfo.ArgumentList.Add($"127.0.0.1:{configuration.LocalProxyPort}:127.0.0.1:{configuration.ComfyUiPort}");
+                AddDestination(startInfo, configuration);
+                var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 SSH 隧道进程。");
+                tunnels[configuration.ProjectId] = new(process, configuration.LocalProxyPort);
+                await WaitForTunnelAsync(process, configuration.LocalProxyPort, cancellationToken);
+                return $"tunnel=started local=http://127.0.0.1:{configuration.LocalProxyPort}";
+            }
+            catch
+            {
+                RemoveTunnelRegistration(configuration.ProjectId, kill: true);
+                ReleaseRemoteOwnership(configuration.ProjectId);
+                throw;
+            }
+        }
+        finally
+        {
+            tunnelGate.Release();
+        }
+    }
+
+    private void EnsureTunnelOwnership(ProjectRuntimeConfiguration configuration)
+    {
+        if (!tunnels.TryGetValue(configuration.ProjectId, out var tunnel)
+            || tunnel.LocalPort != configuration.LocalProxyPort
+            || tunnel.Process.HasExited
+            || !portOwners.TryGetValue(configuration.LocalProxyPort, out var ownerProjectId)
+            || ownerProjectId != configuration.ProjectId)
+        {
+            throw new InvalidOperationException("当前项目没有该本地代理端口的活动隧道，请先启动当前项目的隧道。");
+        }
+    }
+
+    private void ClaimRemoteOwnership(ProjectRuntimeConfiguration configuration)
+    {
+        var registration = RemoteRegistration.From(configuration);
+        lock (remoteOwnershipGate)
+        {
+            if (projectRemoteRegistrations.TryGetValue(configuration.ProjectId, out var existing)
+                && existing != registration)
+            {
+                throw new InvalidOperationException("当前项目已有其他远端 ComfyUI 配置正在使用，请先停止隧道再更新配置。");
+            }
+            if ((remoteEndpointOwners.TryGetValue(registration.Endpoint, out var endpointOwner)
+                    && endpointOwner != configuration.ProjectId)
+                || (remotePathOwners.TryGetValue(registration.Path, out var pathOwner)
+                    && pathOwner != configuration.ProjectId))
+            {
+                throw new InvalidOperationException("该远端 ComfyUI 端口或目录正由其他项目使用。");
+            }
+
+            remoteEndpointOwners[registration.Endpoint] = configuration.ProjectId;
+            remotePathOwners[registration.Path] = configuration.ProjectId;
+            projectRemoteRegistrations[configuration.ProjectId] = registration;
+        }
+    }
+
+    private void EnsureRemoteOwnership(ProjectRuntimeConfiguration configuration)
+    {
+        var registration = RemoteRegistration.From(configuration);
+        lock (remoteOwnershipGate)
+        {
+            if (!projectRemoteRegistrations.TryGetValue(configuration.ProjectId, out var existing)
+                || existing != registration
+                || !remoteEndpointOwners.TryGetValue(registration.Endpoint, out var endpointOwner)
+                || endpointOwner != configuration.ProjectId
+                || !remotePathOwners.TryGetValue(registration.Path, out var pathOwner)
+                || pathOwner != configuration.ProjectId)
+            {
+                throw new InvalidOperationException("当前项目没有该远端 ComfyUI 实例的使用权。");
+            }
+        }
+    }
+
+    private void ReleaseRemoteOwnership(Guid projectId)
+    {
+        lock (remoteOwnershipGate)
+        {
+            if (!projectRemoteRegistrations.Remove(projectId, out var registration)) return;
+            if (remoteEndpointOwners.GetValueOrDefault(registration.Endpoint) == projectId)
+                remoteEndpointOwners.Remove(registration.Endpoint);
+            if (remotePathOwners.GetValueOrDefault(registration.Path) == projectId)
+                remotePathOwners.Remove(registration.Path);
+        }
     }
 
     private async Task<bool> IsProxyAvailableAsync(
@@ -310,12 +413,30 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         throw new TimeoutException($"等待 SSH 隧道监听 127.0.0.1:{localPort} 超时。");
     }
 
-    private string StopTunnel(Guid projectId)
+    private async Task<string> StopTunnelAsync(
+        ProjectRuntimeConfiguration configuration,
+        CancellationToken cancellationToken)
     {
-        if (!tunnels.TryRemove(projectId, out var process)) return "tunnel=not-running";
-        if (!process.HasExited) process.Kill(true);
-        process.Dispose();
-        return "tunnel=stopped";
+        await tunnelGate.WaitAsync(cancellationToken);
+        try
+        {
+            var stopped = RemoveTunnelRegistration(configuration.ProjectId, kill: true);
+            ReleaseRemoteOwnership(configuration.ProjectId);
+            return stopped ? "tunnel=stopped" : "tunnel=not-running";
+        }
+        finally
+        {
+            tunnelGate.Release();
+        }
+    }
+
+    private bool RemoveTunnelRegistration(Guid projectId, bool kill)
+    {
+        if (!tunnels.TryRemove(projectId, out var tunnel)) return false;
+        portOwners.TryRemove(new KeyValuePair<int, Guid>(tunnel.LocalPort, projectId));
+        if (kill && !tunnel.Process.HasExited) tunnel.Process.Kill(true);
+        tunnel.Process.Dispose();
+        return true;
     }
 
     private static async Task<string> RunSshAsync(
@@ -420,6 +541,42 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
 
     public void Dispose()
     {
-        foreach (var projectId in tunnels.Keys) StopTunnel(projectId);
+        foreach (var projectId in tunnels.Keys) RemoveTunnelRegistration(projectId, kill: true);
+        lock (remoteOwnershipGate)
+        {
+            remoteEndpointOwners.Clear();
+            remotePathOwners.Clear();
+            projectRemoteRegistrations.Clear();
+        }
+        tunnelGate.Dispose();
+    }
+
+    private sealed record TunnelRegistration(Process Process, int LocalPort);
+    private sealed record RemoteEndpointKey(string VmHost, int VmPort, int ComfyUiPort);
+    private sealed record RemotePathKey(string VmHost, int VmPort, string ComfyUiPath);
+    private sealed record RemoteRegistration(RemoteEndpointKey Endpoint, RemotePathKey Path)
+    {
+        public static RemoteRegistration From(ProjectRuntimeConfiguration configuration)
+        {
+            var host = configuration.VmHost.Trim().ToLowerInvariant();
+            return new(
+                new(host, configuration.VmPort, configuration.ComfyUiPort),
+                new(host, configuration.VmPort, RemoteUnixPath.Normalize(configuration.ComfyUiPath)));
+        }
+    }
+}
+
+public static class RemoteUnixPath
+{
+    public static string Normalize(string path)
+    {
+        var normalized = path.Trim().Replace('\\', '/');
+        if (!normalized.StartsWith("/", StringComparison.Ordinal))
+            throw new ArgumentException("ComfyUI 目录必须是远端 Linux 主机上的绝对路径，不能使用 ~ 或相对路径。");
+
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0 || segments.Any(segment => segment is "." or ".."))
+            throw new ArgumentException("ComfyUI 目录不能是根目录，也不能包含 . 或 .. 路径段。");
+        return "/" + string.Join('/', segments);
     }
 }

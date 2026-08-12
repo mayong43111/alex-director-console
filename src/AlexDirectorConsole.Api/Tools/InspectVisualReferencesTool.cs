@@ -1,12 +1,12 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class InspectVisualReferencesTool : IDirectorTool
+public sealed class InspectVisualReferencesTool(IAssetReader assetReader) : IDirectorTool
 {
     public string Name => "inspect_visual_references";
 
@@ -23,10 +23,7 @@ public sealed class InspectVisualReferencesTool : IDirectorTool
                 throw new ArgumentException("至少需要一个人物、场景或道具名称。", nameof(resourceNames));
             }
 
-            var assets = await context.DbContext.Assets
-                .AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId)
-                .ToListAsync(cancellationToken);
+            var assets = await assetReader.ListAsync(context.ProjectId, cancellationToken: cancellationToken);
             var results = names.Select(name =>
             {
                 var setup = assets

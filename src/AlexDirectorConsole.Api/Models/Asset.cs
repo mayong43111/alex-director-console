@@ -20,6 +20,8 @@ public sealed class Asset
 
     public required string ContentType { get; set; }
 
+    public string? GenerationMetadataJson { get; set; }
+
     public long SizeBytes { get; set; }
 
     public DateTimeOffset CreatedAtUtc { get; set; }

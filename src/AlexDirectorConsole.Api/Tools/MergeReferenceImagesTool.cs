@@ -1,7 +1,7 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Services;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -9,7 +9,9 @@ using SixLabors.ImageSharp.Processing;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class MergeReferenceImagesTool : IDirectorTool
+public sealed class MergeReferenceImagesTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter) : IDirectorTool
 {
     private const int CanvasSize = 1024;
     private const int Gap = 12;
@@ -23,6 +25,9 @@ public sealed class MergeReferenceImagesTool : IDirectorTool
             resourceName,
             cancellationToken) =>
         {
+            await context.ResourceLock.WaitAsync(cancellationToken);
+            try
+            {
             var ids = referenceImageAssetIds
                 .Split([',', '，', ';', '；'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty)
@@ -45,10 +50,11 @@ public sealed class MergeReferenceImagesTool : IDirectorTool
                 throw new ArgumentException("资源名称不能为空且不能超过 160 个字符。", nameof(resourceName));
             }
 
-            var assets = await context.DbContext.Assets
-                .AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId && ids.Contains(asset.Id))
-                .ToListAsync(cancellationToken);
+            var assets = (await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken))
+                .Where(asset => ids.Contains(asset.Id))
+                .ToList();
             if (assets.Count != ids.Length || assets.Any(asset => !asset.ContentType.StartsWith("image/")))
             {
                 throw new ArgumentException("所有参考 ID 都必须是当前项目中的真实图片资产。", nameof(referenceImageAssetIds));
@@ -64,7 +70,7 @@ public sealed class MergeReferenceImagesTool : IDirectorTool
             for (var index = 0; index < ids.Length; index++)
             {
                 var asset = assets.Single(item => item.Id == ids[index]);
-                await using var source = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+                await using var source = await assetReader.OpenReadAsync(context.ProjectId, asset, cancellationToken)
                     ?? throw new InvalidOperationException($"参考图 Blob 不存在：{asset.Name}");
                 using var image = await Image.LoadAsync<Rgba32>(source, cancellationToken);
                 var scale = Math.Min(cellWidth / (double)image.Width, cellHeight / (double)image.Height);
@@ -94,9 +100,32 @@ public sealed class MergeReferenceImagesTool : IDirectorTool
                 "deterministic-contact-sheet",
                 "source-preserving",
                 null);
-            var mergedAsset = await ImageAssetWriter.SaveAsync(context, name, mergedImage, cancellationToken);
-            var versionCount = await context.DbContext.Assets.CountAsync(
-                asset => asset.ResourceId == mergedAsset.ResourceId,
+            var mergedAsset = await ImageAssetWriter.SaveAsync(
+                assetWriter,
+                context.ProjectId,
+                name,
+                mergedImage,
+                new ImageGenerationMetadata(
+                    1,
+                    "merge-references",
+                    "local",
+                    mergedImage.Deployment,
+                    null,
+                    null,
+                    new($"{CanvasSize}x{CanvasSize}", mergedImage.Quality, 1, "png", null),
+                    ids.Select((id, index) =>
+                    {
+                        var asset = assets.Single(item => item.Id == id);
+                        return new ImageGenerationSource(
+                            asset.Id,
+                            asset.Name,
+                            asset.Version,
+                            descriptions[index]);
+                    }).ToArray()),
+                cancellationToken);
+            var versionCount = await assetReader.CountVersionsAsync(
+                context.ProjectId,
+                mergedAsset.ResourceId,
                 cancellationToken);
             context.RevisedAssets.Add(mergedAsset);
 
@@ -112,6 +141,11 @@ public sealed class MergeReferenceImagesTool : IDirectorTool
                 asset = AssetResponse.FromAsset(mergedAsset, versionCount),
                 layout
             }, context.JsonOptions);
+            }
+            finally
+            {
+                context.ResourceLock.Release();
+            }
         }),
         name: Name,
         description: "把 2 至 12 张当前项目图片无重绘地拼成一张 1024x1024 参考合并图，适合将同一道具的多角度/多状态图片合并，或人物过多时先合并再用于镜头生成。referenceImageAssetIds 用逗号分隔；referenceDescriptions 必须是同序 JSON 字符串数组，逐项说明每张图是什么及要继承的内容；返回合并资产 ID 和每张源图的区域坐标。",

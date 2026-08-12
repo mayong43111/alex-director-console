@@ -1,11 +1,17 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
+using AlexDirectorConsole.Api.Application.Configuration;
 using AlexDirectorConsole.Api.Contracts;
-using Microsoft.EntityFrameworkCore;
+using AlexDirectorConsole.Api.Services;
 using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class AssembleImageSlideshowTool : IDirectorTool
+public sealed class AssembleImageSlideshowTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter,
+    IRuntimeConfigurationReader configurationReader,
+    IRemoteComfyUiService remoteComfyUiService) : IDirectorTool
 {
     public string Name => "assemble_image_slideshow";
 
@@ -34,24 +40,25 @@ public sealed class AssembleImageSlideshowTool : IDirectorTool
             if (fps is < 12 or > 60 || durationSeconds is < 10 or > 600)
                 throw new ArgumentException("FPS 必须为 12 到 60，时长必须为 10 到 600 秒。");
 
-            var assets = await context.DbContext.Assets.AsNoTracking()
-                .Where(asset => asset.ProjectId == context.ProjectId && ids.Contains(asset.Id))
-                .ToListAsync(cancellationToken);
+            var assets = (await assetReader.ListAsync(
+                    context.ProjectId,
+                    cancellationToken: cancellationToken))
+                .Where(asset => ids.Contains(asset.Id))
+                .ToList();
             if (assets.Count != ids.Length || assets.Any(asset => !asset.ContentType.StartsWith("image/")))
                 throw new ArgumentException("所有 ID 都必须是当前项目中真实存在的图片资产。", nameof(imageAssetIds));
             var orderedAssets = ids.Select(id => assets.Single(asset => asset.Id == id)).ToArray();
             var imageBytes = new List<byte[]>(orderedAssets.Length);
             foreach (var asset in orderedAssets)
             {
-                await using var stream = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+                await using var stream = await assetReader.OpenReadAsync(context.ProjectId, asset, cancellationToken)
                     ?? throw new FileNotFoundException($"图片文件不存在：{asset.FileName}");
                 await using var buffer = new MemoryStream();
                 await stream.CopyToAsync(buffer, cancellationToken);
                 imageBytes.Add(buffer.ToArray());
             }
 
-            var configuration = await context.DbContext.ProjectRuntimeConfigurations.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.ProjectId == Guid.Empty, cancellationToken)
+            var configuration = await configurationReader.GetAsync(context.ProjectId, cancellationToken)
                 ?? throw new InvalidOperationException("尚未配置全局 VM。");
             await context.WriteEventAsync(new
             {
@@ -59,9 +66,14 @@ public sealed class AssembleImageSlideshowTool : IDirectorTool
                 stage = "slideshow.started",
                 message = $"Agent 正在将 {ids.Length} 张图片组装为 {durationSeconds} 秒视频"
             }, cancellationToken);
-            var generatedVideo = await context.RemoteComfyUiService.AssembleSlideshowAsync(
+            var generatedVideo = await remoteComfyUiService.AssembleSlideshowAsync(
                 configuration, imageBytes, width, height, fps, durationSeconds, cancellationToken);
-            var videoAsset = await VideoAssetWriter.SaveAsync(context, name, generatedVideo, cancellationToken);
+            var videoAsset = await VideoAssetWriter.SaveAsync(
+                assetWriter,
+                context.ProjectId,
+                name,
+                generatedVideo,
+                cancellationToken);
             context.RevisedAssets.Add(videoAsset);
             await context.WriteEventAsync(new
             {

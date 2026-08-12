@@ -41,6 +41,9 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                         .HasMaxLength(260)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("GenerationMetadataJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(260)
@@ -73,7 +76,7 @@ namespace AlexDirectorConsole.Api.Data.Migrations
 
                     b.HasIndex("ProjectId", "Type");
 
-                    b.HasIndex("ResourceId", "Version")
+                    b.HasIndex("ProjectId", "ResourceId", "Version")
                         .IsUnique();
 
                     b.ToTable("Assets", (string)null);
@@ -264,7 +267,8 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                     b.Property<string>("VmHost")
                         .IsRequired()
                         .HasMaxLength(260)
-                        .HasColumnType("TEXT");
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
 
                     b.Property<int>("VmPort")
                         .HasColumnType("INTEGER");
@@ -280,6 +284,10 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.HasKey("ProjectId");
+
+                    b.HasIndex("LocalProxyPort")
+                        .IsUnique()
+                        .HasFilter("\"ProjectId\" <> '00000000-0000-0000-0000-000000000000'");
 
                     b.ToTable("ProjectRuntimeConfigurations", (string)null);
                 });
@@ -311,7 +319,7 @@ namespace AlexDirectorConsole.Api.Data.Migrations
 
                     b.HasIndex("ProjectId", "ShotResourceId");
 
-                    b.HasIndex("ShotResourceId", "AssetId", "Role")
+                    b.HasIndex("ProjectId", "ShotResourceId", "AssetId", "Role")
                         .IsUnique();
 
                     b.ToTable("ShotAssetLinks", (string)null);

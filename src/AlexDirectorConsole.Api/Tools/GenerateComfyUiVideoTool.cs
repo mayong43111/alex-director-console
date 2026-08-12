@@ -1,15 +1,22 @@
 using System.Text.Json;
+using AlexDirectorConsole.Api.Application.Assets;
+using AlexDirectorConsole.Api.Application.Configuration;
 using AlexDirectorConsole.Api.Contracts;
 using AlexDirectorConsole.Api.Models;
 using AlexDirectorConsole.Api.Services;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
 
 namespace AlexDirectorConsole.Api.Tools;
 
-public sealed class GenerateComfyUiVideoTool : IDirectorTool
+public sealed class GenerateComfyUiVideoTool(
+    IAssetReader assetReader,
+    IAssetWriter assetWriter,
+    IShotAssetBinder shotAssetBinder,
+    IRuntimeConfigurationReader configurationReader,
+    IRemoteComfyUiService remoteComfyUiService,
+    IComfyUiVideoGenerator comfyUiVideoGenerator) : IDirectorTool
 {
     public string Name => "generate_comfyui_video";
 
@@ -41,29 +48,28 @@ public sealed class GenerateComfyUiVideoTool : IDirectorTool
             var prompt = videoPrompt.Trim();
             if (prompt.Length is 0 or > 8000) throw new ArgumentException("视频提示词不能为空且不能超过 8,000 字符。");
 
-            var shot = await context.DbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
-                asset => asset.Id == parsedShotId && asset.ProjectId == context.ProjectId && asset.Type == "shot", cancellationToken)
+            var shot = await assetReader.GetAsync(context.ProjectId, parsedShotId, cancellationToken)
                 ?? throw new InvalidOperationException("找不到目标 shot。");
+            if (shot.Type != "shot") throw new InvalidOperationException("找不到目标 shot。");
             var firstFrame = await PrepareFrameAsync(
-                context, parsedFirstFrameId, width, height, normalizedFrameFitMode, cancellationToken);
+                assetReader, context.ProjectId, parsedFirstFrameId, width, height, normalizedFrameFitMode, cancellationToken);
             var lastFrame = string.IsNullOrWhiteSpace(lastFrameAssetId)
                 ? null
                 : await PrepareFrameAsync(
-                    context, Guid.Parse(lastFrameAssetId), width, height, normalizedFrameFitMode, cancellationToken);
+                    assetReader, context.ProjectId, Guid.Parse(lastFrameAssetId), width, height, normalizedFrameFitMode, cancellationToken);
             await context.WriteEventAsync(new
             {
                 type = "process",
                 stage = "video.frames",
                 message = $"关键帧已由 Agent 等比处理为 {width}x{height}（{normalizedFrameFitMode}）"
             }, cancellationToken);
-            var configuration = await context.DbContext.ProjectRuntimeConfigurations.AsNoTracking()
-                .SingleOrDefaultAsync(item => item.ProjectId == Guid.Empty, cancellationToken)
+            var configuration = await configurationReader.GetAsync(context.ProjectId, cancellationToken)
                 ?? throw new InvalidOperationException("尚未配置全局 VM 与 ComfyUI。");
 
             await context.WriteEventAsync(new { type = "process", stage = "video.workflow", message = $"正在读取并提交 workflow：{workflowFileName}" }, cancellationToken);
-            var workflowJson = await context.RemoteComfyUiService.ReadWorkflowAsync(configuration, workflowFileName, cancellationToken);
-            await context.RemoteComfyUiService.ExecuteActionAsync(configuration, "start-tunnel", cancellationToken);
-            var generatedVideo = await context.ComfyUiVideoGenerator.GenerateAsync(new(
+            var workflowJson = await remoteComfyUiService.ReadWorkflowAsync(configuration, workflowFileName, cancellationToken);
+            await remoteComfyUiService.ExecuteActionAsync(configuration, "start-tunnel", cancellationToken);
+            var generatedVideo = await comfyUiVideoGenerator.GenerateAsync(new(
                 configuration.LocalProxyPort,
                 workflowJson,
                 firstFrame,
@@ -74,17 +80,19 @@ public sealed class GenerateComfyUiVideoTool : IDirectorTool
                 frameCount,
                 fps,
                 shot.Name), cancellationToken);
-            var videoAsset = await VideoAssetWriter.SaveAsync(context, shot.Name, generatedVideo, cancellationToken);
-            var replacedLinks = await context.DbContext.ShotAssetLinks
-                .Where(link => link.ShotResourceId == shot.ResourceId && link.Role == "video")
-                .ToListAsync(cancellationToken);
-            context.DbContext.ShotAssetLinks.RemoveRange(replacedLinks);
-            context.DbContext.ShotAssetLinks.Add(new ShotAssetLink
-            {
-                Id = Guid.NewGuid(), ProjectId = context.ProjectId, ShotResourceId = shot.ResourceId,
-                AssetId = videoAsset.Id, Role = "video", CreatedAtUtc = DateTimeOffset.UtcNow
-            });
-            await context.DbContext.SaveChangesAsync(cancellationToken);
+            var videoAsset = await VideoAssetWriter.SaveAsync(
+                assetWriter,
+                context.ProjectId,
+                shot.Name,
+                generatedVideo,
+                cancellationToken);
+            await shotAssetBinder.BindAsync(
+                context.ProjectId,
+                shot.ResourceId,
+                videoAsset.Id,
+                "video",
+                exclusive: true,
+                cancellationToken);
             context.RevisedAssets.Add(videoAsset);
             context.VideoPrompts.Add(new(videoAsset.Name, prompt, workflowFileName, width, height, frameCount, fps));
             await context.WriteEventAsync(new { type = "process", stage = "video.completed", message = $"已生成并绑定视频：{videoAsset.Name}" }, cancellationToken);
@@ -103,17 +111,19 @@ public sealed class GenerateComfyUiVideoTool : IDirectorTool
         serializerOptions: context.JsonOptions);
 
     private static async Task<byte[]> PrepareFrameAsync(
-        DirectorToolContext context,
+        IAssetReader assetReader,
+        Guid projectId,
         Guid assetId,
         int width,
         int height,
         string frameFitMode,
         CancellationToken cancellationToken)
     {
-        var asset = await context.DbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
-            item => item.Id == assetId && item.ProjectId == context.ProjectId && item.ContentType.StartsWith("image/"), cancellationToken)
+        var asset = await assetReader.GetAsync(projectId, assetId, cancellationToken)
             ?? throw new InvalidOperationException("找不到项目中的关键帧图片。");
-        await using var stream = await context.BlobStorage.OpenReadAsync(asset.BlobKey, cancellationToken)
+        if (!asset.ContentType.StartsWith("image/"))
+            throw new InvalidOperationException("找不到项目中的关键帧图片。");
+        await using var stream = await assetReader.OpenReadAsync(projectId, asset, cancellationToken)
             ?? throw new FileNotFoundException("关键帧图片文件不存在。", asset.FileName);
         using var image = await Image.LoadAsync(stream, cancellationToken);
         if (image.Width != width || image.Height != height)
