@@ -3,8 +3,10 @@ import type { GlobalFoundryConfiguration, ProjectRuntimeConfiguration } from '..
 interface FoundryConfigurationUpdate extends GlobalFoundryConfiguration {
   openAiApiKey: string | null
   imageApiKey: string | null
+  speechApiKey: string | null
   clearOpenAiApiKey: boolean
   clearImageApiKey: boolean
+  clearSpeechApiKey: boolean
 }
 
 async function readError(response: Response, fallback: string): Promise<Error> {

@@ -14,21 +14,55 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<ProjectRuntimeConfiguration> ProjectRuntimeConfigurations => Set<ProjectRuntimeConfiguration>();
     public DbSet<GlobalFoundryConfiguration> GlobalFoundryConfigurations => Set<GlobalFoundryConfiguration>();
 
-    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
-        foreach (var entry in ChangeTracker.Entries<Asset>().Where(entry => entry.State == EntityState.Added))
+        var addedAssets = ChangeTracker.Entries<Asset>()
+            .Where(entry => entry.State == EntityState.Added)
+            .Select(entry => entry.Entity)
+            .ToList();
+        foreach (var asset in addedAssets)
         {
-            if (entry.Entity.ResourceId == Guid.Empty)
+            if (asset.ResourceId == Guid.Empty)
             {
-                entry.Entity.ResourceId = entry.Entity.Id;
+                asset.ResourceId = asset.Id;
             }
-            if (entry.Entity.Version < 1)
+            if (asset.Version < 1)
             {
-                entry.Entity.Version = 1;
+                asset.Version = 1;
             }
         }
 
-        return base.SaveChangesAsync(cancellationToken);
+        foreach (var projectAssets in addedAssets.GroupBy(asset => asset.ProjectId))
+        {
+            var resourceIds = projectAssets.Select(asset => asset.ResourceId).Distinct().ToArray();
+            var existingNumbers = await Assets
+                .AsNoTracking()
+                .Where(asset => asset.ProjectId == projectAssets.Key
+                    && resourceIds.Contains(asset.ResourceId))
+                .GroupBy(asset => asset.ResourceId)
+                .ToDictionaryAsync(
+                    group => group.Key,
+                    group => group.Select(asset => asset.Number).First(),
+                    cancellationToken);
+            var nextNumber = await Assets
+                .Where(asset => asset.ProjectId == projectAssets.Key)
+                .Select(asset => (int?)asset.Number)
+                .MaxAsync(cancellationToken) ?? 0;
+
+            foreach (var resourceAssets in projectAssets.GroupBy(asset => asset.ResourceId))
+            {
+                if (!existingNumbers.TryGetValue(resourceAssets.Key, out var number))
+                {
+                    number = ++nextNumber;
+                }
+                foreach (var asset in resourceAssets)
+                {
+                    asset.Number = number;
+                }
+            }
+        }
+
+        return await base.SaveChangesAsync(cancellationToken);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -53,6 +87,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.ToTable("Assets");
             entity.HasKey(asset => asset.Id);
             entity.HasIndex(asset => new { asset.ProjectId, asset.Type });
+            entity.HasIndex(asset => new { asset.ProjectId, asset.Number, asset.Version }).IsUnique();
             entity.HasIndex(asset => new { asset.ProjectId, asset.ResourceId, asset.Version }).IsUnique();
             entity.HasIndex(asset => asset.BlobKey).IsUnique();
             entity.Property(asset => asset.Type).HasMaxLength(50).IsRequired();
@@ -133,6 +168,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(configuration => configuration.ImageApiVersion).HasMaxLength(100).IsRequired();
             entity.Property(configuration => configuration.ImageQuality).HasMaxLength(20).IsRequired();
             entity.Property(configuration => configuration.ProtectedImageApiKey).HasMaxLength(4000).IsRequired();
+            entity.Property(configuration => configuration.SpeechEndpoint).HasMaxLength(500).IsRequired();
+            entity.Property(configuration => configuration.SpeechDeployment).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.SpeechApiVersion).HasMaxLength(100).IsRequired();
+            entity.Property(configuration => configuration.ProtectedSpeechApiKey).HasMaxLength(4000).IsRequired();
         });
     }
 }

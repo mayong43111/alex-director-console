@@ -5,6 +5,7 @@ namespace AlexDirectorConsole.Api.Contracts;
 public sealed record AssetResponse(
     Guid Id,
     Guid ResourceId,
+    int Number,
     int Version,
     int VersionCount,
     Guid ProjectId,
@@ -20,6 +21,7 @@ public sealed record AssetResponse(
     public static AssetResponse FromAsset(Asset asset, int versionCount = 1) => new(
         asset.Id,
         asset.ResourceId,
+        asset.Number,
         asset.Version,
         versionCount,
         asset.ProjectId,

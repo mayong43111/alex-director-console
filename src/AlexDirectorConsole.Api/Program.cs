@@ -46,6 +46,7 @@ builder.Services.AddScoped<IDirectorTool, ReadProjectResourceContentsTool>();
 builder.Services.AddScoped<IDirectorTool, DeleteProjectResourceTool>();
 builder.Services.AddScoped<IDirectorTool, WriteDirectorRevisionTool>();
 builder.Services.AddScoped<IDirectorTool, GenerateImageTool>();
+builder.Services.AddScoped<IDirectorTool, GenerateSpeechTool>();
 builder.Services.AddScoped<IDirectorTool, EditImageTool>();
 builder.Services.AddScoped<IDirectorTool, InspectVisualReferencesTool>();
 builder.Services.AddScoped<IDirectorTool, MergeReferenceImagesTool>();
@@ -64,6 +65,7 @@ builder.Services.AddHttpClient("ComfyUiProxy", client => client.Timeout = TimeSp
 builder.Services.AddSingleton<IRemoteComfyUiService, RemoteComfyUiService>();
 builder.Services.AddHttpClient<IComfyUiVideoGenerator, ComfyUiVideoGenerator>(client => client.Timeout = TimeSpan.FromHours(2));
 builder.Services.AddHttpClient<IAzureFoundryImageGenerator, AzureFoundryImageGenerator>();
+builder.Services.AddHttpClient<IAzureFoundrySpeechGenerator, AzureFoundrySpeechGenerator>();
 builder.Services.AddScoped<IAgentSkillExecutor, AgentSkillExecutor>();
 builder.Services.AddScoped<IAssetReader, AssetReader>();
 builder.Services.AddScoped<IAssetWriter, AssetWriter>();
@@ -218,6 +220,8 @@ static async Task EnsureAndLoadGlobalFoundryConfigurationAsync(
             ?? applicationConfiguration["AzureOpenAI:ApiKey"];
         var imageApiKey = Environment.GetEnvironmentVariable("AZURE_IMAGE_API_KEY")
             ?? applicationConfiguration["AzureImage:ApiKey"];
+        var speechApiKey = Environment.GetEnvironmentVariable("AZURE_SPEECH_API_KEY")
+            ?? applicationConfiguration["AzureSpeech:ApiKey"];
         configuration = new GlobalFoundryConfiguration
         {
             OpenAiEndpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT")
@@ -234,6 +238,13 @@ static async Task EnsureAndLoadGlobalFoundryConfigurationAsync(
             ImageQuality = Environment.GetEnvironmentVariable("AZURE_IMAGE_QUALITY")
                 ?? applicationConfiguration["AzureImage:Quality"] ?? "medium",
             ProtectedImageApiKey = string.IsNullOrWhiteSpace(imageApiKey) ? string.Empty : protector.Protect(imageApiKey),
+            SpeechEndpoint = Environment.GetEnvironmentVariable("AZURE_SPEECH_ENDPOINT")
+                ?? applicationConfiguration["AzureSpeech:Endpoint"] ?? string.Empty,
+            SpeechDeployment = Environment.GetEnvironmentVariable("AZURE_SPEECH_DEPLOYMENT")
+                ?? applicationConfiguration["AzureSpeech:Deployment"] ?? "tts",
+            SpeechApiVersion = Environment.GetEnvironmentVariable("AZURE_SPEECH_API_VERSION")
+                ?? applicationConfiguration["AzureSpeech:ApiVersion"] ?? "2025-03-01-preview",
+            ProtectedSpeechApiKey = string.IsNullOrWhiteSpace(speechApiKey) ? string.Empty : protector.Protect(speechApiKey),
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
         dbContext.GlobalFoundryConfigurations.Add(configuration);

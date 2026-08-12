@@ -18,7 +18,8 @@ public static class HealthEndpoints
 
         app.MapGet("/api/agent/status", (
             IDirectorAgent directorAgent,
-            IAzureFoundryImageGenerator imageGenerator) =>
+            IAzureFoundryImageGenerator imageGenerator,
+            IAzureFoundrySpeechGenerator speechGenerator) =>
         {
             return Results.Ok(new
             {
@@ -30,7 +31,9 @@ public static class HealthEndpoints
                 configured = directorAgent.IsConfigured,
                 imageDeployment = imageGenerator.Deployment,
                 imageQuality = imageGenerator.Quality,
-                imageConfigured = imageGenerator.IsConfigured
+                imageConfigured = imageGenerator.IsConfigured,
+                speechDeployment = speechGenerator.Deployment,
+                speechConfigured = speechGenerator.IsConfigured
             });
         })
         .WithName("GetAgentStatus")

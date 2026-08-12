@@ -15,6 +15,10 @@ public static class FoundryEnvironment
         Environment.SetEnvironmentVariable("AZURE_IMAGE_API_VERSION", configuration.ImageApiVersion);
         Environment.SetEnvironmentVariable("AZURE_IMAGE_QUALITY", configuration.ImageQuality);
         Environment.SetEnvironmentVariable("AZURE_IMAGE_API_KEY", UnprotectOrNull(configuration.ProtectedImageApiKey, protector));
+        Environment.SetEnvironmentVariable("AZURE_SPEECH_ENDPOINT", NullIfEmpty(configuration.SpeechEndpoint));
+        Environment.SetEnvironmentVariable("AZURE_SPEECH_DEPLOYMENT", configuration.SpeechDeployment);
+        Environment.SetEnvironmentVariable("AZURE_SPEECH_API_VERSION", configuration.SpeechApiVersion);
+        Environment.SetEnvironmentVariable("AZURE_SPEECH_API_KEY", UnprotectOrNull(configuration.ProtectedSpeechApiKey, protector));
     }
 
     private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value;

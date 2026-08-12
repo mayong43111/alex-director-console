@@ -578,9 +578,9 @@
 .asset-row-review {
   min-width: 0;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 28px 20px minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
+  gap: 6px;
   padding: 5px 7px;
   border: 0;
   color: inherit;
@@ -593,14 +593,11 @@
   justify-self: center;
 }
 
-.asset-row-thumbnail {
-  width: 44px;
-  height: 44px;
-  display: block;
-  border: 1px solid #d4d1c8;
-  border-radius: 3px;
-  background: #ece9e1;
-  object-fit: cover;
+.asset-row-number {
+  color: #767a72;
+  font: 600 10px/1 Bahnschrift, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .asset-row:hover {

@@ -3,6 +3,7 @@ using System;
 using AlexDirectorConsole.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AlexDirectorConsole.Api.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260812132135_AddFoundrySpeechConfiguration")]
+    partial class AddFoundrySpeechConfiguration
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -49,9 +52,6 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                         .HasMaxLength(260)
                         .HasColumnType("TEXT");
 
-                    b.Property<int>("Number")
-                        .HasColumnType("INTEGER");
-
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("TEXT");
 
@@ -78,9 +78,6 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                         .IsUnique();
 
                     b.HasIndex("ProjectId", "Type");
-
-                    b.HasIndex("ProjectId", "Number", "Version")
-                        .IsUnique();
 
                     b.HasIndex("ProjectId", "ResourceId", "Version")
                         .IsUnique();

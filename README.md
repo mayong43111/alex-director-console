@@ -27,6 +27,7 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
 - **剧本拆解**：从文本剧本提取分析稿、人物、场景和关键道具资源。
 - **不可变资源版本**：修改资源时创建新版本，保留历史 Blob，支持版本审阅。
 - **图片工作流**：生成、编辑、合并参考图，并按视觉参考或项目画幅选择输出尺寸。
+- **Azure 配音工作流**：由 Agent 将旁白或对白生成音频，保存原文、voice、语速、格式和模型参数并直接播放。
 - **ComfyUI 视频工作流**：检查和管理远端 ComfyUI，执行 MiniMax H3 首尾帧视频、静帧组装和片段拼接。
 - **可管理技能**：从 `Skills/**/SKILL.md` 发现 Agent Skill，并支持启停与运行审计。
 
@@ -37,7 +38,7 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
 | Web | React 19、TypeScript 6、Vite 8、React Router、Lucide |
 | API | ASP.NET Core 8 Minimal API、EF Core 8、SQLite |
 | Agent | Microsoft Agent Framework Harness、Azure AI OpenAI |
-| 媒体 | Azure Image、ComfyUI、MiniMax H3、ImageSharp |
+| 媒体 | Azure Image、Azure TTS、ComfyUI、MiniMax H3、ImageSharp |
 | 存储 | SQLite 元数据、本地文件 Blob |
 
 ### 环境要求
@@ -76,6 +77,9 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
    AZURE_IMAGE_DEPLOYMENT=gpt-image-2
    AZURE_IMAGE_QUALITY=medium
    AZURE_IMAGE_API_VERSION=2025-04-01-preview
+
+   AZURE_SPEECH_DEPLOYMENT=tts
+   AZURE_SPEECH_API_VERSION=2025-03-01-preview
    ```
 
 4. 一键启动开发环境：
@@ -118,6 +122,10 @@ npm run dev --prefix src/web
 | `AZURE_IMAGE_DEPLOYMENT` | 图片功能 | 图片模型部署名 |
 | `AZURE_IMAGE_QUALITY` | 否 | `low`、`medium` 或 `high`，默认 `medium` |
 | `AZURE_IMAGE_API_VERSION` | 否 | 图片 API 版本 |
+| `AZURE_SPEECH_DEPLOYMENT` | 配音功能 | 语音模型部署名；当前资源使用 `tts` |
+| `AZURE_SPEECH_API_VERSION` | 否 | 语音 API 版本 |
+
+当前 `tts` 部署支持 `alloy`、`echo`、`fable`、`nova`、`onyx`、`shimmer`。Endpoint 和 API Key 未单独配置时复用 `AZURE_OPENAI_*`。
 
 #### VM 与 ComfyUI
 
@@ -255,6 +263,7 @@ The project is under active development. It is intended for local development an
 - **Script breakdown**: derive analysis, character, scene, and key-prop assets from a text script.
 - **Immutable asset versions**: create a new version for every revision while preserving historical blobs.
 - **Image workflows**: generate, edit, and merge references using either square asset framing or the project aspect ratio.
+- **Azure voice-over workflows**: let the agent synthesize narration or dialogue while preserving the text, voice, speed, format, and model parameters.
 - **ComfyUI video workflows**: inspect and manage remote ComfyUI, run MiniMax H3 frame-to-video workflows, assemble slideshows, and concatenate clips.
 - **Manageable skills**: discover Agent Skills from `Skills/**/SKILL.md`, enable or disable them, and audit executions.
 
@@ -265,7 +274,7 @@ The project is under active development. It is intended for local development an
 | Web | React 19, TypeScript 6, Vite 8, React Router, Lucide |
 | API | ASP.NET Core 8 Minimal API, EF Core 8, SQLite |
 | Agent | Microsoft Agent Framework Harness, Azure AI OpenAI |
-| Media | Azure Image, ComfyUI, MiniMax H3, ImageSharp |
+| Media | Azure Image, Azure TTS, ComfyUI, MiniMax H3, ImageSharp |
 | Storage | SQLite metadata and local file blobs |
 
 ### Prerequisites
@@ -304,6 +313,9 @@ Versions are pinned by [global.json](global.json) and [package.json](src/web/pac
    AZURE_IMAGE_DEPLOYMENT=gpt-image-2
    AZURE_IMAGE_QUALITY=medium
    AZURE_IMAGE_API_VERSION=2025-04-01-preview
+
+   AZURE_SPEECH_DEPLOYMENT=tts
+   AZURE_SPEECH_API_VERSION=2025-03-01-preview
    ```
 
 4. Start the development environment:
@@ -346,6 +358,10 @@ npm run dev --prefix src/web
 | `AZURE_IMAGE_DEPLOYMENT` | For images | Image model deployment name |
 | `AZURE_IMAGE_QUALITY` | No | `low`, `medium`, or `high`; defaults to `medium` |
 | `AZURE_IMAGE_API_VERSION` | No | Image API version |
+| `AZURE_SPEECH_DEPLOYMENT` | For voice-over | Speech model deployment name; the current resource uses `tts` |
+| `AZURE_SPEECH_API_VERSION` | No | Speech API version |
+
+The current `tts` deployment supports `alloy`, `echo`, `fable`, `nova`, `onyx`, and `shimmer`. Speech falls back to `AZURE_OPENAI_*` when no separate endpoint or API key is configured.
 
 #### VM and ComfyUI
 

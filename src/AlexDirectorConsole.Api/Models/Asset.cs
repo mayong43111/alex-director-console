@@ -8,6 +8,8 @@ public sealed class Asset
 
     public int Version { get; set; } = 1;
 
+    public int Number { get; set; }
+
     public Guid ProjectId { get; set; }
 
     public required string Type { get; set; }

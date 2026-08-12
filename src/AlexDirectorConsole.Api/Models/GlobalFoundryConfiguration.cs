@@ -20,5 +20,13 @@ public sealed class GlobalFoundryConfiguration
 
     public string ProtectedImageApiKey { get; set; } = string.Empty;
 
+    public string SpeechEndpoint { get; set; } = string.Empty;
+
+    public string SpeechDeployment { get; set; } = "tts";
+
+    public string SpeechApiVersion { get; set; } = "2025-03-01-preview";
+
+    public string ProtectedSpeechApiKey { get; set; } = string.Empty;
+
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

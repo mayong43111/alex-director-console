@@ -227,11 +227,8 @@ function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete }:
         aria-pressed={selected}
         onClick={() => onReview(asset)}
       >
-        {asset.contentType.startsWith('image/') ? (
-          <img className="asset-row-thumbnail" src={asset.contentUrl} alt="" loading="lazy" />
-        ) : (
-          <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
-        )}
+        <span className="asset-row-number">{asset.number.toString().padStart(3, '0')}</span>
+        <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
         <span>
           <strong>{asset.name}</strong>
           <small>

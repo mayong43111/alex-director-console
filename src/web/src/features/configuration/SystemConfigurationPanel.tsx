@@ -18,6 +18,8 @@ interface SystemConfigurationPanelProps {
   setOpenAiApiKey: Dispatch<SetStateAction<string>>
   imageApiKey: string
   setImageApiKey: Dispatch<SetStateAction<string>>
+  speechApiKey: string
+  setSpeechApiKey: Dispatch<SetStateAction<string>>
   saveFoundryConfiguration: () => Promise<void>
   runtimeConfiguration: ProjectRuntimeConfiguration
   setRuntimeConfiguration: Dispatch<SetStateAction<ProjectRuntimeConfiguration>>
@@ -40,6 +42,8 @@ export function SystemConfigurationPanel({
   setOpenAiApiKey,
   imageApiKey,
   setImageApiKey,
+  speechApiKey,
+  setSpeechApiKey,
   saveFoundryConfiguration,
   runtimeConfiguration,
   setRuntimeConfiguration,
@@ -84,6 +88,15 @@ export function SystemConfigurationPanel({
             <option value="medium">中</option>
             <option value="high">高</option>
           </select>
+
+          <label htmlFor="system-speech-endpoint">语音模型 Endpoint</label>
+          <input id="system-speech-endpoint" value={foundryConfiguration.speechEndpoint} placeholder="留空则复用语言模型 Endpoint" onChange={(event) => setFoundryConfiguration((current) => ({ ...current, speechEndpoint: event.target.value }))} />
+          <label htmlFor="system-speech-deployment">语音模型部署</label>
+          <input id="system-speech-deployment" value={foundryConfiguration.speechDeployment} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, speechDeployment: event.target.value }))} />
+          <label htmlFor="system-speech-key">语音模型 API Key</label>
+          <input id="system-speech-key" type="password" value={speechApiKey} autoComplete="new-password" placeholder={foundryConfiguration.speechApiKeyConfigured ? '已配置，留空则保持不变' : '留空则复用语言模型 API Key'} onChange={(event) => setSpeechApiKey(event.target.value)} />
+          <label htmlFor="system-speech-api-version">语音 API 版本</label>
+          <input id="system-speech-api-version" value={foundryConfiguration.speechApiVersion} onChange={(event) => setFoundryConfiguration((current) => ({ ...current, speechApiVersion: event.target.value }))} />
           <button className="project-settings-save" type="button" disabled={foundryConfigurationState === 'loading' || foundryConfigurationState === 'saving'} onClick={() => void saveFoundryConfiguration()}>
             {foundryConfigurationState === 'saving' ? '保存中…' : '保存 Foundry 配置'}
           </button>

@@ -14,6 +14,7 @@ import {
   MapPinned,
   Maximize2,
   Minus,
+  Music,
   Paperclip,
   Plus,
   RotateCcw,
@@ -93,6 +94,10 @@ const defaultFoundryConfiguration: GlobalFoundryConfiguration = {
   imageApiVersion: '2025-04-01-preview',
   imageQuality: 'medium',
   imageApiKeyConfigured: false,
+  speechEndpoint: '',
+  speechDeployment: 'tts',
+  speechApiVersion: '2025-03-01-preview',
+  speechApiKeyConfigured: false,
   updatedAtUtc: '',
 }
 const projectFormatPresets = [
@@ -114,6 +119,7 @@ const assetSections: AssetSection[] = [
   { id: 'analyses', type: 'analysis', label: '分析', accept: '.md,.json', icon: FileSearch },
   { id: 'images', type: 'media', label: '图片素材', accept: 'image/*', icon: Images, contentTypePrefix: 'image/' },
   { id: 'videos', type: 'media', label: '视频素材', accept: 'video/*', icon: Video, contentTypePrefix: 'video/' },
+  { id: 'audio', type: 'media', label: '音频素材', accept: 'audio/*', icon: Music, contentTypePrefix: 'audio/' },
   { id: 'characters', type: 'character', label: '人物', accept: '.md,image/*,.pdf', icon: Users },
   { id: 'scenes', type: 'scene', label: '场景', accept: '.md,image/*,video/*,.pdf', icon: MapPinned },
   { id: 'props', type: 'prop', label: '道具', accept: '.md,image/*,.pdf', icon: Box },
@@ -150,10 +156,36 @@ interface ImageGenerationMetadata {
   }>
 }
 
+interface SpeechGenerationMetadata {
+  schemaVersion: number
+  operation: 'text-to-speech'
+  provider: string
+  model: string
+  prompt: string
+  parameters: {
+    voice: string
+    instructions: string
+    instructionsApplied: boolean
+    speed: number
+    responseFormat: string
+    apiVersion: string | null
+  }
+}
+
 function parseImageGenerationMetadata(value: string | null): ImageGenerationMetadata | null {
   if (!value) return null
   try {
     return JSON.parse(value) as ImageGenerationMetadata
+  } catch {
+    return null
+  }
+}
+
+function parseSpeechGenerationMetadata(value: string | null): SpeechGenerationMetadata | null {
+  if (!value) return null
+  try {
+    const metadata = JSON.parse(value) as SpeechGenerationMetadata
+    return metadata.operation === 'text-to-speech' ? metadata : null
   } catch {
     return null
   }
@@ -267,6 +299,7 @@ function App() {
   const [foundryConfiguration, setFoundryConfiguration] = useState(defaultFoundryConfiguration)
   const [openAiApiKey, setOpenAiApiKey] = useState('')
   const [imageApiKey, setImageApiKey] = useState('')
+  const [speechApiKey, setSpeechApiKey] = useState('')
   const [foundryConfigurationState, setFoundryConfigurationState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>('director')
   const projectRoute = matchPath('/projects/:projectId/*', location.pathname)
@@ -472,6 +505,7 @@ function App() {
         setFoundryConfiguration(configuration)
         setOpenAiApiKey('')
         setImageApiKey('')
+        setSpeechApiKey('')
         setFoundryConfigurationState('idle')
       })
       .catch((error: unknown) => {
@@ -649,11 +683,14 @@ function App() {
         ...foundryConfiguration,
         openAiApiKey: openAiApiKey || null,
         imageApiKey: imageApiKey || null,
+        speechApiKey: speechApiKey || null,
         clearOpenAiApiKey: false,
         clearImageApiKey: false,
+        clearSpeechApiKey: false,
       }))
       setOpenAiApiKey('')
       setImageApiKey('')
+      setSpeechApiKey('')
       setFoundryConfigurationState('saved')
       const statusResponse = await fetch('/api/agent/status')
       if (statusResponse.ok) setAgentStatus(await statusResponse.json() as AgentStatus)
@@ -1208,7 +1245,7 @@ function App() {
               <Box size={19} strokeWidth={1.7} aria-hidden="true" />
             </button>
             {assetSections
-              .filter((section) => ['images', 'videos'].includes(section.id))
+              .filter((section) => ['images', 'videos', 'audio'].includes(section.id))
               .map((section) => {
                 const Icon = section.icon
                 const isActive = sidebarMode === 'assets' && selectedAssetSection.id === section.id
@@ -1305,6 +1342,8 @@ function App() {
             setOpenAiApiKey={setOpenAiApiKey}
             imageApiKey={imageApiKey}
             setImageApiKey={setImageApiKey}
+            speechApiKey={speechApiKey}
+            setSpeechApiKey={setSpeechApiKey}
             saveFoundryConfiguration={saveFoundryConfiguration}
             runtimeConfiguration={runtimeConfiguration}
             setRuntimeConfiguration={setRuntimeConfiguration}
@@ -1746,6 +1785,7 @@ function App() {
             ) : selectedAsset ? (
               <dl>
                 <div><dt>名称</dt><dd>{selectedAsset.name}</dd></div>
+                <div><dt>编号</dt><dd>{selectedAsset.number.toString().padStart(3, '0')}</dd></div>
                 <div><dt>版本</dt><dd>v{selectedAsset.version} / {selectedAsset.versionCount}</dd></div>
                 <div><dt>分类</dt><dd>{selectedAssetSection.label}</dd></div>
                 <div><dt>文件名</dt><dd>{selectedAsset.fileName}</dd></div>
@@ -1782,6 +1822,29 @@ function App() {
                               <span key={source.assetId}>{source.name} v{source.version}{source.description ? ` · ${source.description}` : ''}</span>
                             ))}
                           </dd>
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+                {(() => {
+                  const metadata = parseSpeechGenerationMetadata(selectedAsset.generationMetadataJson)
+                  if (!selectedAsset.contentType.startsWith('audio/') || !metadata) return null
+                  return (
+                    <>
+                      <div><dt>生成方式</dt><dd>文本转语音</dd></div>
+                      <div><dt>模型</dt><dd>{metadata.model}</dd></div>
+                      <div><dt>Voice</dt><dd>{metadata.parameters.voice}</dd></div>
+                      <div>
+                        <dt>调用参数</dt>
+                        <dd>{metadata.parameters.responseFormat} · {metadata.parameters.speed}×{metadata.parameters.apiVersion ? ` · ${metadata.parameters.apiVersion}` : ''}</dd>
+                      </div>
+                      <div className="generation-detail-row">
+                        <dt>朗读原文</dt><dd><pre>{metadata.prompt}</pre></dd>
+                      </div>
+                      {metadata.parameters.instructions && (
+                        <div className="generation-detail-row">
+                          <dt>表演指令</dt><dd><pre>{metadata.parameters.instructions}{metadata.parameters.instructionsApplied ? '' : '\n（当前部署不支持，未提交给模型）'}</pre></dd>
                         </div>
                       )}
                     </>

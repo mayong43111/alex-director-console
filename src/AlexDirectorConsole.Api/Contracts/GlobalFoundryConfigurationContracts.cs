@@ -12,7 +12,12 @@ public sealed record UpdateGlobalFoundryConfigurationRequest(
     string ImageApiVersion,
     string ImageQuality,
     string? ImageApiKey,
-    bool ClearImageApiKey);
+    bool ClearImageApiKey,
+    string SpeechEndpoint,
+    string SpeechDeployment,
+    string SpeechApiVersion,
+    string? SpeechApiKey,
+    bool ClearSpeechApiKey);
 
 public sealed record GlobalFoundryConfigurationResponse(
     string OpenAiEndpoint,
@@ -23,6 +28,10 @@ public sealed record GlobalFoundryConfigurationResponse(
     string ImageApiVersion,
     string ImageQuality,
     bool ImageApiKeyConfigured,
+    string SpeechEndpoint,
+    string SpeechDeployment,
+    string SpeechApiVersion,
+    bool SpeechApiKeyConfigured,
     DateTimeOffset UpdatedAtUtc)
 {
     public static GlobalFoundryConfigurationResponse FromConfiguration(GlobalFoundryConfiguration configuration) => new(
@@ -34,5 +43,9 @@ public sealed record GlobalFoundryConfigurationResponse(
         configuration.ImageApiVersion,
         configuration.ImageQuality,
         !string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey),
+        configuration.SpeechEndpoint,
+        configuration.SpeechDeployment,
+        configuration.SpeechApiVersion,
+        !string.IsNullOrWhiteSpace(configuration.ProtectedSpeechApiKey),
         configuration.UpdatedAtUtc);
 }

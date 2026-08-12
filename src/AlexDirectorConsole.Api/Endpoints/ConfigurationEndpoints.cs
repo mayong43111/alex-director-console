@@ -178,12 +178,16 @@ public static class ConfigurationEndpoints
             {
                 var openAiEndpoint = request.OpenAiEndpoint.Trim();
                 var imageEndpoint = request.ImageEndpoint.Trim();
+                var speechEndpoint = request.SpeechEndpoint.Trim();
                 if ((!string.IsNullOrWhiteSpace(openAiEndpoint) && !Uri.TryCreate(openAiEndpoint, UriKind.Absolute, out _))
-                    || (!string.IsNullOrWhiteSpace(imageEndpoint) && !Uri.TryCreate(imageEndpoint, UriKind.Absolute, out _)))
+                    || (!string.IsNullOrWhiteSpace(imageEndpoint) && !Uri.TryCreate(imageEndpoint, UriKind.Absolute, out _))
+                    || (!string.IsNullOrWhiteSpace(speechEndpoint) && !Uri.TryCreate(speechEndpoint, UriKind.Absolute, out _)))
                     return Results.BadRequest(new { error = "Foundry Endpoint 必须为空或有效的绝对 URL。" });
                 if (request.OpenAiDeployment.Trim().Length is 0 or > 100
                     || request.ImageDeployment.Trim().Length is 0 or > 100
                     || request.ImageApiVersion.Trim().Length is 0 or > 100
+                    || request.SpeechDeployment.Trim().Length is 0 or > 100
+                    || request.SpeechApiVersion.Trim().Length is 0 or > 100
                     || request.ImageQuality is not ("low" or "medium" or "high"))
                     return Results.BadRequest(new { error = "部署名称、API 版本或图片质量无效。" });
 
@@ -196,10 +200,15 @@ public static class ConfigurationEndpoints
                 configuration.ImageDeployment = request.ImageDeployment.Trim();
                 configuration.ImageApiVersion = request.ImageApiVersion.Trim();
                 configuration.ImageQuality = request.ImageQuality;
+                configuration.SpeechEndpoint = speechEndpoint;
+                configuration.SpeechDeployment = request.SpeechDeployment.Trim();
+                configuration.SpeechApiVersion = request.SpeechApiVersion.Trim();
                 if (request.ClearOpenAiApiKey) configuration.ProtectedOpenAiApiKey = string.Empty;
                 else if (!string.IsNullOrWhiteSpace(request.OpenAiApiKey)) configuration.ProtectedOpenAiApiKey = protector.Protect(request.OpenAiApiKey.Trim());
                 if (request.ClearImageApiKey) configuration.ProtectedImageApiKey = string.Empty;
                 else if (!string.IsNullOrWhiteSpace(request.ImageApiKey)) configuration.ProtectedImageApiKey = protector.Protect(request.ImageApiKey.Trim());
+                if (request.ClearSpeechApiKey) configuration.ProtectedSpeechApiKey = string.Empty;
+                else if (!string.IsNullOrWhiteSpace(request.SpeechApiKey)) configuration.ProtectedSpeechApiKey = protector.Protect(request.SpeechApiKey.Trim());
                 configuration.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 await dbContext.SaveChangesAsync(cancellationToken);
                 FoundryEnvironment.Apply(configuration, protector);

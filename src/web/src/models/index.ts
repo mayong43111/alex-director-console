@@ -9,6 +9,8 @@ export interface AgentStatus {
   imageDeployment: string
   imageQuality: string
   imageConfigured: boolean
+  speechDeployment: string
+  speechConfigured: boolean
 }
 
 export interface Project {
@@ -49,6 +51,10 @@ export interface GlobalFoundryConfiguration {
   imageApiVersion: string
   imageQuality: 'low' | 'medium' | 'high'
   imageApiKeyConfigured: boolean
+  speechEndpoint: string
+  speechDeployment: string
+  speechApiVersion: string
+  speechApiKeyConfigured: boolean
   updatedAtUtc: string
 }
 
@@ -92,6 +98,7 @@ export interface MessageStreamEvent {
 export interface AssetRecord {
   id: string
   resourceId: string
+  number: number
   version: number
   versionCount: number
   projectId: string
