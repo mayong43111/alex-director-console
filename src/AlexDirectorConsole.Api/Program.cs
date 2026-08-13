@@ -78,7 +78,7 @@ builder.Services.Configure<FormOptions>(options =>
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+        policy.WithOrigins("http://localhost:6173", "http://127.0.0.1:6173")
             .AllowAnyHeader()
             .AllowAnyMethod());
 });

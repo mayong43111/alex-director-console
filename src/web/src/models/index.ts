@@ -74,7 +74,14 @@ export interface ProcessEventRecord {
   stage: string
   message: string
   data?: {
+    asset?: AssetRecord
     imagePrompt?: string
+    videoPrompt?: string
+    workflowFileName?: string
+    width?: number
+    height?: number
+    frameCount?: number
+    fps?: number
   }
 }
 
@@ -83,7 +90,14 @@ export interface MessageStreamEvent {
   stage?: string
   message?: string
   data?: {
+    asset?: AssetRecord
     imagePrompt?: string
+    videoPrompt?: string
+    workflowFileName?: string
+    width?: number
+    height?: number
+    frameCount?: number
+    fps?: number
   }
   detail?: string
   delta?: string

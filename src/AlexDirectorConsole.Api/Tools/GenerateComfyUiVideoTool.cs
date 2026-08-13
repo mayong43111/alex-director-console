@@ -85,7 +85,20 @@ public sealed class GenerateComfyUiVideoTool(
                 context.ProjectId,
                 shot.Name,
                 generatedVideo,
-                cancellationToken);
+                cancellationToken,
+                new(
+                    1,
+                    "video-generation",
+                    "ComfyUI",
+                    "MiniMax H3",
+                    prompt,
+                    new(workflowFileName, width, height, frameCount, fps, normalizedFrameFitMode),
+                    string.IsNullOrWhiteSpace(lastFrameAssetId)
+                        ? [new(parsedFirstFrameId, "first-frame")]
+                        : [
+                            new(parsedFirstFrameId, "first-frame"),
+                            new(Guid.Parse(lastFrameAssetId), "last-frame")
+                        ]));
             await shotAssetBinder.BindAsync(
                 context.ProjectId,
                 shot.ResourceId,
@@ -95,7 +108,22 @@ public sealed class GenerateComfyUiVideoTool(
                 cancellationToken);
             context.RevisedAssets.Add(videoAsset);
             context.VideoPrompts.Add(new(videoAsset.Name, prompt, workflowFileName, width, height, frameCount, fps));
-            await context.WriteEventAsync(new { type = "process", stage = "video.completed", message = $"已生成并绑定视频：{videoAsset.Name}" }, cancellationToken);
+            await context.WriteEventAsync(new
+            {
+                type = "process",
+                stage = "video.completed",
+                message = $"已生成并绑定视频：{videoAsset.Name}",
+                data = new
+                {
+                    asset = AssetResponse.FromAsset(videoAsset),
+                    videoPrompt = prompt,
+                    workflowFileName,
+                    width,
+                    height,
+                    frameCount,
+                    fps
+                }
+            }, cancellationToken);
             return JsonSerializer.Serialize(new
             {
                 asset = AssetResponse.FromAsset(videoAsset),
@@ -107,7 +135,7 @@ public sealed class GenerateComfyUiVideoTool(
             }, context.JsonOptions);
         }),
         name: Name,
-        description: "通过项目 VM 上的 ComfyUI API workflow 生成 MiniMax H3 首尾帧视频，下载并验证 MP4 后保存为视频素材，并以 video 角色独占绑定到 shot。workflowFileName 必须是配置目录中的 API prompt JSON，并使用 {{FIRST_FRAME}}、{{LAST_FRAME}}、{{PROMPT}}、{{WIDTH}}、{{HEIGHT}}、{{FRAME_COUNT}}、{{FPS}}、{{OUTPUT_PREFIX}} 占位符。工具会将关键帧等比处理为 width/height：frameFitMode=cover 时居中裁切，contain 时完整保留并补边，禁止非等比拉伸。H3 帧数必须满足 17k+5。lastFrameAssetId 可传空字符串，此时复用首帧。",
+        description: "通过项目 VM 上的 ComfyUI API workflow 生成 MiniMax H3 首尾帧视频，下载并验证 MP4 后保存为视频素材，并以 video 角色独占绑定到 shot。shotAssetId 和 firstFrameAssetId 必须传 list_project_resources 返回的 id UUID，严禁传资源名称或镜号；先用 resourceType=shot、nameContains=镜号取得 shotAssetId，再用 resourceType=media、nameContains=镜号与首帧取得 firstFrameAssetId。lastFrameAssetId 同样只能传媒体 id UUID；没有尾帧时传空字符串并复用首帧。workflowFileName 必须是配置目录中的 API prompt JSON，并使用 {{FIRST_FRAME}}、{{LAST_FRAME}}、{{PROMPT}}、{{WIDTH}}、{{HEIGHT}}、{{FRAME_COUNT}}、{{FPS}}、{{OUTPUT_PREFIX}} 占位符。工具会将关键帧等比处理为 width/height：frameFitMode=cover 时居中裁切，contain 时完整保留并补边，禁止非等比拉伸。H3 帧数必须满足 17k+5。",
         serializerOptions: context.JsonOptions);
 
     private static async Task<byte[]> PrepareFrameAsync(

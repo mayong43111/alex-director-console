@@ -172,10 +172,40 @@ interface SpeechGenerationMetadata {
   }
 }
 
+interface VideoGenerationMetadata {
+  schemaVersion: number
+  operation: 'video-generation'
+  provider: string
+  model: string
+  prompt: string
+  parameters: {
+    workflow: string
+    width: number
+    height: number
+    frameCount: number
+    fps: number
+    frameFitMode: string
+  }
+  sources: Array<{
+    assetId: string
+    role: string
+  }>
+}
+
 function parseImageGenerationMetadata(value: string | null): ImageGenerationMetadata | null {
   if (!value) return null
   try {
     return JSON.parse(value) as ImageGenerationMetadata
+  } catch {
+    return null
+  }
+}
+
+function parseVideoGenerationMetadata(value: string | null): VideoGenerationMetadata | null {
+  if (!value) return null
+  try {
+    const metadata = JSON.parse(value) as VideoGenerationMetadata
+    return metadata.operation === 'video-generation' ? metadata : null
   } catch {
     return null
   }
@@ -343,6 +373,7 @@ function App() {
     resolution: projectFormat?.resolution ?? '1920x1080',
     imageSize: projectFormat?.imageSize ?? '1536x1024',
     onMessageStart: prepareDirectorMessageScroll,
+    onAssetGenerated: handleDirectorAssetGenerated,
     onCompleted: handleDirectorMessageCompleted,
   })
   const previewResolutionOptions = selectedProject
@@ -718,6 +749,13 @@ function App() {
   function prepareDirectorMessageScroll() {
     scrollToLatestAfterLoadRef.current = true
     stickToLatestRef.current = true
+  }
+
+  function handleDirectorAssetGenerated(asset: AssetRecord) {
+    setAssets((current) => [
+      asset,
+      ...current.filter((item) => item.resourceId !== asset.resourceId),
+    ])
   }
 
   function handleDirectorMessageCompleted(
@@ -1456,6 +1494,24 @@ function App() {
                                 <pre>{processEvent.data.imagePrompt}</pre>
                               </span>
                             )}
+                            {processEvent.data?.videoPrompt && (
+                              <span className="process-image-prompt">
+                                <strong>实际视频提示词</strong>
+                                {processEvent.data.workflowFileName && (
+                                  <small>
+                                    {processEvent.data.workflowFileName}
+                                    {processEvent.data.width && processEvent.data.height
+                                      ? ` · ${processEvent.data.width}×${processEvent.data.height}`
+                                      : ''}
+                                    {processEvent.data.frameCount
+                                      ? ` · ${processEvent.data.frameCount} 帧`
+                                      : ''}
+                                    {processEvent.data.fps ? ` · ${processEvent.data.fps} FPS` : ''}
+                                  </small>
+                                )}
+                                <pre>{processEvent.data.videoPrompt}</pre>
+                              </span>
+                            )}
                           </span>
                         </li>
                       ))}
@@ -1820,6 +1876,34 @@ function App() {
                           <dd className="generation-sources">
                             {metadata.sources.map((source) => (
                               <span key={source.assetId}>{source.name} v{source.version}{source.description ? ` · ${source.description}` : ''}</span>
+                            ))}
+                          </dd>
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+                {(() => {
+                  const metadata = parseVideoGenerationMetadata(selectedAsset.generationMetadataJson)
+                  if (!selectedAsset.contentType.startsWith('video/') || !metadata) return null
+                  return (
+                    <>
+                      <div><dt>生成方式</dt><dd>ComfyUI 视频生成</dd></div>
+                      <div><dt>模型</dt><dd>{metadata.model}</dd></div>
+                      <div><dt>Workflow</dt><dd>{metadata.parameters.workflow}</dd></div>
+                      <div>
+                        <dt>调用参数</dt>
+                        <dd>{metadata.parameters.width}×{metadata.parameters.height} · {metadata.parameters.frameCount} 帧 · {metadata.parameters.fps} FPS · {metadata.parameters.frameFitMode}</dd>
+                      </div>
+                      <div className="generation-detail-row">
+                        <dt>提示词</dt><dd><pre>{metadata.prompt}</pre></dd>
+                      </div>
+                      {metadata.sources.length > 0 && (
+                        <div className="generation-detail-row">
+                          <dt>关键帧来源</dt>
+                          <dd className="generation-sources">
+                            {metadata.sources.map((source) => (
+                              <span key={`${source.role}-${source.assetId}`}>{source.role} · {source.assetId}</span>
                             ))}
                           </dd>
                         </div>

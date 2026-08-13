@@ -96,9 +96,9 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
 
 5. 打开以下地址：
 
-   - Web：<http://localhost:5173>
-   - API：<http://localhost:5055>
-   - Swagger：<http://localhost:5055/swagger>
+   - Web：<http://localhost:6173>
+   - API：<http://localhost:5174>
+   - Swagger：<http://localhost:5174/swagger>
 
 也可以分别启动：
 
@@ -332,9 +332,9 @@ Versions are pinned by [global.json](global.json) and [package.json](src/web/pac
 
 5. Open:
 
-   - Web: <http://localhost:5173>
-   - API: <http://localhost:5055>
-   - Swagger: <http://localhost:5055/swagger>
+   - Web: <http://localhost:6173>
+   - API: <http://localhost:5174>
+   - Swagger: <http://localhost:5174/swagger>
 
 To start each service separately:
 

@@ -16,6 +16,7 @@ interface UseDirectorConversationOptions {
   resolution: string
   imageSize: string
   onMessageStart: () => void
+  onAssetGenerated: (asset: AssetRecord) => void
   onCompleted: (event: MessageStreamEvent, sourceShot: AssetRecord | null) => void
 }
 
@@ -27,6 +28,7 @@ export function useDirectorConversation({
   resolution,
   imageSize,
   onMessageStart,
+  onAssetGenerated,
   onCompleted,
 }: UseDirectorConversationOptions) {
   const [messages, setMessages] = useState<ConversationMessageRecord[]>([])
@@ -131,6 +133,7 @@ export function useDirectorConversation({
       let completed = false
       const consumeEvent = (streamEvent: MessageStreamEvent) => {
         if (streamEvent.type === 'process' || streamEvent.type === 'message.accepted') {
+          const generatedAsset = streamEvent.data?.asset
           setMessages((current) => current.map((item) => item.id === temporaryAssistantId
             ? {
                 ...item,
@@ -142,8 +145,15 @@ export function useDirectorConversation({
                     data: streamEvent.data,
                   },
                 ],
+                generatedAssets: generatedAsset
+                  ? [
+                      ...(item.generatedAssets ?? []).filter((asset) => asset.id !== generatedAsset.id),
+                      generatedAsset,
+                    ]
+                  : item.generatedAssets,
               }
             : item))
+          if (generatedAsset) onAssetGenerated(generatedAsset)
           return
         }
 

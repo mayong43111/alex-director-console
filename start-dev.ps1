@@ -21,7 +21,7 @@ if (-not $SkipInstall -and -not (Test-Path (Join-Path $webPath "node_modules")))
     }
 }
 
-Write-Host "Starting API with hot reload: http://localhost:5055" -ForegroundColor Cyan
+Write-Host "Starting API with hot reload: http://localhost:5174" -ForegroundColor Cyan
 $apiProcess = Start-Process dotnet `
     -ArgumentList @("watch", "run", "--launch-profile", "http") `
     -WorkingDirectory $apiPath `
@@ -29,7 +29,7 @@ $apiProcess = Start-Process dotnet `
     -PassThru
 
 try {
-    Write-Host "Starting web app with HMR: http://localhost:5173" -ForegroundColor Cyan
+    Write-Host "Starting web app with HMR: http://localhost:6173" -ForegroundColor Cyan
     $webProcess = Start-Process npm.cmd `
         -ArgumentList @("run", "dev") `
         -WorkingDirectory $webPath `
