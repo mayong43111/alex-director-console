@@ -1,6 +1,7 @@
 using Azure;
 using Azure.AI.OpenAI;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using OpenAI.Chat;
@@ -10,6 +11,10 @@ using ConversationMessage = AlexDirectorConsole.Api.Models.ConversationMessage;
 namespace AlexDirectorConsole.Api.Services;
 
 public sealed record DirectorAgentReply(string Text, string Deployment);
+public sealed record DirectorCompletionJudgment(
+    bool IsComplete,
+    string Reason,
+    string? ContinuationInstruction);
 
 public interface IDirectorAgent
 {
@@ -31,6 +36,13 @@ public interface IDirectorAgent
         string skillName,
         string skillInstructions,
         string input,
+        string? requestedDeployment,
+        CancellationToken cancellationToken = default);
+
+    Task<DirectorCompletionJudgment> JudgeCompletionAsync(
+        string directorRequest,
+        string assistantReply,
+        string executionEvidence,
         string? requestedDeployment,
         CancellationToken cancellationToken = default);
 
@@ -149,6 +161,73 @@ public sealed class AzureFoundryDirectorAgent(
         return new DirectorAgentReply(response.Text, deployment);
     }
 
+    public async Task<DirectorCompletionJudgment> JudgeCompletionAsync(
+        string directorRequest,
+        string assistantReply,
+        string executionEvidence,
+        string? requestedDeployment,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureConfigured();
+        var deployment = ResolveDeployment(requestedDeployment);
+        AIAgent agent = CreateAgent(
+            deployment,
+            "alex-completion-judge",
+            """
+            你是只读的执行完成度 Judge。判断执行副导演是否完成了导演本轮明确要求的工作。
+            工具执行证据是唯一可信的执行事实；副导演文字中没有证据支持的完成声明不算完成。
+            不得扩大导演要求，不得提出品质优化或新任务。仅咨询、讨论、汇报类请求可由充分的文字回复完成。
+            若执行已完成，或遇到必须由导演决策的真实阻断且已明确说明，判定完成。
+            仅当仍有可以由执行副导演和现有工具自主继续的明确工作时，判定未完成并给出精确续跑指令。
+            只输出一个 JSON 对象，不要 Markdown：
+            {"isComplete":true|false,"reason":"简短依据","continuationInstruction":"未完成时的精确指令，完成时为 null"}
+            """);
+        var response = await agent.RunAsync(
+            $"""
+            导演本轮原始指令：
+            {directorRequest}
+
+            执行副导演累计回复：
+            {assistantReply}
+
+            累计工具执行证据：
+            {executionEvidence}
+            """,
+            cancellationToken: cancellationToken);
+
+        try
+        {
+            var jsonStart = response.Text.IndexOf('{');
+            var jsonEnd = response.Text.LastIndexOf('}');
+            if (jsonStart < 0 || jsonEnd <= jsonStart)
+            {
+                throw new JsonException("Judge response did not contain a JSON object.");
+            }
+
+            using var document = JsonDocument.Parse(response.Text[jsonStart..(jsonEnd + 1)]);
+            var root = document.RootElement;
+            var isComplete = root.GetProperty("isComplete").GetBoolean();
+            var reason = root.GetProperty("reason").GetString()?.Trim();
+            var continuationInstruction = root.TryGetProperty("continuationInstruction", out var instruction)
+                && instruction.ValueKind != JsonValueKind.Null
+                    ? instruction.GetString()?.Trim()
+                    : null;
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                throw new JsonException("Judge response did not include a reason.");
+            }
+
+            return new DirectorCompletionJudgment(isComplete, reason, continuationInstruction);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return new DirectorCompletionJudgment(
+                true,
+                $"Judge 输出无法解析，已停止自动续跑：{exception.Message}",
+                null);
+        }
+    }
+
     public async IAsyncEnumerable<string> StreamReplyAsync(
         IReadOnlyList<ConversationMessage> history,
         string message,
@@ -227,6 +306,13 @@ public sealed class AzureFoundryDirectorAgent(
                             调用图片工具时 imagePurpose 使用 asset，固定输出 1:1，不受项目成片画幅影响。默认使用 medium 质量，不要只返回提示词。
                             所有图片工具调用必须严格串行：同一时刻只能有一个 generate_image、generate_image_from_references 或 edit_image 调用正在执行；
                             必须等待该图片成功保存并收到工具完成回执后，才可调用下一次图片工具。不得并行生成多张图片，但同一轮批量任务必须继续逐张调用，不能生成一张后结束。
+                            人物设定图必须使用固定 1:1 四视图版式：左侧正面全身，右上并排背面全身和标准侧面全身，右下头部与肩部特写；
+                            场景设定图必须使用固定 1:1 三视图版式：上方正面全景，左下同一场景另一角度，右下同一场景垂直俯视图。
+                            导演要求“生产所有”“生成全部设定图”或同等全量任务时，先调用 list_project_resources 建立人物、场景和关键道具文字设定的完整目标清单与总数，
+                            再逐项读取最新正文并严格串行生成。不得自行挑选“核心”“首批”“高频”对象，不得为避免批量生成而缩小范围；除非工具失败或存在必须由导演确认的真实冲突，
+                            成功数加明确阻断数达到目标总数之前不得输出最终回复或把剩余对象留给导演再次下令。最终回复必须报告目标总数、成功数和逐项阻断原因。
+                            导演已明确全量范围后，后续回复“开始”“继续”“确认”“2”或选择你给出的执行选项，只表示授权启动此前范围，不表示允许缩小范围；
+                            除非导演明确点名排除对象，否则必须继续完成原全量清单。不得自行提出“先做两张”“分首批”等选项来规避单轮全量执行。
                             每张图片成功后，工具完成事件会立即事实输出该图对应的完整 imagePrompt；参考图生成输出的是包含逐图说明的最终拼接提示词。
                             不得把提示词积压到整批完成后才输出，也不得在最终回复中重复、摘要或改写。最终回复只简要汇报实际成功保存的图片资源。
                         - 导演要求为一个或多个 shot 生成首帧、尾帧、关键帧或分镜图时，必须先加载匹配的镜头画面技能；

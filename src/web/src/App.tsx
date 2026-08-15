@@ -21,6 +21,7 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  Square,
   Users,
   Video,
   WandSparkles,
@@ -86,6 +87,19 @@ const defaultRuntimeConfiguration: ProjectRuntimeConfiguration = {
   workflowDirectory: '/home/azureuser/ComfyUI/user/default/workflows',
   outputDirectory: '/home/azureuser/ComfyUI/output',
   updatedAtUtc: '',
+}
+
+const settingAssetLabels: Record<string, { text: string; image: string }> = {
+  character: { text: '人物设定稿', image: '人物设定图' },
+  scene: { text: '场景设定稿', image: '场景设定图' },
+  prop: { text: '道具设定稿', image: '道具设定图' },
+}
+
+function getSettingSubjectName(asset: AssetRecord) {
+  const label = settingAssetLabels[asset.type]?.text
+  if (!label) return null
+  const suffix = ` · ${label}`
+  return asset.name.endsWith(suffix) ? asset.name.slice(0, -suffix.length).trim() : null
 }
 const defaultFoundryConfiguration: GlobalFoundryConfiguration = {
   openAiEndpoint: '',
@@ -342,7 +356,7 @@ function App() {
   const [previewZoom, setPreviewZoom] = useState(1)
   const [previewOffset, setPreviewOffset] = useState({ x: 0, y: 0 })
   const previewDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
-  const [assetDetailExpanded, setAssetDetailExpanded] = useState(true)
+  const [assetDetailExpanded, setAssetDetailExpanded] = useState(false)
   const [serviceStatusExpanded, setServiceStatusExpanded] = useState(false)
   const [skills, setSkills] = useState<SkillDefinitionRecord[]>([])
   const [selectedSkill, setSelectedSkill] = useState<SkillDefinitionRecord | null>(null)
@@ -387,6 +401,15 @@ function App() {
       : new Date(right.createdAtUtc).getTime() - new Date(left.createdAtUtc).getTime())
   const groupedAssetCount = assets.filter((asset) =>
     groupedAssetSections.some((section) => section.type === asset.type)).length
+  const selectedSettingSubject = selectedAsset ? getSettingSubjectName(selectedAsset) : null
+  const selectedSettingImageLabel = selectedAsset
+    ? settingAssetLabels[selectedAsset.type]?.image
+    : undefined
+  const associatedSettingImages = selectedSettingSubject && selectedSettingImageLabel
+    ? assets.filter((asset) =>
+        asset.contentType.startsWith('image/')
+        && asset.name.startsWith(`${selectedSettingSubject} · ${selectedSettingImageLabel}`))
+    : []
   const mobilePanelIndex = mobilePanels.findIndex((panel) => panel.id === mobilePanel)
   const projectFormat = selectedProject ? getProjectFormat(selectedProject) : null
   const {
@@ -395,6 +418,7 @@ function App() {
     sendingMessage,
     conversationError,
     sendDirectorMessage,
+    stopDirectorMessage,
     retryDirectorMessage,
   } = useDirectorConversation({
     language,
@@ -1686,17 +1710,17 @@ function App() {
               </div>
               <button
                 className="send-button"
-                type="submit"
-                aria-label={text('发送导演令', 'Send instruction')}
-                title={text('发送导演令', 'Send instruction')}
-                disabled={
-                  sendingMessage
-                  || !agentStatus?.configured
+                type={sendingMessage ? 'button' : 'submit'}
+                aria-label={sendingMessage ? text('停止执行', 'Stop run') : text('发送导演令', 'Send instruction')}
+                title={sendingMessage ? text('停止执行', 'Stop run') : text('发送导演令', 'Send instruction')}
+                onClick={sendingMessage ? stopDirectorMessage : undefined}
+                disabled={!sendingMessage && (
+                  !agentStatus?.configured
                   || (!directorOrder.trim() && attachments.length === 0)
-                }
+                )}
               >
                 {sendingMessage
-                  ? <LoaderCircle className="spin" size={18} aria-hidden="true" />
+                  ? <Square size={16} fill="currentColor" aria-hidden="true" />
                   : <Send size={18} aria-hidden="true" />}
               </button>
             </div>
@@ -1798,6 +1822,32 @@ function App() {
                 <small>{formatFileSize(selectedAsset.sizeBytes)}</small>
               </div>
             </div>
+            {associatedSettingImages.length > 0 && (
+              <section className="shot-linked-assets setting-linked-images" aria-labelledby="setting-linked-images-title">
+                <header>
+                  <h3 id="setting-linked-images-title">{text('关联图片设定稿', 'Linked visual designs')}</h3>
+                  <span>{associatedSettingImages.length}</span>
+                </header>
+                <div className="shot-linked-assets-grid">
+                  {associatedSettingImages.map((image) => (
+                    <article className="shot-linked-asset" key={image.id}>
+                      <button
+                        type="button"
+                        className="shot-linked-media"
+                        onClick={() => openImagePreview(image)}
+                        aria-label={text(`全屏预览${image.name}`, `Preview ${image.name} full screen`)}
+                      >
+                        <img src={image.contentUrl} alt={image.name} />
+                      </button>
+                      <div>
+                        <span>{text(`图片设定稿 v${image.version}`, `Visual design v${image.version}`)}</span>
+                        <strong>{image.name}</strong>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
             {selectedAsset.type === 'shot' && (
               <section className="shot-linked-assets" aria-labelledby="shot-linked-assets-title">
                 <header>

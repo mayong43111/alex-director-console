@@ -2,7 +2,7 @@
 name: storyboard-design
 title: 分镜设计
 description: Design, revise, verify, and clean up production-ready storyboards. Use when the director asks for 分镜、镜头表、shot list、画面拆分、机位设计、镜头调度、删除旧分镜、清理 V1、只保留新版 or rough storyboard planning.
-version: 2.0.0
+version: 2.1.0
 allowed-tools: list_project_resources query_storyboard read_project_resources write_storyboard delete_project_resource purge_project_resource_versions
 ---
 # 分镜设计
@@ -55,13 +55,13 @@ allowed-tools: list_project_resources query_storyboard read_project_resources wr
        ```
 6. 镜号使用稳定格式 `S场次号-镜头号`，例如 `S03-05`。每场从 `01` 开始，保持剧本顺序。
    - `Sxx` 必须对应来源剧本的实际场次编号：剧本第 1 场只能使用 `S01-*`，第 2 场只能使用 `S02-*`，依此类推。不得为了连续编号方便把多场剧本全部压进 `S01`，也不得跳过剧本场次。
-7. 从导演令或剧本制作参数取得目标总时长区间并换算为整数秒，例如“1 分到 1 分半”必须传 `targetMinimumSeconds=60`、`targetMaximumSeconds=90`。导演只给单一目标时长时，以该值为中心使用不超过 ±5% 的区间；不得自行扩大导演给定范围。
-8. 写入前先在内部逐行提取“预计时长”的单一秒数并求和。每镜必须为 3–60 秒，总和必须落在目标区间；不满足时先调整机位设计，不得调用工具碰运气，也不得改写剧本文字来凑时长。
-9. 调用 `write_storyboard`，传入清晰的分镜名称、Markdown 正文、来源剧本的 `scriptAssetId`、`targetMinimumSeconds` 和 `targetMaximumSeconds`。新建或完整改写全片时传 `replaceExistingShots=true`，工具会删除本稿未包含的旧镜头；只修改指定场次或镜头时传 `replaceExistingShots=false`，工具会保留其余镜头并按合并后的完整时长校验。两种模式都按“剧本 + 场号 + 镜头号”更新稳定逻辑镜头，重新生成同一镜头只新增版本。
+7. 只有导演在当前指令或此前已确认的要求中明确指定总时长时，才设置目标总时长区间。不得根据题材、场数、剧本长度、行业惯例、成片类型或 Agent 自己的判断猜测、推荐或补设时长。导演明确给出区间时换算为整数秒，例如“1 分到 1 分半”传 `targetMinimumSeconds=60`、`targetMaximumSeconds=90`；导演只给单一目标时长时，以该值为中心使用不超过 ±5% 的区间。导演没有明确指定时，两者都传 `null`，表示总时长不受限制。
+8. 写入前先在内部逐行提取“预计时长”的单一秒数并求和。每镜必须为 3–60 秒。导演指定了目标区间时，总和必须落在区间内；未指定时不得为了落入 Agent 自拟的总时长而压缩、扩写或重分配镜头，只按剧本中的动作、逐字声音、停顿和转场如实设计时长。
+9. 调用 `write_storyboard`，传入清晰的分镜名称、Markdown 正文、来源剧本的 `scriptAssetId`；仅在导演明确指定时长时传入整数 `targetMinimumSeconds` 和 `targetMaximumSeconds`，否则两者都传 `null`。新建或完整改写全片时传 `replaceExistingShots=true`，工具会删除本稿未包含的旧镜头；只修改指定场次或镜头时传 `replaceExistingShots=false`，工具会保留其余镜头。两种模式都按“剧本 + 场号 + 镜头号”更新稳定逻辑镜头，重新生成同一镜头只新增版本。
    - `scriptAssetId` 可以是该逻辑剧本任一版本的资产 ID；工具会解析到最新版本。优先传最近读取结果中最新剧本版本的资产 ID，不要从旧对话复制过期版本 ID。
-   - 工具失败时必须以异常原文为准定位原因。例如返回“来源剧本中不存在的场号”时，检查剧本版本与场次编号，不能改口称为 Markdown 格式问题；返回时长越界时只调整时长。修正异常明确指出的问题后再重试。
+   - 工具失败时必须以异常原文为准定位原因。例如返回“来源剧本中不存在的场号”时，检查剧本版本与场次编号，不能改口称为 Markdown 格式问题；导演明确指定时长且返回时长越界时只调整时长。修正异常明确指出的问题后再重试。
    - 同一输入、同一参数不得原样重试。连续失败后仍有明确错误时继续针对该错误修正；只有错误信息为空或确实存在多个无法区分的外部事实时，才向导演提问。不得在可自行修复时以“如果你同意，我下一步排障”结束任务。
-10. 仅根据工具返回结果汇报已创建的独立镜头数量、镜号、版本、预计总时长和目标区间。
+10. 仅根据工具返回结果汇报已创建的独立镜头数量、镜号、版本和 `totalDurationSeconds` 统计出的当前预计总时长。导演指定了目标时长时同时汇报目标区间；未指定时明确说明“本次未限制总时长”，不得补报 Agent 自拟目标。
 
 ## Storyboard Rules
 
@@ -101,6 +101,7 @@ allowed-tools: list_project_resources query_storyboard read_project_resources wr
 - 只能删除当前项目中由 `list_project_resources` 返回的资源；不得引用、发现或清理其他项目的资源 ID。
 - 清理时不得删除导演指定保留的 shot，不得把不同分镜版本仅凭创建时间混为一组。
 - 不只输出建议或示例，必须调用 `write_storyboard` 持久化完整稿件。
+- 导演未指定总时长时，不得以“常规节奏”“合理时长”“行业惯例”或类似理由自行设定目标，也不得将 Agent 编写的剧本标题或制作参数当成导演的时长要求。
 - 不忽略工具异常中的具体字段和值，不把明确校验错误泛化为“格式可能更严格”，也不在错误仍可自行修复时停止并请求导演批准排障。
 - 不把人物设定、场景设定或道具设定中的推测当成剧本事实。
 - 不创建工具未返回的资源，不声称已生成分镜图片。
@@ -108,5 +109,5 @@ allowed-tools: list_project_resources query_storyboard read_project_resources wr
 ## Verification
 
 - 清理任务：记录删除工具实际返回数量，再次列出 shot，确认待删资源为零且保留版本完整；若初次查询即为零，报告本轮删除 0 项。
-- 设计任务：确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，`totalDurationSeconds` 位于返回的目标区间，每个返回项都是独立 `shot` 资源；检查最新剧本的所有场次均被覆盖、镜号无重复，并确认生成的 shot 不含“来源资源”章节或资源 ID 快照。逐镜复查 3 秒以上的人物镜头具有当前景别可辨的有效动作；只剩呼吸、眨眼或不可辨微动作的镜头必须在写入前改写。
+- 设计任务：确认 `write_storyboard` 返回的 `shotCount` 等于逐场分镜表中的镜头行数，并记录 `totalDurationSeconds` 供最终汇报；导演指定了目标时长时确认总时长位于返回的目标区间，未指定时确认两个目标字段均为 `null`。每个返回项必须是独立 `shot` 资源；检查最新剧本的所有场次均被覆盖、镜号无重复，并确认生成的 shot 不含“来源资源”章节或资源 ID 快照。逐镜复查 3 秒以上的人物镜头具有当前景别可辨的有效动作；只剩呼吸、眨眼或不可辨微动作的镜头必须在写入前改写。
 - 逐镜核验预计时长均为 3–60 秒且并非机械等长；逐场核对分镜声音与最新剧本逐字一致，并指出视觉变化点。产品介绍片确认产品定位、目标用户、核心问题、主要工作流、可见操作结果和结尾价值都有对应画面；只有故事片才检查开场难题、阻碍升级、局面逆转和结尾回收。任何必要信息只存在于抽象旁白而没有画面证据时，应调整分镜画面落地，不得改写旁白。

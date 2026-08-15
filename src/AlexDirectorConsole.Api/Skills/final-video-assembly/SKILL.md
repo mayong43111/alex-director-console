@@ -2,7 +2,7 @@
 name: final-video-assembly
 title: 最终成片组装
 description: Assemble persisted shot videos and voice-over into a final narrated MP4. Use when the director asks to 拼接视频、合成配音、生成成片、输出最终视频 or assemble the final movie.
-version: 1.0.0
+version: 1.1.0
 allowed-tools: list_project_resources read_project_resources read_project_resource_contents generate_speech bind_shot_asset assemble_project_video
 ---
 # 最终成片组装
@@ -17,13 +17,14 @@ allowed-tools: list_project_resources read_project_resources read_project_resour
 2. 确认每个目标镜头已有真实 `video` 绑定。不得用聊天记录中的生成结果、首帧图片或未绑定的视频名称代替持久化绑定。
 3. 核验旁白：优先使用镜头 `other` 音频绑定；未绑定时，工具只允许使用名称中含唯一同镜号的音频。存在多个候选时先调用 `bind_shot_asset` 明确唯一音频，不能猜测。
 4. 缺少旁白且导演要求全片配音时，从镜头正文提取实际朗读文本，按 `voice-over` 技能严格串行调用 `generate_speech`，成功后立即以 `other` 绑定到对应镜头。
-5. 默认输出参数使用 `width=608`、`height=352`、`fps=24`。导演明确要求其他格式时再调整，宽高必须为偶数。
+5. 一句话成片必须使用生产任务创建时冻结的统一视频画布与 FPS；不得改用其他分辨率。其他组装任务默认读取项目 `previewResolution` 并使用 24 FPS，若 H3 画布要求 16 像素步长则使用项目规格就近对齐后的统一宽高。所有输入镜头必须先校验为同一画布；不得沿用 `608x352` 等固定默认值覆盖项目设置。
 6. 全片配音使用 `requireNarration=true` 调用一次 `assemble_project_video`。工具会按镜号排序，旁白长于镜头时冻结尾帧，短于镜头时补静音，并在本地 FFmpeg 中生成 H.264/AAC MP4。
 7. 只有工具返回 `video/mp4` 资产、正时长、正确镜头数和预期配音数后才声明成片完成。最终报告资源名称、资产 ID、时长、分辨率、FPS、镜头数和配音镜头数。
 
 ## Rules
 
 - 不得依赖远程 ComfyUI VM 执行最终组装；该阶段必须使用本地 FFmpeg。
+- 同一成片的所有镜头视频、归一化片段和最终 MP4 必须使用同一冻结画布与 FPS；发现历史绑定规格不匹配时必须先重新生成对应镜头，不得通过混合缩放掩盖问题。
 - 不得把 34 镜拆成多个临时成片后仅报告其中一个；最终工具应一次读取完整持久化输入。
 - 不得按资产创建时间推断叙事顺序，只能按 `Sxx-xx` 镜号排序。
 - 不得默默忽略重复镜号、缺失视频、音频歧义或无效媒体；修正持久化关系后重新调用。

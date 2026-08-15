@@ -19,6 +19,8 @@ public sealed record MediaAssemblyResult(
     int AudioClipCount,
     double TransitionDurationSeconds);
 
+public sealed record VideoStreamInfo(int Width, int Height, double Fps);
+
 public interface ILocalMediaAssemblyService
 {
     Task<MediaAssemblyResult> AssembleAsync(
@@ -27,11 +29,47 @@ public interface ILocalMediaAssemblyService
         int height,
         int fps,
         CancellationToken cancellationToken);
+
+    Task<VideoStreamInfo> ProbeVideoAsync(
+        byte[] videoBytes,
+        CancellationToken cancellationToken);
 }
 
 public sealed class LocalMediaAssemblyService : ILocalMediaAssemblyService
 {
     private const double FastFadeDurationSeconds = 0.25;
+
+    public async Task<VideoStreamInfo> ProbeVideoAsync(
+        byte[] videoBytes,
+        CancellationToken cancellationToken)
+    {
+        var ffprobe = FindExecutable("FFPROBE_PATH", "ffprobe");
+        var path = Path.Combine(Path.GetTempPath(), $"alex-video-probe-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            await File.WriteAllBytesAsync(path, videoBytes, cancellationToken);
+            var output = await RunAsync(ffprobe, [
+                "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,avg_frame_rate",
+                "-of", "json", path
+            ], cancellationToken);
+            using var document = System.Text.Json.JsonDocument.Parse(output);
+            var stream = document.RootElement.GetProperty("streams")[0];
+            var width = stream.GetProperty("width").GetInt32();
+            var height = stream.GetProperty("height").GetInt32();
+            var frameRate = stream.GetProperty("avg_frame_rate").GetString()?.Split('/');
+            if (frameRate is not { Length: 2 }
+                || !double.TryParse(frameRate[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var numerator)
+                || !double.TryParse(frameRate[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var denominator)
+                || denominator == 0)
+                throw new InvalidOperationException("无法读取视频帧率。");
+            return new VideoStreamInfo(width, height, numerator / denominator);
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
 
     public async Task<MediaAssemblyResult> AssembleAsync(
         IReadOnlyList<MediaAssemblyClip> clips,

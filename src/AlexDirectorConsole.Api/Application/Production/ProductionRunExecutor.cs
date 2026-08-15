@@ -72,7 +72,7 @@ public sealed class ProductionRunExecutor(
                 await dbContext.SaveChangesAsync(cancellationToken);
                 run.VmStartedByRun = await vmLifecycle.EnsureStartedAsync(cancellationToken);
                 await dbContext.SaveChangesAsync(cancellationToken);
-                await ExecuteStageAsync(run, "videos", cancellationToken);
+                await ExecuteVideoBatchStageAsync(run, cancellationToken);
             }
             run.CurrentStage = "assembly";
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -125,7 +125,7 @@ public sealed class ProductionRunExecutor(
             .ToListAsync(cancellationToken);
         foreach (var item in items)
         {
-            var outputAssetId = await skillRunner.FindExistingOutputAsync(item, cancellationToken);
+            var outputAssetId = await skillRunner.FindExistingOutputAsync(run, item, cancellationToken);
             if (outputAssetId is null)
             {
                 continue;
@@ -173,6 +173,53 @@ public sealed class ProductionRunExecutor(
                 await dbContext.SaveChangesAsync(CancellationToken.None);
                 throw;
             }
+        }
+    }
+
+    private async Task ExecuteVideoBatchStageAsync(
+        ProductionRun run,
+        CancellationToken cancellationToken)
+    {
+        const string stage = "videos";
+        run.CurrentStage = stage;
+        var items = await dbContext.ProductionRunItems
+            .Where(item => item.RunId == run.Id && item.Stage == stage && item.Status != "succeeded")
+            .OrderBy(item => item.ShotName)
+            .ToListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var item in items)
+        {
+            item.Status = "running";
+            item.Attempt++;
+            item.StartedAtUtc = now;
+            item.ErrorCode = null;
+            item.ErrorDetail = null;
+        }
+        run.LeaseExpiresAtUtc = now.AddHours(3);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            var outputs = await skillRunner.ExecuteVideoBatchAsync(run, items, cancellationToken);
+            foreach (var item in items)
+            {
+                item.OutputAssetId = outputs[item.Id];
+                item.Status = "succeeded";
+                item.CompletedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            foreach (var item in items.Where(item => item.Status == "running"))
+            {
+                item.Status = "failed";
+                item.ErrorCode = exception.GetType().Name;
+                item.ErrorDetail = exception.Message;
+                item.CompletedAtUtc = DateTimeOffset.UtcNow;
+            }
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            throw;
         }
     }
 }

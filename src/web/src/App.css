@@ -1701,6 +1701,14 @@ button:disabled {
   gap: 8px;
 }
 
+.setting-linked-images .shot-linked-assets-grid {
+  grid-template-columns: 1fr;
+}
+
+.setting-linked-images .shot-linked-media {
+  aspect-ratio: 1;
+}
+
 .shot-linked-asset {
   min-width: 0;
   overflow: hidden;

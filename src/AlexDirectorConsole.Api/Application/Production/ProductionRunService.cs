@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AlexDirectorConsole.Api.Data;
 using AlexDirectorConsole.Api.Models;
+using AlexDirectorConsole.Api.Tools;
 using Microsoft.EntityFrameworkCore;
 
 namespace AlexDirectorConsole.Api.Application.Production;
@@ -22,11 +23,31 @@ public sealed class ProductionRunService(AppDbContext dbContext) : IProductionRu
         {
             throw new ArgumentException("导演令不能为空。", nameof(instruction));
         }
-        if (!await dbContext.Projects.AsNoTracking().AnyAsync(
+        var project = await dbContext.Projects.AsNoTracking().SingleOrDefaultAsync(
             project => project.Id == projectId,
-            cancellationToken))
+            cancellationToken)
+            ?? throw new KeyNotFoundException("项目不存在。");
+        var videoCanvas = ProjectVideoCanvas.FromPreviewResolution(project.PreviewResolution);
+
+        if (!dryRun)
         {
-            throw new KeyNotFoundException("项目不存在。");
+            var activeRun = await dbContext.ProductionRuns
+                .AsNoTracking()
+                .Where(run => run.ProjectId == projectId
+                    && !run.DryRun
+                    && (run.Status == "queued" || run.Status == "running"))
+                .OrderBy(run => run.CreatedAtUtc)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (activeRun is not null)
+            {
+                var activeItems = await dbContext.ProductionRunItems
+                    .AsNoTracking()
+                    .Where(item => item.RunId == activeRun.Id && item.ProjectId == projectId)
+                    .OrderBy(item => item.ShotName)
+                    .ThenBy(item => item.Stage)
+                    .ToListAsync(cancellationToken);
+                return BuildSnapshot(activeRun, activeItems);
+            }
         }
 
         var shotVersions = await dbContext.Assets
@@ -72,8 +93,9 @@ public sealed class ProductionRunService(AppDbContext dbContext) : IProductionRu
                 referencePolicy = "use-existing-and-continue-from-text-when-missing",
                 requireNarration = true,
                 videoProvider = "minimax-h3",
-                assemblyProvider = "local-ffmpeg"
-                ,shotNameContains = normalizedShotFilter
+                assemblyProvider = "local-ffmpeg",
+                videoCanvas = new { width = videoCanvas.Width, height = videoCanvas.Height, fps = 24 },
+                shotNameContains = normalizedShotFilter
             }),
             DryRun = dryRun,
             KeepVmRunning = keepVmRunning,

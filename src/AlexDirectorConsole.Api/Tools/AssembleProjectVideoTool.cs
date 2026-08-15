@@ -31,6 +31,18 @@ public sealed partial class AssembleProjectVideoTool(
             var name = resourceName.Trim();
             if (string.IsNullOrWhiteSpace(name) || name.Length > 160)
                 throw new ArgumentException("资源名称不能为空且不能超过 160 个字符。", nameof(resourceName));
+            if (context.EnforceProjectVideoCanvas)
+            {
+                var canvas = context.ForcedVideoWidth is int forcedWidth
+                    && context.ForcedVideoHeight is int forcedHeight
+                        ? new ProjectVideoCanvas(forcedWidth, forcedHeight)
+                        : ProjectVideoCanvas.FromPreviewResolution((await dbContext.Projects
+                            .AsNoTracking()
+                            .SingleAsync(project => project.Id == context.ProjectId, cancellationToken))
+                            .PreviewResolution);
+                width = canvas.Width;
+                height = canvas.Height;
+            }
             if (width is < 320 or > 3840 || height is < 180 or > 2160 || width % 2 != 0 || height % 2 != 0)
                 throw new ArgumentException("视频宽高必须是有效偶数，且不超过 3840x2160。");
             if (fps is < 12 or > 60)

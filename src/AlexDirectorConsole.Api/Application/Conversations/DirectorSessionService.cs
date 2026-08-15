@@ -20,6 +20,8 @@ public sealed class DirectorSessionService(
     IAssetReader assetContentReader,
     ILogger<DirectorSessionService> logger) : IDirectorSessionService
 {
+    private const int MaximumJudgeContinuations = 3;
+
     public async Task ExecuteAsync(
         Guid projectId,
         SendMessageRequest request,
@@ -138,24 +140,100 @@ public sealed class DirectorSessionService(
                 ? "当前未选择资源"
                 : $"已载入当前资源：{currentAsset.Name}"
         }, cancellationToken);
-        await stream.WriteAsync(new
+        var agentInstruction = content;
+        var continuationCount = 0;
+        while (true)
         {
-            type = "process",
-            stage = "agent.started",
-            message = $"正在调用 {deployment}，由 Agent 自主选择技能与工具"
-        }, cancellationToken);
+            await stream.WriteAsync(new
+            {
+                type = "process",
+                stage = "agent.started",
+                message = continuationCount == 0
+                    ? $"正在调用 {deployment}，由 Agent 自主选择技能与工具"
+                    : $"正在执行第 {continuationCount} 次 Judge 续跑"
+            }, cancellationToken);
 
-        await foreach (var delta in directorAgent.StreamReplyWithToolsAsync(
-            history,
-            content,
-            agentContext,
-            request.Model,
-            tools,
-            availableSkillPaths,
-            cancellationToken))
-        {
-            replyBuilder.Append(delta);
-            await stream.WriteAsync(new { type = "assistant.delta", delta }, cancellationToken);
+            await foreach (var delta in directorAgent.StreamReplyWithToolsAsync(
+                history,
+                agentInstruction,
+                agentContext,
+                request.Model,
+                tools,
+                availableSkillPaths,
+                cancellationToken))
+            {
+                replyBuilder.Append(delta);
+                await stream.WriteAsync(new { type = "assistant.delta", delta }, cancellationToken);
+            }
+
+            await stream.WriteAsync(new
+            {
+                type = "process",
+                stage = "judge.started",
+                message = "AI Judge 正在核验本轮任务完成度"
+            }, cancellationToken);
+            var judgment = await directorAgent.JudgeCompletionAsync(
+                content,
+                replyBuilder.ToString(),
+                BuildJudgeEvidence(toolContext),
+                request.Model,
+                cancellationToken);
+            await stream.WriteAsync(new
+            {
+                type = "process",
+                stage = "judge.completed",
+                message = judgment.IsComplete ? "AI Judge 判定已完成" : "AI Judge 判定仍有未完成工作",
+                data = new
+                {
+                    judgment.IsComplete,
+                    judgment.Reason,
+                    continuationCount,
+                    maximumContinuations = MaximumJudgeContinuations
+                }
+            }, cancellationToken);
+
+            if (judgment.IsComplete)
+            {
+                break;
+            }
+
+            if (continuationCount >= MaximumJudgeContinuations)
+            {
+                var limitMessage = $"\n\nAI Judge 已达到最多 {MaximumJudgeContinuations} 次续跑限制。尚未完成：{judgment.Reason}";
+                replyBuilder.Append(limitMessage);
+                await stream.WriteAsync(new { type = "assistant.delta", delta = limitMessage }, cancellationToken);
+                await stream.WriteAsync(new
+                {
+                    type = "process",
+                    stage = "judge.limit-reached",
+                    message = $"已达到最多 {MaximumJudgeContinuations} 次 Judge 续跑限制"
+                }, cancellationToken);
+                break;
+            }
+
+            continuationCount++;
+            agentInstruction = $"""
+                继续完成导演本轮原始指令，不得缩小或扩大范围：
+                {content}
+
+                AI Judge 发现的未完成项：
+                {judgment.Reason}
+
+                续跑要求：
+                {judgment.ContinuationInstruction ?? "核实现有项目状态，并完成仍未完成且可自主执行的工作。"}
+
+                必须先用工具核实现状，避免重复已经成功完成的工作；完成后简洁汇报本次新增结果。
+                """;
+            var continuationSeparator = $"\n\n---\n\nAI Judge 第 {continuationCount} 次续跑：\n\n";
+            replyBuilder.Append(continuationSeparator);
+            await stream.WriteAsync(new { type = "assistant.delta", delta = continuationSeparator }, cancellationToken);
+            await stream.WriteAsync(new
+            {
+                type = "process",
+                stage = "judge.continuing",
+                message = $"AI Judge 正在驱动第 {continuationCount} 次续跑",
+                data = new { judgment.Reason, continuationCount }
+            }, cancellationToken);
         }
 
         await DirectorSessionPromptBuilder.AppendPromptRecordsAsync(
@@ -218,6 +296,18 @@ public sealed class DirectorSessionService(
             generatedAssets = generatedAssets.Select(AssetResponse.FromAsset),
             updatedAsset = updatedAsset is null ? null : AssetResponse.FromAsset(updatedAsset)
         }, cancellationToken);
+    }
+
+    private static string BuildJudgeEvidence(DirectorToolContext toolContext)
+    {
+        if (toolContext.ProcessEvidence.Count == 0)
+        {
+            return "本轮没有工具执行事件。";
+        }
+
+        return string.Join(
+            Environment.NewLine,
+            toolContext.ProcessEvidence.TakeLast(200).Select((item, index) => $"{index + 1}. {item}"));
     }
 
     private DirectorToolContext CreateToolContext(

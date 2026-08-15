@@ -18,7 +18,7 @@ public sealed partial class WriteStoryboardTool(
     public string Name => "write_storyboard";
 
     public AITool Create(DirectorToolContext context) => AIFunctionFactory.Create(
-        (Func<string, string, string, int, int, bool, CancellationToken, Task<string>>)(async (
+        (Func<string, string, string, int?, int?, bool, CancellationToken, Task<string>>)(async (
             storyboardName,
             markdownContent,
             scriptAssetId,
@@ -39,6 +39,10 @@ public sealed partial class WriteStoryboardTool(
                 if (string.IsNullOrWhiteSpace(content) || content.Length > 300000)
                 {
                     throw new ArgumentException("分镜 Markdown 不能为空且不能超过 300,000 个字符。", nameof(markdownContent));
+                }
+                if (targetMinimumSeconds.HasValue != targetMaximumSeconds.HasValue)
+                {
+                    throw new ArgumentException("目标总时长的最小值和最大值必须同时提供，或同时留空表示不限制。");
                 }
                 if (targetMinimumSeconds is < 1 or > 3600
                     || targetMaximumSeconds is < 1 or > 3600
@@ -174,7 +178,10 @@ public sealed partial class WriteStoryboardTool(
                         : existingDefinitions
                             .Where(shot => !incomingKeys.Contains((shot.SceneNumber, shot.ShotNumber)))
                             .Sum(shot => shot.DurationSeconds));
-                if (totalDurationSeconds < targetMinimumSeconds || totalDurationSeconds > targetMaximumSeconds)
+                if (targetMinimumSeconds.HasValue
+                    && targetMaximumSeconds.HasValue
+                    && (totalDurationSeconds < targetMinimumSeconds.Value
+                        || totalDurationSeconds > targetMaximumSeconds.Value))
                 {
                     throw new ArgumentException(
                         $"分镜预计总时长 {totalDurationSeconds:0.##} 秒，不在目标区间 {targetMinimumSeconds}–{targetMaximumSeconds} 秒内；本次未保存任何镜头。",
@@ -269,7 +276,7 @@ public sealed partial class WriteStoryboardTool(
                 {
                     type = "process",
                     stage = "tool.completed",
-                    message = $"Agent 已创建 {persistedShots.Count} 个独立镜头资源：{subject}",
+                    message = $"Agent 已创建 {persistedShots.Count} 个独立镜头资源：{subject}；预计总时长 {totalDurationSeconds:0.##} 秒",
                     data = new
                     {
                         assets = persistedShots.Select(AssetResponse.FromAsset),
@@ -329,7 +336,7 @@ public sealed partial class WriteStoryboardTool(
             }
         }),
         name: Name,
-        description: "按来源剧本和结构化镜号严格校验并持久化分镜。每镜必须填写角色/主体、场景/时空、景别、机位/角度、画面与动作、台词/声音、镜头运动、预计时长和连续性/制作备注。scriptAssetId 可传当前项目中该剧本任一版本的资产 ID，工具始终使用同一逻辑剧本的最新版本校验；同一剧本的同一 S场-镜号只新增版本。整稿传 replaceExistingShots=true，并删除本稿缺失的旧镜头；局部重生成传 false，工具会合并未提交镜头后校验全片总时长。每镜限 3–60 秒，总时长越界时整批拒绝。",
+        description: "按来源剧本和结构化镜号严格校验并持久化分镜。每镜必须填写角色/主体、场景/时空、景别、机位/角度、画面与动作、台词/声音、镜头运动、预计时长和连续性/制作备注。scriptAssetId 可传当前项目中该剧本任一版本的资产 ID，工具始终使用同一逻辑剧本的最新版本校验；同一剧本的同一 S场-镜号只新增版本。整稿传 replaceExistingShots=true，并删除本稿缺失的旧镜头；局部重生成传 false，工具会合并未提交镜头。每镜限 3–60 秒。仅当导演明确指定总时长时才传 targetMinimumSeconds 和 targetMaximumSeconds 并校验区间；未指定时两者都传 null，不限制总时长。工具始终统计并返回实际预计总时长。",
         serializerOptions: context.JsonOptions);
 
     private async Task<HashSet<int>> ReadScriptSceneNumbersAsync(

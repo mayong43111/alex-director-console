@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { deleteConversationFrom, listConversationMessages } from '../../api/conversations'
 import { consumeNdjsonStream } from '../../api/streamProtocol'
 import { localize, type Language } from '../../i18n'
@@ -38,6 +38,7 @@ export function useDirectorConversation({
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [sendingMessage, setSendingMessage] = useState(false)
   const [conversationError, setConversationError] = useState<string | null>(null)
+  const activeRequestControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (!project) return
@@ -79,6 +80,8 @@ export function useDirectorConversation({
   async function sendDirectorMessage(message: string, model: string, assetId?: string) {
     if (!project || !agentConfigured) return
 
+    const requestController = new AbortController()
+    activeRequestControllerRef.current = requestController
     const sourceShot = selectedAsset?.type === 'shot' ? selectedAsset : null
     onMessageStart()
     setSendingMessage(true)
@@ -110,6 +113,7 @@ export function useDirectorConversation({
       const response = await fetch(`/api/projects/${project.id}/messages/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: requestController.signal,
         body: JSON.stringify({
           message,
           model,
@@ -197,6 +201,20 @@ export function useDirectorConversation({
       await consumeNdjsonStream<MessageStreamEvent>(response.body, consumeEvent)
       if (!completed) throw new Error(localize(language, '流式响应在完成前中断', 'The stream ended before completion'))
     } catch (error) {
+      if (requestController.signal.aborted) {
+        setMessages((current) => current.map((item) => item.id === temporaryAssistantId
+          ? {
+              ...item,
+              content: item.content || localize(language, '本次执行已停止。', 'This run was stopped.'),
+              isStreaming: false,
+              processEvents: [
+                ...(item.processEvents ?? []),
+                { stage: 'stopped', message: localize(language, '执行已停止', 'Run stopped') },
+              ],
+            }
+          : item))
+        return
+      }
       const errorMessage = error instanceof Error ? error.message : localize(language, '执行副导演响应失败', 'Assistant response failed')
       setConversationError(errorMessage)
       setMessages((current) => current.map((item) => item.id === temporaryAssistantId
@@ -211,8 +229,15 @@ export function useDirectorConversation({
           }
         : item))
     } finally {
+      if (activeRequestControllerRef.current === requestController) {
+        activeRequestControllerRef.current = null
+      }
       setSendingMessage(false)
     }
+  }
+
+  function stopDirectorMessage() {
+    activeRequestControllerRef.current?.abort()
   }
 
   return {
@@ -221,6 +246,7 @@ export function useDirectorConversation({
     sendingMessage,
     conversationError,
     sendDirectorMessage,
+    stopDirectorMessage,
     retryDirectorMessage,
   }
 }

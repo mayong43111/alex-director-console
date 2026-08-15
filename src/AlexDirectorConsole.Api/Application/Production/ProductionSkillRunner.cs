@@ -11,12 +11,18 @@ namespace AlexDirectorConsole.Api.Application.Production;
 public interface IProductionSkillRunner
 {
     Task<Guid?> FindExistingOutputAsync(
+        ProductionRun run,
         ProductionRunItem item,
         CancellationToken cancellationToken);
 
     Task<Guid> ExecuteShotStageAsync(
         ProductionRun run,
         ProductionRunItem item,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyDictionary<Guid, Guid>> ExecuteVideoBatchAsync(
+        ProductionRun run,
+        IReadOnlyList<ProductionRunItem> items,
         CancellationToken cancellationToken);
 
     Task<Guid> AssembleAsync(ProductionRun run, CancellationToken cancellationToken);
@@ -58,6 +64,7 @@ public sealed class ProductionSkillRunner(
         };
 
     public async Task<Guid?> FindExistingOutputAsync(
+        ProductionRun run,
         ProductionRunItem item,
         CancellationToken cancellationToken)
     {
@@ -65,7 +72,15 @@ public sealed class ProductionSkillRunner(
         {
             throw new InvalidOperationException($"未知生产阶段：{item.Stage}。");
         }
-        return (await FindBoundAssetAsync(item, stage, null, cancellationToken))?.Id;
+        var output = await FindBoundAssetAsync(item, stage, null, cancellationToken);
+        if (output is null || item.Stage != "videos")
+            return output?.Id;
+
+        var project = await dbContext.Projects.AsNoTracking().SingleAsync(
+            project => project.Id == item.ProjectId,
+            cancellationToken);
+        var canvas = GetRunCanvas(run, project.PreviewResolution);
+        return HasVideoCanvas(output, canvas) ? output.Id : null;
     }
 
     public async Task<Guid> ExecuteShotStageAsync(
@@ -145,6 +160,85 @@ public sealed class ProductionSkillRunner(
         return output.Id;
     }
 
+    public async Task<IReadOnlyDictionary<Guid, Guid>> ExecuteVideoBatchAsync(
+        ProductionRun run,
+        IReadOnlyList<ProductionRunItem> items,
+        CancellationToken cancellationToken)
+    {
+        if (items.Count == 0)
+            return new Dictionary<Guid, Guid>();
+
+        var project = await dbContext.Projects.AsNoTracking().SingleAsync(
+            project => project.Id == run.ProjectId,
+            cancellationToken);
+        var canvas = GetRunCanvas(run, project.PreviewResolution);
+        using var context = new DirectorToolContext
+        {
+            ProjectId = run.ProjectId,
+            Content = "为一句话成片任务一次生成全部待处理镜头视频。",
+            RequestedModel = project.LanguageModel,
+            ImageSize = project.OutputWidth >= project.OutputHeight ? "1536x1024" : "1024x1536",
+            ImageDeployment = string.IsNullOrWhiteSpace(project.ImageModel)
+                ? imageGenerator.Deployment
+                : project.ImageModel,
+            CurrentAsset = null,
+            CurrentAssetContent = null,
+            EnforceProjectVideoCanvas = true,
+            ForcedVideoWidth = canvas.Width,
+            ForcedVideoHeight = canvas.Height,
+            EventWriter = static (_, _) => ValueTask.CompletedTask
+        };
+        var tools = toolRegistry.CreateTools(
+            context,
+            new HashSet<string>([
+                "list_project_resources", "query_storyboard", "read_project_resource_contents",
+                "inspect_remote_comfyui", "manage_remote_comfyui", "generate_comfyui_videos_batch"
+            ], StringComparer.OrdinalIgnoreCase)).ToList();
+        var skillNames = new[] { "minimax-h3-video", "minimax-h3-video-prompt" };
+        var skillPaths = skillNames.Select(name =>
+            Path.GetDirectoryName(skillCatalog.Get(name)?.FilePath
+                ?? throw new InvalidOperationException($"生产阶段缺少技能：{name}。"))!)
+            .ToArray();
+        var targets = string.Join(
+            Environment.NewLine,
+            items.OrderBy(item => item.ShotName).Select(item =>
+                $"- shotAssetId={item.ShotAssetId}; shotResourceId={item.ShotResourceId}; name={item.ShotName}"));
+        var instruction = $"""
+            为下面全部 {items.Count} 个待处理 shot 生成视频。必须先逐个读取完整 shot 正文和当前首尾帧，
+            为全部 shot 完成 minimax-h3-video-prompt 交接检查；只有全部提示词准备完成后，才调用一次
+            generate_comfyui_videos_batch，把所有任务组成同一个 videoJobsJson 数组。禁止调用 generate_comfyui_video，
+            禁止拆批或逐镜提交。共享参数使用同一个可用 MiniMax H3 API workflow、frameFitMode=cover、fps=24。
+            批量工具会强制使用项目统一画布 {canvas.Width}x{canvas.Height}，不得传入或建议其他分辨率。
+
+            目标 shot：
+            {targets}
+            """;
+
+        await foreach (var _ in directorAgent.StreamReplyWithToolsAsync(
+            [],
+            instruction,
+            $"当前项目 ID：{run.ProjectId}；项目快速拉片规格：{project.PreviewResolution}；统一 H3 画布：{canvas.Width}x{canvas.Height}。",
+            project.LanguageModel,
+            tools,
+            skillPaths,
+            cancellationToken))
+        {
+        }
+
+        if (!context.BatchVideoGenerationInvoked)
+            throw new InvalidOperationException("Agent 未调用批量视频生成工具。");
+
+        var generatedIds = context.RevisedAssets.Select(asset => asset.Id).ToHashSet();
+        var outputs = new Dictionary<Guid, Guid>(items.Count);
+        foreach (var item in items)
+        {
+            var output = await FindBoundAssetAsync(item, Stages["videos"], generatedIds, cancellationToken)
+                ?? throw new InvalidOperationException($"批量工具未为 {item.ShotName} 持久化有效 video 绑定。");
+            outputs[item.Id] = output.Id;
+        }
+        return outputs;
+    }
+
     public async Task<Guid> AssembleAsync(ProductionRun run, CancellationToken cancellationToken)
     {
                 using var spec = JsonDocument.Parse(run.SpecJson);
@@ -155,6 +249,7 @@ public sealed class ProductionSkillRunner(
         var project = await dbContext.Projects.AsNoTracking().SingleAsync(
             project => project.Id == run.ProjectId,
             cancellationToken);
+        var canvas = GetRunCanvas(run, project.PreviewResolution);
         using var context = new DirectorToolContext
         {
             ProjectId = run.ProjectId,
@@ -164,6 +259,9 @@ public sealed class ProductionSkillRunner(
             ImageDeployment = imageGenerator.Deployment,
             CurrentAsset = null,
             CurrentAssetContent = null,
+            EnforceProjectVideoCanvas = true,
+            ForcedVideoWidth = canvas.Width,
+            ForcedVideoHeight = canvas.Height,
             EventWriter = static (_, _) => ValueTask.CompletedTask
         };
         var tools = toolRegistry.CreateTools(
@@ -175,7 +273,7 @@ public sealed class ProductionSkillRunner(
             ?? throw new InvalidOperationException("缺少 final-video-assembly 技能。");
         await foreach (var _ in directorAgent.StreamReplyWithToolsAsync(
             [],
-            $"加载 final-video-assembly，使用 608x352、24 FPS、requireNarration=true 一次组装最终 MP4；shotNameContains 传‘{shotNameContains}’。",
+            $"加载 final-video-assembly，使用 {canvas.Width}x{canvas.Height}、24 FPS、requireNarration=true 一次组装最终 MP4；shotNameContains 传‘{shotNameContains}’。",
             $"当前项目 ID：{run.ProjectId}。所有输入必须从持久化 shot 绑定读取。",
             project.LanguageModel,
             tools,
@@ -211,6 +309,39 @@ public sealed class ProductionSkillRunner(
         return allowedAssetIds is null
             ? assets.FirstOrDefault()
             : assets.FirstOrDefault(asset => allowedAssetIds.Contains(asset.Id));
+    }
+
+    private static bool HasVideoCanvas(Asset asset, ProjectVideoCanvas canvas)
+    {
+        if (string.IsNullOrWhiteSpace(asset.GenerationMetadataJson))
+            return false;
+        try
+        {
+            using var metadata = JsonDocument.Parse(asset.GenerationMetadataJson);
+            var parameters = metadata.RootElement.GetProperty("parameters");
+            return parameters.GetProperty("width").GetInt32() == canvas.Width
+                && parameters.GetProperty("height").GetInt32() == canvas.Height;
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static ProjectVideoCanvas GetRunCanvas(ProductionRun run, string previewResolution)
+    {
+        try
+        {
+            using var spec = JsonDocument.Parse(run.SpecJson);
+            var canvas = spec.RootElement.GetProperty("videoCanvas");
+            return new ProjectVideoCanvas(
+                canvas.GetProperty("width").GetInt32(),
+                canvas.GetProperty("height").GetInt32());
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return ProjectVideoCanvas.FromPreviewResolution(previewResolution);
+        }
     }
 
     private sealed record StageDefinition(

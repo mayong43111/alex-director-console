@@ -24,11 +24,20 @@ public sealed class DirectorToolContext : IDisposable
     public SemaphoreSlim ResourceLock { get; } = new(1, 1);
     public List<Asset> RevisedAssets { get; } = [];
     public List<VideoPromptRecord> VideoPrompts { get; } = [];
+    public List<string> ProcessEvidence { get; } = [];
+    public bool BatchVideoGenerationInvoked { get; set; }
+    public bool EnforceProjectVideoCanvas { get; set; }
+    public int? ForcedVideoWidth { get; set; }
+    public int? ForcedVideoHeight { get; set; }
     public SkillExecutionResult? Execution { get; set; }
     public Asset? UpdatedAsset { get; set; }
 
-    public ValueTask WriteEventAsync(object value, CancellationToken cancellationToken) =>
-        EventWriter(value, cancellationToken);
+    public ValueTask WriteEventAsync(object value, CancellationToken cancellationToken)
+    {
+        var evidence = JsonSerializer.Serialize(value, JsonOptions);
+        ProcessEvidence.Add(evidence.Length <= 4000 ? evidence : evidence[..4000]);
+        return EventWriter(value, cancellationToken);
+    }
 
     public void Dispose() => ResourceLock.Dispose();
 }

@@ -19,6 +19,7 @@ public sealed class GenerateComfyUiVideoTool(
     IRuntimeConfigurationReader configurationReader,
     IRemoteComfyUiService remoteComfyUiService,
     IComfyUiVideoGenerator comfyUiVideoGenerator,
+    ILocalMediaAssemblyService mediaAssemblyService,
     AppDbContext dbContext) : IDirectorTool
 {
     public string Name => "generate_comfyui_video";
@@ -92,6 +93,15 @@ public sealed class GenerateComfyUiVideoTool(
                 frameCount,
                 fps,
                 shot.Name), cancellationToken);
+            var streamInfo = await mediaAssemblyService.ProbeVideoAsync(
+                generatedVideo.Bytes,
+                cancellationToken);
+            if (streamInfo.Width != width || streamInfo.Height != height)
+                throw new InvalidOperationException(
+                    $"ComfyUI 实际输出 {streamInfo.Width}x{streamInfo.Height}，与统一规格 {width}x{height} 不一致，已拒绝保存和绑定。");
+            if (Math.Abs(streamInfo.Fps - fps) > 0.01)
+                throw new InvalidOperationException(
+                    $"ComfyUI 实际输出 {streamInfo.Fps:0.###} FPS，与统一规格 {fps} FPS 不一致，已拒绝保存和绑定。");
             var videoAsset = await VideoAssetWriter.SaveAsync(
                 assetWriter,
                 context.ProjectId,
@@ -102,7 +112,7 @@ public sealed class GenerateComfyUiVideoTool(
                     1,
                     "video-generation",
                     "ComfyUI",
-                    "MiniMax H3",
+                    "MiniMax H3 Turbo 4-step",
                     prompt,
                     new(workflowFileName, width, height, frameCount, fps, normalizedFrameFitMode),
                     string.IsNullOrWhiteSpace(lastFrameAssetId)
