@@ -9,6 +9,7 @@ import {
   Download,
   FileSearch,
   FileText,
+  Film,
   Images,
   LoaderCircle,
   MapPinned,
@@ -114,11 +115,22 @@ const mobilePanels: Array<{ id: MobilePanel; label: string }> = [
   { id: 'review', label: '审阅' },
 ]
 
+function isFinalVideo(asset: AssetRecord) {
+  if (!asset.generationMetadataJson) return false
+  try {
+    const metadata = JSON.parse(asset.generationMetadataJson) as { operation?: string }
+    return metadata.operation === 'assemble-project-video'
+  } catch {
+    return false
+  }
+}
+
 const assetSections: AssetSection[] = [
   { id: 'scripts', type: 'script', label: '剧本', accept: '.md,.txt,.pdf,.doc,.docx', icon: FileText },
   { id: 'analyses', type: 'analysis', label: '分析', accept: '.md,.json', icon: FileSearch },
   { id: 'images', type: 'media', label: '图片素材', accept: 'image/*', icon: Images, contentTypePrefix: 'image/' },
-  { id: 'videos', type: 'media', label: '视频素材', accept: 'video/*', icon: Video, contentTypePrefix: 'video/' },
+  { id: 'final-videos', type: 'media', label: '成片', accept: 'video/*', icon: Film, contentTypePrefix: 'video/', matches: isFinalVideo },
+  { id: 'videos', type: 'media', label: '视频素材', accept: 'video/*', icon: Video, contentTypePrefix: 'video/', matches: (asset) => !isFinalVideo(asset) },
   { id: 'audio', type: 'media', label: '音频素材', accept: 'audio/*', icon: Music, contentTypePrefix: 'audio/' },
   { id: 'characters', type: 'character', label: '人物', accept: '.md,image/*,.pdf', icon: Users },
   { id: 'scenes', type: 'scene', label: '场景', accept: '.md,image/*,video/*,.pdf', icon: MapPinned },
@@ -287,6 +299,7 @@ function App() {
   const conversationRef = useRef<HTMLElement>(null)
   const scrollToLatestAfterLoadRef = useRef(false)
   const stickToLatestRef = useRef(true)
+  const initializedAssetSectionProjectRef = useRef<string | null>(null)
   const [apiState, setApiState] = useState<ServiceState>('checking')
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -350,7 +363,8 @@ function App() {
   const visibleAssets = assets
     .filter((asset) => asset.type === selectedAssetSection.type
       && (!selectedAssetSection.contentTypePrefix
-        || asset.contentType.startsWith(selectedAssetSection.contentTypePrefix)))
+        || asset.contentType.startsWith(selectedAssetSection.contentTypePrefix))
+      && (!selectedAssetSection.matches || selectedAssetSection.matches(asset)))
     .sort((left, right) => selectedAssetSection.type === 'shot'
       ? left.name.localeCompare(right.name, 'zh-CN')
       : new Date(right.createdAtUtc).getTime() - new Date(left.createdAtUtc).getTime())
@@ -512,7 +526,15 @@ function App() {
     setAssetError(null)
 
     listProjectAssets(selectedProject.id, controller.signal)
-      .then(setAssets)
+      .then((loadedAssets) => {
+        setAssets(loadedAssets)
+        if (initializedAssetSectionProjectRef.current !== selectedProject.id) {
+          setActiveAssetSection(loadedAssets.some((asset) => asset.type === 'shot')
+            ? 'shots'
+            : 'scripts')
+          initializedAssetSectionProjectRef.current = selectedProject.id
+        }
+      })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
         setAssetError(error instanceof Error ? error.message : '资产列表加载失败')
@@ -772,7 +794,8 @@ function App() {
       const firstAsset = streamEvent.updatedAsset ?? streamEvent.generatedAssets[0]
       const targetSection = assetSections.find((section) => section.type === firstAsset.type
         && (!section.contentTypePrefix
-          || firstAsset.contentType.startsWith(section.contentTypePrefix)))
+          || firstAsset.contentType.startsWith(section.contentTypePrefix))
+        && (!section.matches || section.matches(firstAsset)))
       setAssets((current) => [
         ...streamEvent.generatedAssets!,
         ...current.filter((asset) =>
@@ -866,7 +889,11 @@ function App() {
     setRefreshingAssets(true)
     setAssetError(null)
     try {
-      setAssets(await listProjectAssets(selectedProject.id))
+      const refreshedAssets = await listProjectAssets(selectedProject.id)
+      setAssets(refreshedAssets)
+      setSelectedAsset((current) => current
+        ? refreshedAssets.find((asset) => asset.id === current.id) ?? current
+        : null)
     } catch (error) {
       setAssetError(error instanceof Error ? error.message : '资产列表刷新失败')
     } finally {
@@ -877,7 +904,8 @@ function App() {
   async function reviewAsset(asset: AssetRecord) {
     if (!selectedProject) return
     const section = assetSections.find((item) => item.type === asset.type
-      && (!item.contentTypePrefix || asset.contentType.startsWith(item.contentTypePrefix)))
+      && (!item.contentTypePrefix || asset.contentType.startsWith(item.contentTypePrefix))
+      && (!item.matches || item.matches(asset)))
     if (section) {
       setActiveAssetSection(section.id)
       setExpandedAssetSections((current) => new Set(current).add(section.id))
@@ -1306,6 +1334,28 @@ function App() {
               })}
             {assetSections
               .filter((section) => section.id === 'shots')
+              .map((section) => {
+                const Icon = section.icon
+                const isActive = sidebarMode === 'assets' && selectedAssetSection.id === section.id
+                return (
+                  <button
+                    type="button"
+                    className={isActive ? 'active' : undefined}
+                    key={section.id}
+                    aria-label={section.label}
+                    aria-pressed={isActive}
+                    title={section.label}
+                    onClick={() => {
+                      setActiveAssetSection(section.id)
+                      navigate(`/projects/${selectedProject.id}`)
+                    }}
+                  >
+                    <Icon size={19} strokeWidth={1.7} aria-hidden="true" />
+                  </button>
+                )
+              })}
+            {assetSections
+              .filter((section) => section.id === 'final-videos')
               .map((section) => {
                 const Icon = section.icon
                 const isActive = sidebarMode === 'assets' && selectedAssetSection.id === section.id
@@ -1847,6 +1897,25 @@ function App() {
                 <div><dt>文件名</dt><dd>{selectedAsset.fileName}</dd></div>
                 <div><dt>格式</dt><dd>{selectedAsset.contentType}</dd></div>
                 <div><dt>大小</dt><dd>{formatFileSize(selectedAsset.sizeBytes)}</dd></div>
+                {selectedAsset.sourceScript && (
+                  <div>
+                    <dt>关联剧本</dt>
+                    <dd>
+                      <button
+                        className="source-script-button"
+                        type="button"
+                        onClick={() => {
+                          const script = assets.find((asset) =>
+                            asset.type === 'script'
+                            && asset.resourceId === selectedAsset.sourceScript?.resourceId)
+                          if (script) void reviewAsset(script)
+                        }}
+                      >
+                        {selectedAsset.sourceScript.name} v{selectedAsset.sourceScript.version}
+                      </button>
+                    </dd>
+                  </div>
+                )}
                 <div><dt>添加时间</dt><dd>{formatDate(selectedAsset.createdAtUtc)}</dd></div>
                 <div><dt>资源 ID</dt><dd>{selectedAsset.id}</dd></div>
                 {(() => {

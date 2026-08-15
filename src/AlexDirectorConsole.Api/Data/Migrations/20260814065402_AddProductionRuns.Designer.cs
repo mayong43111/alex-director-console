@@ -3,6 +3,7 @@ using System;
 using AlexDirectorConsole.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AlexDirectorConsole.Api.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260814065402_AddProductionRuns")]
+    partial class AddProductionRuns
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -218,21 +221,11 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                     b.Property<bool>("DryRun")
                         .HasColumnType("INTEGER");
 
-                    b.Property<Guid?>("FinalAssetId")
-                        .HasColumnType("TEXT");
-
                     b.Property<bool>("KeepVmRunning")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("LeaseOwner")
-                        .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("OriginalInstruction")
@@ -254,9 +247,6 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("TEXT");
-
-                    b.Property<bool>("VmStartedByRun")
-                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 

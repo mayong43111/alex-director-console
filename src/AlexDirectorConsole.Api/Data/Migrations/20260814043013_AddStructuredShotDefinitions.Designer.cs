@@ -3,6 +3,7 @@ using System;
 using AlexDirectorConsole.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AlexDirectorConsole.Api.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260814043013_AddStructuredShotDefinitions")]
+    partial class AddStructuredShotDefinitions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -196,145 +199,6 @@ namespace AlexDirectorConsole.Api.Data.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("GlobalFoundryConfigurations", (string)null);
-                });
-
-            modelBuilder.Entity("AlexDirectorConsole.Api.Models.ProductionRun", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("CompletedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CurrentStage")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("DryRun")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<Guid?>("FinalAssetId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("KeepVmRunning")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(4000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("LeaseOwner")
-                        .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("OriginalInstruction")
-                        .IsRequired()
-                        .HasMaxLength(20000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ProjectId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SpecJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("StartedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("VmStartedByRun")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ProjectId", "CreatedAtUtc");
-
-                    b.HasIndex("Status", "CreatedAtUtc");
-
-                    b.ToTable("ProductionRuns", (string)null);
-                });
-
-            modelBuilder.Entity("AlexDirectorConsole.Api.Models.ProductionRunItem", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Attempt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTimeOffset?>("CompletedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ErrorCode")
-                        .HasMaxLength(100)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ErrorDetail")
-                        .HasMaxLength(4000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("InputFingerprint")
-                        .HasMaxLength(128)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid?>("OutputAssetId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ProjectId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("RunId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ShotAssetId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ShotName")
-                        .IsRequired()
-                        .HasMaxLength(260)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("ShotResourceId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Stage")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("StartedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RunId", "Status");
-
-                    b.HasIndex("RunId", "ShotResourceId", "Stage")
-                        .IsUnique();
-
-                    b.ToTable("ProductionRunItems", (string)null);
                 });
 
             modelBuilder.Entity("AlexDirectorConsole.Api.Models.Project", b =>

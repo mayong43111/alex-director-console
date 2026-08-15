@@ -16,9 +16,16 @@ public sealed record AssetResponse(
     string? GenerationMetadataJson,
     long SizeBytes,
     DateTimeOffset CreatedAtUtc,
-    string ContentUrl)
+    string ContentUrl,
+    AssetSourceScriptResponse? SourceScript)
 {
-    public static AssetResponse FromAsset(Asset asset, int versionCount = 1) => new(
+    public static AssetResponse FromAsset(Asset asset, int versionCount = 1) =>
+        FromAssetWithSourceScript(asset, versionCount, null);
+
+    public static AssetResponse FromAssetWithSourceScript(
+        Asset asset,
+        int versionCount,
+        Asset? sourceScript) => new(
         asset.Id,
         asset.ResourceId,
         asset.Number,
@@ -32,8 +39,21 @@ public sealed record AssetResponse(
         asset.GenerationMetadataJson,
         asset.SizeBytes,
         asset.CreatedAtUtc,
-        $"/api/projects/{asset.ProjectId}/assets/{asset.Id}/content");
+        $"/api/projects/{asset.ProjectId}/assets/{asset.Id}/content",
+        sourceScript is null
+            ? null
+            : new AssetSourceScriptResponse(
+                sourceScript.Id,
+                sourceScript.ResourceId,
+                sourceScript.Name,
+                sourceScript.Version));
 }
+
+public sealed record AssetSourceScriptResponse(
+    Guid AssetId,
+    Guid ResourceId,
+    string Name,
+    int Version);
 
 public sealed record ShotAssetLinkResponse(
     Guid Id,

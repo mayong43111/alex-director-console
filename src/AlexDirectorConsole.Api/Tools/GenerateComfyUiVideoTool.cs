@@ -2,8 +2,10 @@ using System.Text.Json;
 using AlexDirectorConsole.Api.Application.Assets;
 using AlexDirectorConsole.Api.Application.Configuration;
 using AlexDirectorConsole.Api.Contracts;
+using AlexDirectorConsole.Api.Data;
 using AlexDirectorConsole.Api.Models;
 using AlexDirectorConsole.Api.Services;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
@@ -16,7 +18,8 @@ public sealed class GenerateComfyUiVideoTool(
     IShotAssetBinder shotAssetBinder,
     IRuntimeConfigurationReader configurationReader,
     IRemoteComfyUiService remoteComfyUiService,
-    IComfyUiVideoGenerator comfyUiVideoGenerator) : IDirectorTool
+    IComfyUiVideoGenerator comfyUiVideoGenerator,
+    AppDbContext dbContext) : IDirectorTool
 {
     public string Name => "generate_comfyui_video";
 
@@ -40,8 +43,8 @@ public sealed class GenerateComfyUiVideoTool(
                 throw new ArgumentException("lastFrameAssetId 必须为空或有效 UUID。");
             if (width is < 64 or > 4096 || height is < 64 or > 4096 || width % 2 != 0 || height % 2 != 0)
                 throw new ArgumentException("视频宽高必须是 64 到 4096 之间的偶数。");
-            if (fps is < 1 or > 120 || frameCount < 5 || (frameCount - 5) % 17 != 0)
-                throw new ArgumentException("FPS 必须为 1 到 120；MiniMax H3 帧数必须满足 17k+5。");
+            if (fps is < 1 or > 120)
+                throw new ArgumentException("FPS 必须为 1 到 120。");
             var normalizedFrameFitMode = frameFitMode.Trim().ToLowerInvariant();
             if (normalizedFrameFitMode is not ("cover" or "contain"))
                 throw new ArgumentException("frameFitMode 仅可为 cover 或 contain。");
@@ -51,6 +54,15 @@ public sealed class GenerateComfyUiVideoTool(
             var shot = await assetReader.GetAsync(context.ProjectId, parsedShotId, cancellationToken)
                 ?? throw new InvalidOperationException("找不到目标 shot。");
             if (shot.Type != "shot") throw new InvalidOperationException("找不到目标 shot。");
+            var shotDefinition = await dbContext.ShotDefinitions
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    definition => definition.ProjectId == context.ProjectId
+                        && definition.ShotResourceId == shot.ResourceId,
+                    cancellationToken)
+                ?? throw new InvalidOperationException("目标 shot 缺少结构化时长，无法生成符合设计长度的视频。");
+            frameCount = CalculateFrameCount(shotDefinition.DurationSeconds, fps);
+            var generatedDurationSeconds = frameCount / (double)fps;
             var firstFrame = await PrepareFrameAsync(
                 assetReader, context.ProjectId, parsedFirstFrameId, width, height, normalizedFrameFitMode, cancellationToken);
             var lastFrame = string.IsNullOrWhiteSpace(lastFrameAssetId)
@@ -61,7 +73,7 @@ public sealed class GenerateComfyUiVideoTool(
             {
                 type = "process",
                 stage = "video.frames",
-                message = $"关键帧已由 Agent 等比处理为 {width}x{height}（{normalizedFrameFitMode}）"
+                message = $"关键帧已由 Agent 等比处理为 {width}x{height}（{normalizedFrameFitMode}）；按分镜 {shotDefinition.DurationSeconds:0.##} 秒生成 {frameCount} 帧（{generatedDurationSeconds:0.###} 秒）"
             }, cancellationToken);
             var configuration = await configurationReader.GetAsync(context.ProjectId, cancellationToken)
                 ?? throw new InvalidOperationException("尚未配置全局 VM 与 ComfyUI。");
@@ -121,7 +133,9 @@ public sealed class GenerateComfyUiVideoTool(
                     width,
                     height,
                     frameCount,
-                    fps
+                    fps,
+                    designedDurationSeconds = shotDefinition.DurationSeconds,
+                    generatedDurationSeconds
                 }
             }, cancellationToken);
             return JsonSerializer.Serialize(new
@@ -131,12 +145,24 @@ public sealed class GenerateComfyUiVideoTool(
                 workflowFileName,
                 videoPrompt = prompt,
                 frameFitMode = normalizedFrameFitMode,
-                width, height, frameCount, fps
+                width, height, frameCount, fps,
+                designedDurationSeconds = shotDefinition.DurationSeconds,
+                generatedDurationSeconds
             }, context.JsonOptions);
         }),
         name: Name,
-        description: "通过项目 VM 上的 ComfyUI API workflow 生成 MiniMax H3 首尾帧视频，下载并验证 MP4 后保存为视频素材，并以 video 角色独占绑定到 shot。shotAssetId 和 firstFrameAssetId 必须传 list_project_resources 返回的 id UUID，严禁传资源名称或镜号；先用 resourceType=shot、nameContains=镜号取得 shotAssetId，再用 resourceType=media、nameContains=镜号与首帧取得 firstFrameAssetId。lastFrameAssetId 同样只能传媒体 id UUID；没有尾帧时传空字符串并复用首帧。workflowFileName 必须是配置目录中的 API prompt JSON，并使用 {{FIRST_FRAME}}、{{LAST_FRAME}}、{{PROMPT}}、{{WIDTH}}、{{HEIGHT}}、{{FRAME_COUNT}}、{{FPS}}、{{OUTPUT_PREFIX}} 占位符。工具会将关键帧等比处理为 width/height：frameFitMode=cover 时居中裁切，contain 时完整保留并补边，禁止非等比拉伸。H3 帧数必须满足 17k+5。",
+        description: "通过项目 VM 上的 ComfyUI API workflow 生成 MiniMax H3 首尾帧视频，下载并验证 MP4 后保存为视频素材，并以 video 角色独占绑定到 shot。shotAssetId 和 firstFrameAssetId 必须传 list_project_resources 返回的 id UUID，严禁传资源名称或镜号；先用 resourceType=shot、nameContains=镜号取得 shotAssetId，再用 resourceType=media、nameContains=镜号与首帧取得 firstFrameAssetId。lastFrameAssetId 同样只能传媒体 id UUID；没有尾帧时传空字符串并复用首帧。workflowFileName 必须是配置目录中的 API prompt JSON，并使用 {{FIRST_FRAME}}、{{LAST_FRAME}}、{{PROMPT}}、{{WIDTH}}、{{HEIGHT}}、{{FRAME_COUNT}}、{{FPS}}、{{OUTPUT_PREFIX}} 占位符。工具会将关键帧等比处理为 width/height：frameFitMode=cover 时居中裁切，contain 时完整保留并补边，禁止非等比拉伸。实际 frameCount 始终由目标 shot 的结构化时长和 FPS 计算为能够覆盖设计时长的最小 17k+5 合法值，不采用调用者传入的固定长度。",
         serializerOptions: context.JsonOptions);
+
+    internal static int CalculateFrameCount(double durationSeconds, int fps)
+    {
+        if (!double.IsFinite(durationSeconds) || durationSeconds <= 0)
+            throw new InvalidOperationException("目标 shot 的结构化时长无效。");
+
+        var requiredFrameCount = (int)Math.Ceiling(durationSeconds * fps);
+        var stepCount = Math.Max(0, (int)Math.Ceiling((requiredFrameCount - 5) / 17d));
+        return checked(stepCount * 17 + 5);
+    }
 
     private static async Task<byte[]> PrepareFrameAsync(
         IAssetReader assetReader,

@@ -2096,6 +2096,22 @@ button:disabled {
   text-align: right;
 }
 
+.source-script-button {
+  padding: 0;
+  border: 0;
+  color: #765426;
+  background: transparent;
+  font: inherit;
+  text-align: right;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.source-script-button:hover {
+  color: #302313;
+}
+
 .asset-detail dl .generation-detail-row {
   grid-template-columns: 1fr;
   gap: 6px;

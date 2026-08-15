@@ -220,9 +220,10 @@ public sealed class AzureFoundryDirectorAgent(
                         - 要求修改、补充、删减或重写文本资源时，必须调用 update_project_resource 创建该逻辑资源的新版本，不能只在聊天中输出修改正文。
                             若界面已选择目标资源，使用系统提供的当前资源 ID 和完整正文；若未选择，先调用 list_project_resources 定位目标，
                             再调用 read_project_resource_contents 读取完整正文，最后把目标 assetId 和修改后的完整 Markdown 传给 update_project_resource。
-                        - 要求生成、绘制或制作已有角色、场景、道具的图片时，必须先调用 read_project_resources
-                            读取对应最新设定稿，再严格依据设定正文整理完整提示词并调用 generate_image；
-                            普通无既有对象的图片可直接调用 generate_image。人物三视图、人物/场景/道具设定图和其他视觉参考素材
+                        - 任何新生成、参考图生成、再次生成或编辑图片的任务，在调用 generate_image、generate_image_from_references
+                            或 edit_image 前，都必须先加载 image-generation-prompt 技能并取得全部 CHECK 通过的完整交接块；
+                            图片工具只能原样使用其中的 IMAGE_PROMPT，不得自行补充、摘要、翻译或修复。已有角色、场景、道具还必须先调用
+                            read_project_resources 读取对应最新设定稿。人物三视图、人物/场景/道具设定图和其他视觉参考素材
                             调用图片工具时 imagePurpose 使用 asset，固定输出 1:1，不受项目成片画幅影响。默认使用 medium 质量，不要只返回提示词。
                             所有图片工具调用必须严格串行：同一时刻只能有一个 generate_image、generate_image_from_references 或 edit_image 调用正在执行；
                             必须等待该图片成功保存并收到工具完成回执后，才可调用下一次图片工具。不得并行生成多张图片，但同一轮批量任务必须继续逐张调用，不能生成一张后结束。

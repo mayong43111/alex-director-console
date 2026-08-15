@@ -124,6 +124,12 @@ export interface AssetRecord {
   sizeBytes: number
   createdAtUtc: string
   contentUrl: string
+  sourceScript: {
+    assetId: string
+    resourceId: string
+    name: string
+    version: number
+  } | null
 }
 
 export interface ShotAssetLinkRecord {

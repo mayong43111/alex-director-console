@@ -9,6 +9,7 @@ export interface AssetSection {
   accept: string
   icon: LucideIcon
   contentTypePrefix?: string
+  matches?: (asset: AssetRecord) => boolean
 }
 
 interface AssetPanelProps {
@@ -122,7 +123,8 @@ export function AssetPanel({
             const Icon = section.icon
             const sectionAssets = assets
               .filter((asset) => asset.type === section.type
-                && (!section.contentTypePrefix || asset.contentType.startsWith(section.contentTypePrefix)))
+                && (!section.contentTypePrefix || asset.contentType.startsWith(section.contentTypePrefix))
+                && (!section.matches || section.matches(asset)))
               .sort((left, right) => section.type === 'shot'
                 ? left.name.localeCompare(right.name, 'zh-CN')
                 : new Date(right.createdAtUtc).getTime() - new Date(left.createdAtUtc).getTime())

@@ -39,6 +39,13 @@ public sealed record DeletedAssetResource(
     string Name,
     int VersionCount);
 
+public sealed record PurgedAssetVersions(
+    Guid ResourceId,
+    string Name,
+    Guid KeptAssetId,
+    int KeptVersion,
+    int DeletedVersionCount);
+
 public interface IAssetWriter
 {
     Task<Asset> CreateAsync(
@@ -67,5 +74,11 @@ public interface IAssetWriter
     Task<IReadOnlyList<DeletedAssetResource>> DeleteResourcesAsync(
         Guid projectId,
         IReadOnlyCollection<Guid> assetIds,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<PurgedAssetVersions>> PurgeOlderVersionsAsync(
+        Guid projectId,
+        IReadOnlyCollection<Guid> assetIds,
+        string requiredType,
         CancellationToken cancellationToken = default);
 }

@@ -186,8 +186,14 @@ public sealed class AssetWriter(AppDbContext dbContext, IBlobStorage blobStorage
                 link.ProjectId == projectId
                 && (resourceIds.Contains(link.ShotResourceId) || versionIds.Contains(link.AssetId)))
             .ToListAsync(cancellationToken);
+        var shotDefinitions = await dbContext.ShotDefinitions
+            .Where(shot => shot.ProjectId == projectId
+                && (resourceIds.Contains(shot.ShotResourceId)
+                    || resourceIds.Contains(shot.ScriptResourceId)))
+            .ToListAsync(cancellationToken);
 
         dbContext.ShotAssetLinks.RemoveRange(links);
+        dbContext.ShotDefinitions.RemoveRange(shotDefinitions);
         dbContext.Assets.RemoveRange(versions);
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -204,6 +210,60 @@ public sealed class AssetWriter(AppDbContext dbContext, IBlobStorage blobStorage
                 selected.Name,
                 versions.Count(asset => asset.ResourceId == resourceId));
         }).ToArray();
+    }
+
+    public async Task<IReadOnlyList<PurgedAssetVersions>> PurgeOlderVersionsAsync(
+        Guid projectId,
+        IReadOnlyCollection<Guid> assetIds,
+        string requiredType,
+        CancellationToken cancellationToken = default)
+    {
+        if (assetIds.Count == 0)
+        {
+            return [];
+        }
+
+        var requestedAssetIds = assetIds.Distinct().ToArray();
+        var selectedAssets = await dbContext.Assets
+            .AsNoTracking()
+            .Where(asset => asset.ProjectId == projectId && requestedAssetIds.Contains(asset.Id))
+            .ToListAsync(cancellationToken);
+        if (selectedAssets.Count != requestedAssetIds.Length
+            || selectedAssets.Any(asset => !asset.Type.Equals(requiredType, StringComparison.OrdinalIgnoreCase)))
+        {
+            return [];
+        }
+
+        var resourceIds = selectedAssets.Select(asset => asset.ResourceId).Distinct().ToArray();
+        var versions = await dbContext.Assets
+            .Where(asset => asset.ProjectId == projectId && resourceIds.Contains(asset.ResourceId))
+            .ToListAsync(cancellationToken);
+        var latestVersions = versions
+            .GroupBy(asset => asset.ResourceId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(asset => asset.Version).First());
+        var obsoleteVersions = versions
+            .Where(asset => latestVersions[asset.ResourceId].Id != asset.Id)
+            .ToList();
+        var obsoleteIds = obsoleteVersions.Select(asset => asset.Id).ToArray();
+        var obsoleteLinks = await dbContext.ShotAssetLinks
+            .Where(link => link.ProjectId == projectId && obsoleteIds.Contains(link.AssetId))
+            .ToListAsync(cancellationToken);
+
+        dbContext.ShotAssetLinks.RemoveRange(obsoleteLinks);
+        dbContext.Assets.RemoveRange(obsoleteVersions);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        foreach (var version in obsoleteVersions)
+        {
+            await blobStorage.DeleteAsync(version.BlobKey, cancellationToken);
+        }
+
+        return latestVersions.Values.Select(latest => new PurgedAssetVersions(
+            latest.ResourceId,
+            latest.Name,
+            latest.Id,
+            latest.Version,
+            obsoleteVersions.Count(asset => asset.ResourceId == latest.ResourceId))).ToArray();
     }
 
     private static Asset CreateAsset(AssetWriteRequest request, Asset? latestVersion)

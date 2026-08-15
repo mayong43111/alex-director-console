@@ -2,8 +2,8 @@
 name: voice-over
 title: 配音生成
 description: Generate and persist voice-over audio from narration, dialogue, announcements, or other spoken text. Use when the director asks to 生成配音、旁白、对白音频、角色声音、朗读、TTS or text-to-speech.
-version: 1.0.0
-allowed-tools: list_project_resources read_project_resource_contents generate_speech bind_shot_asset
+version: 1.1.0
+allowed-tools: list_project_resources query_storyboard read_project_resource_contents generate_speech bind_shot_asset
 ---
 # 配音生成
 
@@ -13,7 +13,7 @@ allowed-tools: list_project_resources read_project_resource_contents generate_sp
 
 ## Procedure
 
-1. 确定实际朗读文本：导演已给出完整文本时直接使用；导演指向当前剧本或 shot 时读取完整正文，只提取导演要求的旁白或对白，不朗读场景说明和动作描述。
+1. 确定实际朗读文本：导演已给出完整文本时直接使用；导演按场号或镜号指定 shot 时先调用 `query_storyboard` 定位结构化镜头和已有音频 take，再读取完整正文，只提取导演要求的旁白或对白，不朗读场景说明和动作描述。
 2. 确定资源名称，应包含角色、场次、镜号或用途，例如“林墨 · S03-02 对白”或“全片旁白”。
 3. 从导演令和上下文整理 `deliveryInstructions`，写清语言、角色年龄与身份、情绪、音色、节奏、重音和停顿；不得把这些表演说明混入实际朗读的 `text`。
 4. 导演指定 voice 时使用其选择；未指定时从 `alloy、echo、fable、nova、onyx、shimmer` 中按角色与用途选择，并在最终回复中报告。默认 `speed=1.0`、`responseFormat=mp3`。
@@ -26,6 +26,7 @@ allowed-tools: list_project_resources read_project_resource_contents generate_sp
 - 实际朗读文本必须逐字可核对；不得擅自增删产品数据、人物事实、免责声明或关键台词。
 - `deliveryInstructions` 只控制演绎，不得要求模型朗读其中内容。
 - 同一角色的连续对白默认保持同一 voice、语言、音色和语速，除非剧情或导演令要求变化。
+- 同一镜头、角色和用途重生成时沿用稳定资源名称，使新音频成为同一逻辑素材的下一版本；每个版本视为一条 take，绑定必须指向实际选用版本，不删除旧 take。
 - 当前 `tts` 部署不支持表演指令时，不得声称情绪、音色或停顿指令已被模型采用；工具元数据会明确标记是否应用。
 - 工具返回 4xx 部署不存在、voice 无效或参数无效时，不得原样重试；直接按真实错误报告，只有修正配置或参数后才能再次调用。
 - 长文本按自然段、场次或镜头拆分，单条不得超过工具限制；拆分后资源名必须可排序和追踪。

@@ -11,6 +11,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<SkillRun> SkillRuns => Set<SkillRun>();
     public DbSet<ShotAssetLink> ShotAssetLinks => Set<ShotAssetLink>();
+    public DbSet<ShotDefinition> ShotDefinitions => Set<ShotDefinition>();
+    public DbSet<ProductionRun> ProductionRuns => Set<ProductionRun>();
+    public DbSet<ProductionRunItem> ProductionRunItems => Set<ProductionRunItem>();
     public DbSet<ProjectRuntimeConfiguration> ProjectRuntimeConfigurations => Set<ProjectRuntimeConfiguration>();
     public DbSet<GlobalFoundryConfiguration> GlobalFoundryConfigurations => Set<GlobalFoundryConfiguration>();
 
@@ -137,6 +140,48 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasIndex(link => new { link.ProjectId, link.ShotResourceId });
             entity.HasIndex(link => new { link.ProjectId, link.ShotResourceId, link.AssetId, link.Role }).IsUnique();
             entity.Property(link => link.Role).HasMaxLength(40).IsRequired();
+        });
+
+        modelBuilder.Entity<ShotDefinition>(entity =>
+        {
+            entity.ToTable("ShotDefinitions");
+            entity.HasKey(shot => shot.Id);
+            entity.HasIndex(shot => new { shot.ProjectId, shot.ShotResourceId }).IsUnique();
+            entity.HasIndex(shot => new
+            {
+                shot.ProjectId,
+                shot.ScriptResourceId,
+                shot.SceneNumber,
+                shot.ShotNumber
+            }).IsUnique();
+        });
+
+        modelBuilder.Entity<ProductionRun>(entity =>
+        {
+            entity.ToTable("ProductionRuns");
+            entity.HasKey(run => run.Id);
+            entity.HasIndex(run => new { run.ProjectId, run.CreatedAtUtc });
+            entity.HasIndex(run => new { run.Status, run.CreatedAtUtc });
+            entity.Property(run => run.Status).HasMaxLength(30).IsRequired();
+            entity.Property(run => run.CurrentStage).HasMaxLength(30).IsRequired();
+            entity.Property(run => run.OriginalInstruction).HasMaxLength(20000).IsRequired();
+            entity.Property(run => run.SpecJson).IsRequired();
+            entity.Property(run => run.LastError).HasMaxLength(4000);
+            entity.Property(run => run.LeaseOwner).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<ProductionRunItem>(entity =>
+        {
+            entity.ToTable("ProductionRunItems");
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.RunId, item.ShotResourceId, item.Stage }).IsUnique();
+            entity.HasIndex(item => new { item.RunId, item.Status });
+            entity.Property(item => item.ShotName).HasMaxLength(260).IsRequired();
+            entity.Property(item => item.Stage).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.InputFingerprint).HasMaxLength(128);
+            entity.Property(item => item.ErrorCode).HasMaxLength(100);
+            entity.Property(item => item.ErrorDetail).HasMaxLength(4000);
         });
 
         modelBuilder.Entity<ProjectRuntimeConfiguration>(entity =>
