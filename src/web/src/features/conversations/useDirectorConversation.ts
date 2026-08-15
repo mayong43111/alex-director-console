@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { deleteConversationFrom, listConversationMessages } from '../../api/conversations'
 import { consumeNdjsonStream } from '../../api/streamProtocol'
+import { localize, type Language } from '../../i18n'
 import type {
   AssetRecord,
   ConversationMessageRecord,
@@ -9,6 +10,7 @@ import type {
 } from '../../models'
 
 interface UseDirectorConversationOptions {
+  language: Language
   project?: Project
   agentConfigured: boolean
   selectedAsset: AssetRecord | null
@@ -21,6 +23,7 @@ interface UseDirectorConversationOptions {
 }
 
 export function useDirectorConversation({
+  language,
   project,
   agentConfigured,
   selectedAsset,
@@ -48,14 +51,14 @@ export function useDirectorConversation({
       .then(setMessages)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
-        setConversationError(error instanceof Error ? error.message : '对话历史加载失败')
+        setConversationError(error instanceof Error ? error.message : localize(language, '对话历史加载失败', 'Failed to load conversation history'))
       })
       .finally(() => {
         if (!controller.signal.aborted) setMessagesLoading(false)
       })
 
     return () => controller.abort()
-  }, [project])
+  }, [project, language])
 
   async function retryDirectorMessage(message: ConversationMessageRecord) {
     if (!project || sendingMessage || message.role !== 'user') return
@@ -69,7 +72,7 @@ export function useDirectorConversation({
       })
       await sendDirectorMessage(message.content, message.model)
     } catch (error) {
-      setConversationError(error instanceof Error ? error.message : '重试失败')
+      setConversationError(error instanceof Error ? error.message : localize(language, '重试失败', 'Retry failed'))
     }
   }
 
@@ -126,9 +129,9 @@ export function useDirectorConversation({
           detail?: string
           error?: string
         } | null
-        throw new Error(problem?.detail ?? problem?.error ?? '执行副导演响应失败')
+        throw new Error(problem?.detail ?? problem?.error ?? localize(language, '执行副导演响应失败', 'Assistant response failed'))
       }
-      if (!response.body) throw new Error('浏览器未提供流式响应')
+      if (!response.body) throw new Error(localize(language, '浏览器未提供流式响应', 'The browser did not provide a streaming response'))
 
       let completed = false
       const consumeEvent = (streamEvent: MessageStreamEvent) => {
@@ -141,7 +144,7 @@ export function useDirectorConversation({
                   ...(item.processEvents ?? []),
                   {
                     stage: streamEvent.stage ?? streamEvent.type,
-                    message: streamEvent.message ?? '处理中',
+                    message: streamEvent.message ?? localize(language, '处理中', 'Processing'),
                     data: streamEvent.data,
                   },
                 ],
@@ -187,19 +190,19 @@ export function useDirectorConversation({
         }
 
         if (streamEvent.type === 'error') {
-          throw new Error(streamEvent.detail ?? streamEvent.message ?? '执行副导演响应失败')
+          throw new Error(streamEvent.detail ?? streamEvent.message ?? localize(language, '执行副导演响应失败', 'Assistant response failed'))
         }
       }
 
       await consumeNdjsonStream<MessageStreamEvent>(response.body, consumeEvent)
-      if (!completed) throw new Error('流式响应在完成前中断')
+      if (!completed) throw new Error(localize(language, '流式响应在完成前中断', 'The stream ended before completion'))
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '执行副导演响应失败'
+      const errorMessage = error instanceof Error ? error.message : localize(language, '执行副导演响应失败', 'Assistant response failed')
       setConversationError(errorMessage)
       setMessages((current) => current.map((item) => item.id === temporaryAssistantId
         ? {
             ...item,
-            content: item.content || '本次执行未完成。',
+            content: item.content || localize(language, '本次执行未完成。', 'This run did not complete.'),
             isStreaming: false,
             processEvents: [
               ...(item.processEvents ?? []),

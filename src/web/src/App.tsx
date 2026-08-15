@@ -45,6 +45,7 @@ import {
 import { AssetPanel, type AssetSection } from './features/assets/AssetPanel'
 import { SystemConfigurationPanel } from './features/configuration/SystemConfigurationPanel'
 import { useDirectorConversation } from './features/conversations/useDirectorConversation'
+import { languageStorageKey, loadLanguage, localize, type Language } from './i18n'
 import type {
   AgentStatus,
   AssetRecord,
@@ -109,10 +110,10 @@ const projectFormatPresets = [
   { id: '4:3', label: '4:3 · 1440×1080', width: 1440, height: 1080, imageSize: '1536x1024' },
   { id: 'custom', label: '自定义', width: 1920, height: 1080, imageSize: '1536x1024' },
 ] as const
-const mobilePanels: Array<{ id: MobilePanel; label: string }> = [
-  { id: 'assets', label: '资产' },
-  { id: 'director', label: '导演台' },
-  { id: 'review', label: '审阅' },
+const mobilePanels: Array<{ id: MobilePanel; label: string; labelEn: string }> = [
+  { id: 'assets', label: '资产', labelEn: 'Assets' },
+  { id: 'director', label: '导演台', labelEn: 'Director' },
+  { id: 'review', label: '审阅', labelEn: 'Review' },
 ]
 
 function isFinalVideo(asset: AssetRecord) {
@@ -126,16 +127,16 @@ function isFinalVideo(asset: AssetRecord) {
 }
 
 const assetSections: AssetSection[] = [
-  { id: 'scripts', type: 'script', label: '剧本', accept: '.md,.txt,.pdf,.doc,.docx', icon: FileText },
-  { id: 'analyses', type: 'analysis', label: '分析', accept: '.md,.json', icon: FileSearch },
-  { id: 'images', type: 'media', label: '图片素材', accept: 'image/*', icon: Images, contentTypePrefix: 'image/' },
-  { id: 'final-videos', type: 'media', label: '成片', accept: 'video/*', icon: Film, contentTypePrefix: 'video/', matches: isFinalVideo },
-  { id: 'videos', type: 'media', label: '视频素材', accept: 'video/*', icon: Video, contentTypePrefix: 'video/', matches: (asset) => !isFinalVideo(asset) },
-  { id: 'audio', type: 'media', label: '音频素材', accept: 'audio/*', icon: Music, contentTypePrefix: 'audio/' },
-  { id: 'characters', type: 'character', label: '人物', accept: '.md,image/*,.pdf', icon: Users },
-  { id: 'scenes', type: 'scene', label: '场景', accept: '.md,image/*,video/*,.pdf', icon: MapPinned },
-  { id: 'props', type: 'prop', label: '道具', accept: '.md,image/*,.pdf', icon: Box },
-  { id: 'shots', type: 'shot', label: '镜头', accept: '.md,.txt,image/*,video/*,.pdf', icon: Clapperboard },
+  { id: 'scripts', type: 'script', label: '剧本', labelEn: 'Scripts', accept: '.md,.txt,.pdf,.doc,.docx', icon: FileText },
+  { id: 'analyses', type: 'analysis', label: '分析', labelEn: 'Analysis', accept: '.md,.json', icon: FileSearch },
+  { id: 'images', type: 'media', label: '图片素材', labelEn: 'Images', accept: 'image/*', icon: Images, contentTypePrefix: 'image/' },
+  { id: 'final-videos', type: 'media', label: '成片', labelEn: 'Final Films', accept: 'video/*', icon: Film, contentTypePrefix: 'video/', matches: isFinalVideo },
+  { id: 'videos', type: 'media', label: '视频素材', labelEn: 'Video Clips', accept: 'video/*', icon: Video, contentTypePrefix: 'video/', matches: (asset) => !isFinalVideo(asset) },
+  { id: 'audio', type: 'media', label: '音频素材', labelEn: 'Audio', accept: 'audio/*', icon: Music, contentTypePrefix: 'audio/' },
+  { id: 'characters', type: 'character', label: '人物', labelEn: 'Characters', accept: '.md,image/*,.pdf', icon: Users },
+  { id: 'scenes', type: 'scene', label: '场景', labelEn: 'Scenes', accept: '.md,image/*,video/*,.pdf', icon: MapPinned },
+  { id: 'props', type: 'prop', label: '道具', labelEn: 'Props', accept: '.md,image/*,.pdf', icon: Box },
+  { id: 'shots', type: 'shot', label: '镜头', labelEn: 'Shots', accept: '.md,.txt,image/*,video/*,.pdf', icon: Clapperboard },
 ]
 
 const groupedAssetSectionIds = new Set(['analyses', 'characters', 'scenes', 'props'])
@@ -233,24 +234,33 @@ function parseSpeechGenerationMetadata(value: string | null): SpeechGenerationMe
   }
 }
 
-function formatImageOperation(operation: ImageGenerationMetadata['operation']) {
-  const labels: Record<ImageGenerationMetadata['operation'], string> = {
-    generate: '模型生成',
-    'generate-from-references': '参考图生成',
-    edit: '图片编辑',
-    'merge-references': '本地合成',
+function formatImageOperation(operation: ImageGenerationMetadata['operation'], language: Language) {
+  const labels: Record<ImageGenerationMetadata['operation'], [string, string]> = {
+    generate: ['模型生成', 'Model generation'],
+    'generate-from-references': ['参考图生成', 'Reference image generation'],
+    edit: ['图片编辑', 'Image edit'],
+    'merge-references': ['本地合成', 'Local composition'],
   }
-  return labels[operation]
+  return localize(language, ...labels[operation])
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat('zh-CN', {
+function formatDate(value: string, language: Language) {
+  return new Intl.DateTimeFormat(language, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+function LanguageSwitch({ language, onChange }: { language: Language; onChange: (language: Language) => void }) {
+  return (
+    <div className="language-switch" role="group" aria-label={localize(language, '界面语言', 'Interface language')}>
+      <button type="button" className={language === 'zh-CN' ? 'active' : undefined} aria-pressed={language === 'zh-CN'} onClick={() => onChange('zh-CN')}>中文</button>
+      <button type="button" className={language === 'en-US' ? 'active' : undefined} aria-pressed={language === 'en-US'} onClick={() => onChange('en-US')}>EN</button>
+    </div>
+  )
 }
 
 function loadProjects(): Project[] {
@@ -300,6 +310,8 @@ function App() {
   const scrollToLatestAfterLoadRef = useRef(false)
   const stickToLatestRef = useRef(true)
   const initializedAssetSectionProjectRef = useRef<string | null>(null)
+  const [language, setLanguage] = useState<Language>(loadLanguage)
+  const text = (chinese: string, english: string) => localize(language, chinese, english)
   const [apiState, setApiState] = useState<ServiceState>('checking')
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -345,6 +357,11 @@ function App() {
   const [speechApiKey, setSpeechApiKey] = useState('')
   const [foundryConfigurationState, setFoundryConfigurationState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>('director')
+  useEffect(() => {
+    localStorage.setItem(languageStorageKey, language)
+    document.documentElement.lang = language
+    document.title = localize(language, 'alex 导演台', 'alex Director Console')
+  }, [language])
   const projectRoute = matchPath('/projects/:projectId/*', location.pathname)
     ?? matchPath('/projects/:projectId', location.pathname)
   const selectedProject = projects.find(
@@ -380,6 +397,7 @@ function App() {
     sendDirectorMessage,
     retryDirectorMessage,
   } = useDirectorConversation({
+    language,
     project: selectedProject,
     agentConfigured: agentStatus?.configured ?? false,
     selectedAsset,
@@ -537,7 +555,7 @@ function App() {
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
-        setAssetError(error instanceof Error ? error.message : '资产列表加载失败')
+        setAssetError(error instanceof Error ? error.message : localize(language, '资产列表加载失败', 'Failed to load assets'))
       })
       .finally(() => {
         if (!controller.signal.aborted) setAssetsLoading(false)
@@ -567,7 +585,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [selectedProject])
+  }, [selectedProject, language])
 
   useEffect(() => {
     if (selectedProject) setSelectedModel(selectedProject.languageModel)
@@ -623,9 +641,9 @@ function App() {
     void listAssetVersions(selectedProject.id, latestAsset.id)
       .then(setAssetVersions)
       .catch((error: unknown) => {
-        setAssetPreviewError(error instanceof Error ? error.message : '资源版本加载失败')
+        setAssetPreviewError(error instanceof Error ? error.message : localize(language, '资源版本加载失败', 'Failed to load asset versions'))
       })
-  }, [assets, assetsLoading, selectedAsset, selectedProject])
+  }, [assets, assetsLoading, language, selectedAsset, selectedProject])
 
   useEffect(() => {
     const resourceIds = new Set(assets.map((asset) => asset.resourceId))
@@ -661,14 +679,14 @@ function App() {
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
-        setSkillError(error instanceof Error ? error.message : '技能加载失败')
+        setSkillError(error instanceof Error ? error.message : localize(language, '技能加载失败', 'Failed to load skills'))
       })
       .finally(() => {
         if (!controller.signal.aborted) setSkillsLoading(false)
       })
 
     return () => controller.abort()
-  }, [selectedProject])
+  }, [selectedProject, language])
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -754,14 +772,14 @@ function App() {
 
   async function submitDirectorOrder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const text = directorOrder.trim()
-    if (!text && attachments.length === 0) return
+    const messageText = directorOrder.trim()
+    if (!messageText && attachments.length === 0) return
     if (!selectedProject || !agentStatus?.configured) return
 
     const attachmentContext = attachments.length > 0
-      ? `附件：${attachments.map((attachment) => attachment.name).join('、')}`
+      ? text(`附件：${attachments.map((attachment) => attachment.name).join('、')}`, `Attachments: ${attachments.map((attachment) => attachment.name).join(', ')}`)
       : ''
-    const message = [text, attachmentContext].filter(Boolean).join('\n\n')
+    const message = [messageText, attachmentContext].filter(Boolean).join('\n\n')
 
     setDirectorOrder('')
     setAttachments([])
@@ -850,7 +868,7 @@ function App() {
 
       setAssets((current) => [...uploadedAssets.reverse(), ...current])
     } catch (error) {
-      setAssetError(error instanceof Error ? error.message : '资产上传失败')
+      setAssetError(error instanceof Error ? error.message : text('资产上传失败', 'Asset upload failed'))
     } finally {
       setUploadingAssets(false)
     }
@@ -858,8 +876,10 @@ function App() {
 
   async function deleteAsset(asset: AssetRecord) {
     if (!selectedProject || deletingAssetId) return
-    const versionLabel = asset.versionCount > 1 ? `及其全部 ${asset.versionCount} 个版本` : ''
-    if (!window.confirm(`永久删除“${asset.name}”${versionLabel}？此操作不可撤销。`)) return
+    const confirmation = asset.versionCount > 1
+      ? text(`永久删除“${asset.name}”及其全部 ${asset.versionCount} 个版本？此操作不可撤销。`, `Permanently delete “${asset.name}” and all ${asset.versionCount} versions? This cannot be undone.`)
+      : text(`永久删除“${asset.name}”？此操作不可撤销。`, `Permanently delete “${asset.name}”? This cannot be undone.`)
+    if (!window.confirm(confirmation)) return
 
     setDeletingAssetId(asset.id)
     setAssetError(null)
@@ -877,7 +897,7 @@ function App() {
       }
       if (previewImage?.resourceId === asset.resourceId) setPreviewImage(null)
     } catch (error) {
-      setAssetError(error instanceof Error ? error.message : '资产删除失败')
+      setAssetError(error instanceof Error ? error.message : text('资产删除失败', 'Failed to delete asset'))
     } finally {
       setDeletingAssetId(null)
     }
@@ -895,7 +915,7 @@ function App() {
         ? refreshedAssets.find((asset) => asset.id === current.id) ?? current
         : null)
     } catch (error) {
-      setAssetError(error instanceof Error ? error.message : '资产列表刷新失败')
+      setAssetError(error instanceof Error ? error.message : text('资产列表刷新失败', 'Failed to refresh assets'))
     } finally {
       setRefreshingAssets(false)
     }
@@ -922,14 +942,14 @@ function App() {
     void listAssetVersions(selectedProject.id, asset.id)
       .then(setAssetVersions)
       .catch((error: unknown) => {
-        setAssetPreviewError(error instanceof Error ? error.message : '资源版本加载失败')
+        setAssetPreviewError(error instanceof Error ? error.message : text('资源版本加载失败', 'Failed to load asset versions'))
       })
 
     if (asset.type === 'shot') {
       void listShotAssetLinks(selectedProject.id, asset.id)
         .then(setShotAssetLinks)
         .catch((error: unknown) => {
-          setAssetPreviewError(error instanceof Error ? error.message : '镜头素材加载失败')
+          setAssetPreviewError(error instanceof Error ? error.message : text('镜头素材加载失败', 'Failed to load shot assets'))
         })
     }
 
@@ -941,19 +961,19 @@ function App() {
     setAssetPreviewLoading(true)
     try {
       const response = await fetch(asset.contentUrl)
-      if (!response.ok) throw new Error('资产内容加载失败')
-      const text = await response.text()
+      if (!response.ok) throw new Error(text('资产内容加载失败', 'Failed to load asset content'))
+      const contentText = await response.text()
       if (asset.contentType === 'application/json') {
         try {
-          setAssetPreviewText(JSON.stringify(JSON.parse(text), null, 2))
+          setAssetPreviewText(JSON.stringify(JSON.parse(contentText), null, 2))
         } catch {
-          setAssetPreviewText(text)
+          setAssetPreviewText(contentText)
         }
       } else {
-        setAssetPreviewText(text)
+        setAssetPreviewText(contentText)
       }
     } catch (error) {
-      setAssetPreviewError(error instanceof Error ? error.message : '资产内容加载失败')
+      setAssetPreviewError(error instanceof Error ? error.message : text('资产内容加载失败', 'Failed to load asset content'))
     } finally {
       setAssetPreviewLoading(false)
     }
@@ -966,7 +986,7 @@ function App() {
       setSkills((current) => current.map((item) => item.id === updated.id ? updated : item))
       setSelectedSkill((current) => current?.id === updated.id ? updated : current)
     } catch (error) {
-      setSkillError(error instanceof Error ? error.message : '技能状态更新失败')
+      setSkillError(error instanceof Error ? error.message : text('技能状态更新失败', 'Failed to update skill status'))
     }
   }
 
@@ -991,36 +1011,36 @@ function App() {
       <header className="assets-header">
         <div>
           <p className="section-label">PROJECT</p>
-          <h2 id="project-settings-title">项目信息</h2>
+          <h2 id="project-settings-title">{text('项目信息', 'Project')}</h2>
         </div>
         <button className="switch-project" type="button" onClick={() => navigate('/')}>
-          切换
+          {text('切换', 'Switch')}
         </button>
       </header>
       <div className="project-settings-form">
         <section className="project-settings-group">
-          <h3>基本信息</h3>
-          <label htmlFor="project-settings-name">项目名称</label>
+          <h3>{text('基本信息', 'Basics')}</h3>
+          <label htmlFor="project-settings-name">{text('项目名称', 'Project name')}</label>
           <input
             id="project-settings-name"
             value={selectedProject.name}
             maxLength={100}
             onChange={(event) => updateProject({ name: event.target.value })}
           />
-          <label htmlFor="project-settings-description">项目描述</label>
+          <label htmlFor="project-settings-description">{text('项目描述', 'Description')}</label>
           <textarea
             id="project-settings-description"
             value={selectedProject.description}
             maxLength={1000}
             rows={4}
-            placeholder="故事类型、制作目标或项目范围"
+            placeholder={text('故事类型、制作目标或项目范围', 'Story type, production goal, or project scope')}
             onChange={(event) => updateProject({ description: event.target.value })}
           />
         </section>
 
         <section className="project-settings-group">
-          <h3>画面与交付</h3>
-          <label htmlFor="project-settings-format">成片画面比例（分辨率）</label>
+          <h3>{text('画面与交付', 'Picture & delivery')}</h3>
+          <label htmlFor="project-settings-format">{text('成片画面比例（分辨率）', 'Final aspect ratio (resolution)')}</label>
           <select
             id="project-settings-format"
             value={selectedProject.formatPreset}
@@ -1035,7 +1055,7 @@ function App() {
             }}
           >
             {projectFormatPresets.map((preset) => (
-              <option value={preset.id} key={preset.id}>{preset.label}</option>
+              <option value={preset.id} key={preset.id}>{preset.id === 'custom' ? text('自定义', 'Custom') : preset.label}</option>
             ))}
           </select>
           {selectedProject.formatPreset === 'custom' && (
@@ -1046,7 +1066,7 @@ function App() {
                 max="8192"
                 step="2"
                 value={selectedProject.outputWidth}
-                aria-label="画面宽度"
+                aria-label={text('画面宽度', 'Frame width')}
                 onChange={(event) => updateProjectFormat(
                   'custom',
                   Math.min(8192, Math.max(64, Number(event.target.value))),
@@ -1060,7 +1080,7 @@ function App() {
                 max="8192"
                 step="2"
                 value={selectedProject.outputHeight}
-                aria-label="画面高度"
+                aria-label={text('画面高度', 'Frame height')}
                 onChange={(event) => updateProjectFormat(
                   'custom',
                   selectedProject.outputWidth,
@@ -1069,7 +1089,7 @@ function App() {
               />
             </div>
           )}
-          <label htmlFor="project-settings-preview-resolution">快速拉片分辨率</label>
+          <label htmlFor="project-settings-preview-resolution">{text('快速拉片分辨率', 'Preview resolution')}</label>
           <select
             id="project-settings-preview-resolution"
             value={previewResolutionOptions.includes(selectedProject.previewResolution)
@@ -1084,8 +1104,8 @@ function App() {
         </section>
 
         <section className="project-settings-group">
-          <h3>生成模型</h3>
-          <label htmlFor="project-settings-language-model">语言模型</label>
+          <h3>{text('生成模型', 'Generation models')}</h3>
+          <label htmlFor="project-settings-language-model">{text('语言模型', 'Language model')}</label>
           <select
             id="project-settings-language-model"
             value={selectedProject.languageModel}
@@ -1098,7 +1118,7 @@ function App() {
             <option value="gpt-5.4-mini">GPT-5.4 mini</option>
             <option value="gpt-4.1">GPT-4.1</option>
           </select>
-          <label htmlFor="project-settings-image-model">Image 模型</label>
+          <label htmlFor="project-settings-image-model">{text('Image 模型', 'Image model')}</label>
           <select
             id="project-settings-image-model"
             value={!selectingCustomImageModel
@@ -1114,29 +1134,29 @@ function App() {
             }}
           >
             <option value="configured">
-              系统配置 · {agentStatus?.imageDeployment ?? 'gpt-image-2'}
+              {text('系统配置', 'System configuration')} · {agentStatus?.imageDeployment ?? 'gpt-image-2'}
             </option>
-            <option value="custom">自定义 Azure 部署</option>
+            <option value="custom">{text('自定义 Azure 部署', 'Custom Azure deployment')}</option>
           </select>
           {(selectingCustomImageModel
             || selectedProject.imageModel !== (agentStatus?.imageDeployment ?? 'gpt-image-2')) && (
             <>
-              <label htmlFor="project-settings-custom-image-model">图片部署名称</label>
+              <label htmlFor="project-settings-custom-image-model">{text('图片部署名称', 'Image deployment name')}</label>
               <input
                 id="project-settings-custom-image-model"
                 value={selectedProject.imageModel}
                 maxLength={100}
-                placeholder="Azure 部署名称"
+                placeholder={text('Azure 部署名称', 'Azure deployment name')}
                 onChange={(event) => updateProject({ imageModel: event.target.value })}
               />
             </>
           )}
           <div className="project-setting-readout">
-            <span>模型生成尺寸</span>
+            <span>{text('模型生成尺寸', 'Generation size')}</span>
             <strong>{projectFormat?.imageSize.replace('x', ' × ')}</strong>
           </div>
 
-          <label htmlFor="project-settings-video-model">视频模型</label>
+          <label htmlFor="project-settings-video-model">{text('视频模型', 'Video model')}</label>
           <select
             id="project-settings-video-model"
             value={selectingCustomVideoModel || selectedProject.videoModel ? 'custom' : 'none'}
@@ -1146,24 +1166,24 @@ function App() {
               if (!isCustom) updateProject({ videoModel: '' })
             }}
           >
-            <option value="none">未配置</option>
-            <option value="custom">自定义 Azure 部署</option>
+            <option value="none">{text('未配置', 'Not configured')}</option>
+            <option value="custom">{text('自定义 Azure 部署', 'Custom Azure deployment')}</option>
           </select>
           {(selectingCustomVideoModel || selectedProject.videoModel) && (
             <>
-              <label htmlFor="project-settings-custom-video-model">视频部署名称</label>
+              <label htmlFor="project-settings-custom-video-model">{text('视频部署名称', 'Video deployment name')}</label>
               <input
                 id="project-settings-custom-video-model"
                 value={selectedProject.videoModel}
                 maxLength={100}
-                placeholder="Azure 部署名称"
+                placeholder={text('Azure 部署名称', 'Azure deployment name')}
                 onChange={(event) => updateProject({ videoModel: event.target.value })}
               />
             </>
           )}
           <div className="project-setting-readout">
-            <span>视频生成</span>
-            <strong>{selectedProject.videoModel.trim() ? '使用项目部署' : '未配置'}</strong>
+            <span>{text('视频生成', 'Video generation')}</span>
+            <strong>{selectedProject.videoModel.trim() ? text('使用项目部署', 'Using project deployment') : text('未配置', 'Not configured')}</strong>
           </div>
         </section>
 
@@ -1175,7 +1195,7 @@ function App() {
     return (
       <main className="project-gate">
         <div className="no-projects">
-          <p>正在加载项目...</p>
+          <p>{text('正在加载项目...', 'Loading projects...')}</p>
         </div>
       </main>
     )
@@ -1191,16 +1211,17 @@ function App() {
         <header className="gate-brand">
           <span className="brand-mark" aria-hidden="true">A</span>
           <div>
-            <strong>alex 导演台</strong>
+            <strong>{text('alex 导演台', 'alex Director Console')}</strong>
             <span>PROJECT ENTRY</span>
           </div>
+          <LanguageSwitch language={language} onChange={setLanguage} />
         </header>
 
         <div className="gate-layout">
           <section className="project-picker" aria-labelledby="project-picker-title">
             <p className="section-label">DIRECTOR'S PROJECTS</p>
-            <h1 id="project-picker-title">先选择一个项目</h1>
-            <p className="gate-intro">导演台中的指令、素材与审阅都归属于具体项目。</p>
+            <h1 id="project-picker-title">{text('先选择一个项目', 'Choose a project')}</h1>
+            <p className="gate-intro">{text('导演台中的指令、素材与审阅都归属于具体项目。', 'Commands, assets, and reviews belong to a specific project.')}</p>
 
             {projects.length > 0 ? (
               <div className="project-list">
@@ -1216,35 +1237,35 @@ function App() {
                     </span>
                     <span className="project-copy">
                       <strong>{project.name}</strong>
-                      <small>创建于 {new Date(project.createdAt).toLocaleDateString('zh-CN')}</small>
+                      <small>{text('创建于', 'Created')} {new Date(project.createdAt).toLocaleDateString(language)}</small>
                     </span>
-                    <span className="enter-project" aria-hidden="true">进入 →</span>
+                    <span className="enter-project" aria-hidden="true">{text('进入 →', 'Open →')}</span>
                   </button>
                 ))}
               </div>
             ) : (
               <div className="no-projects">
                 <span>0</span>
-                <p>还没有项目，从右侧创建第一个。</p>
+                <p>{text('还没有项目，从右侧创建第一个。', 'No projects yet. Create the first one on the right.')}</p>
               </div>
             )}
           </section>
 
           <section className="create-project" aria-labelledby="create-project-title">
             <p className="section-label">NEW PROJECT</p>
-            <h2 id="create-project-title">创建项目</h2>
+            <h2 id="create-project-title">{text('创建项目', 'Create project')}</h2>
             <form onSubmit={createProject}>
-              <label htmlFor="project-name">项目名称</label>
+              <label htmlFor="project-name">{text('项目名称', 'Project name')}</label>
               <input
                 id="project-name"
                 value={newProjectName}
                 onChange={(event) => setNewProjectName(event.target.value)}
-                placeholder="例如：天桥食堂"
+                placeholder={text('例如：天桥食堂', 'For example: Product Film')}
                 autoComplete="off"
                 autoFocus={projects.length === 0}
               />
               <button type="submit" disabled={!newProjectName.trim()}>
-                创建并进入
+                {text('创建并进入', 'Create and open')}
               </button>
             </form>
           </section>
@@ -1259,17 +1280,18 @@ function App() {
         <header className="brand">
           <span className="brand-mark" aria-hidden="true">A</span>
           <div>
-            <strong>alex 导演台</strong>
+            <strong>{text('alex 导演台', 'alex Director')}</strong>
           </div>
+          <LanguageSwitch language={language} onChange={setLanguage} />
         </header>
         <div className="sidebar-middle">
-          <nav className="icon-menu" aria-label="制作资源与技能">
+          <nav className="icon-menu" aria-label={text('制作资源与技能', 'Production assets and skills')}>
             <button
               type="button"
               className={sidebarMode === 'settings' ? 'active' : undefined}
-              aria-label="项目信息"
+              aria-label={text('项目信息', 'Project information')}
               aria-pressed={sidebarMode === 'settings'}
-              title="项目信息"
+              title={text('项目信息', 'Project information')}
               onClick={() => navigate(`/projects/${selectedProject.id}/settings`)}
             >
               <Settings2 size={19} strokeWidth={1.7} aria-hidden="true" />
@@ -1284,9 +1306,9 @@ function App() {
                     type="button"
                     className={isActive ? 'active' : undefined}
                     key={section.id}
-                    aria-label={section.label}
+                    aria-label={localize(language, section.label, section.labelEn)}
                     aria-pressed={isActive}
-                    title={section.label}
+                    title={localize(language, section.label, section.labelEn)}
                     onClick={() => {
                       setActiveAssetSection(section.id)
                       navigate(`/projects/${selectedProject.id}`)
@@ -1299,9 +1321,9 @@ function App() {
             <button
               type="button"
               className={sidebarMode === 'assets' && isGroupedAssetSection ? 'active' : undefined}
-              aria-label="资产"
+              aria-label={text('资产', 'Assets')}
               aria-pressed={sidebarMode === 'assets' && isGroupedAssetSection}
-              title="资产"
+              title={text('资产', 'Assets')}
               onClick={() => {
                 if (!isGroupedAssetSection) setActiveAssetSection('analyses')
                 setExpandedAssetSections((current) => new Set(current).add('analyses'))
@@ -1320,9 +1342,9 @@ function App() {
                     type="button"
                     className={isActive ? 'active' : undefined}
                     key={section.id}
-                    aria-label={section.label}
+                    aria-label={localize(language, section.label, section.labelEn)}
                     aria-pressed={isActive}
-                    title={section.label}
+                    title={localize(language, section.label, section.labelEn)}
                     onClick={() => {
                       setActiveAssetSection(section.id)
                       navigate(`/projects/${selectedProject.id}`)
@@ -1342,9 +1364,9 @@ function App() {
                     type="button"
                     className={isActive ? 'active' : undefined}
                     key={section.id}
-                    aria-label={section.label}
+                    aria-label={localize(language, section.label, section.labelEn)}
                     aria-pressed={isActive}
-                    title={section.label}
+                    title={localize(language, section.label, section.labelEn)}
                     onClick={() => {
                       setActiveAssetSection(section.id)
                       navigate(`/projects/${selectedProject.id}`)
@@ -1364,9 +1386,9 @@ function App() {
                     type="button"
                     className={isActive ? 'active' : undefined}
                     key={section.id}
-                    aria-label={section.label}
+                    aria-label={localize(language, section.label, section.labelEn)}
                     aria-pressed={isActive}
-                    title={section.label}
+                    title={localize(language, section.label, section.labelEn)}
                     onClick={() => {
                       setActiveAssetSection(section.id)
                       navigate(`/projects/${selectedProject.id}`)
@@ -1379,9 +1401,9 @@ function App() {
             <button
               type="button"
               className={sidebarMode === 'configuration' ? 'active skill-menu-button' : 'skill-menu-button'}
-              aria-label="系统配置"
+              aria-label={text('系统配置', 'System configuration')}
               aria-pressed={sidebarMode === 'configuration'}
-              title="系统配置"
+              title={text('系统配置', 'System configuration')}
               onClick={() => navigate(`/projects/${selectedProject.id}/configuration`)}
             >
               <WandSparkles size={19} strokeWidth={1.7} aria-hidden="true" />
@@ -1390,6 +1412,7 @@ function App() {
 
           {sidebarMode === 'settings' ? projectSettingsPanel : sidebarMode === 'assets' ? (
           <AssetPanel
+            language={language}
             projectName={selectedProject.name}
             selectedSection={selectedAssetSection}
             groupedSections={groupedAssetSections}
@@ -1422,6 +1445,7 @@ function App() {
           />
           ) : (
           <SystemConfigurationPanel
+            language={language}
             agentStatus={agentStatus}
             foundryConfiguration={foundryConfiguration}
             setFoundryConfiguration={setFoundryConfiguration}
@@ -1459,7 +1483,7 @@ function App() {
           >
             <span>
               <span className={`status-dot ${apiState}`} />
-              服务状态
+              {text('服务状态', 'Services')}
             </span>
             {serviceStatusExpanded
               ? <ChevronDown size={15} aria-hidden="true" />
@@ -1469,17 +1493,17 @@ function App() {
             <div className="service-status-details">
               <div>
                 <span className={`status-dot ${apiState}`} />
-                API {apiState === 'online' ? '在线' : apiState === 'offline' ? '离线' : '检查中'}
+                API {apiState === 'online' ? text('在线', 'Online') : apiState === 'offline' ? text('离线', 'Offline') : text('检查中', 'Checking')}
               </div>
               <div>
                 <span className={`status-dot ${agentStatus?.configured ? 'online' : 'idle'}`} />
-                MAF {agentStatus?.configured ? '已配置' : '待配置'}
+                MAF {agentStatus?.configured ? text('已配置', 'Configured') : text('待配置', 'Pending')}
               </div>
               <div>
                 <span className={`status-dot ${agentStatus?.imageConfigured ? 'online' : 'idle'}`} />
                 Image {agentStatus?.imageConfigured
                   ? `${agentStatus.imageDeployment} · ${agentStatus.imageQuality}`
-                  : '待配置'}
+                  : text('待配置', 'Pending')}
               </div>
             </div>
           )}
@@ -1489,14 +1513,15 @@ function App() {
       <main className="director-desk">
         <header className="desk-header">
           <div>
-            <h1>导演台</h1>
+            <h1>{text('导演台', 'Director Console')}</h1>
           </div>
-          <span className="environment-badge">本地开发</span>
+          <LanguageSwitch language={language} onChange={setLanguage} />
+          <span className="environment-badge">{text('本地开发', 'Local')}</span>
         </header>
         <section
           ref={conversationRef}
           className={`conversation ${messages.length > 0 ? 'has-messages' : ''}`}
-          aria-label="导演工作区"
+          aria-label={text('导演工作区', 'Director workspace')}
           onScroll={(event) => {
             const conversation = event.currentTarget
             stickToLatestRef.current = conversation.scrollHeight
@@ -1507,24 +1532,24 @@ function App() {
           {messagesLoading ? (
             <div className="empty-conversation">
               <LoaderCircle className="spin" size={24} aria-hidden="true" />
-              <p>正在加载对话…</p>
+              <p>{text('正在加载对话…', 'Loading conversation…')}</p>
             </div>
           ) : messages.length > 0 ? (
             <div className="conversation-thread">
               {messages.map((message) => (
                 <article className={`chat-message ${message.role}`} key={message.id}>
                   <header>
-                    <strong>{message.role === 'user' ? '导演' : '执行副导演'}</strong>
+                    <strong>{message.role === 'user' ? text('导演', 'Director') : text('执行副导演', 'Assistant Director')}</strong>
                     <span className="chat-message-meta">
-                      <span>{message.isStreaming ? '执行中' : message.model}</span>
+                      <span>{message.isStreaming ? text('执行中', 'Running') : message.model}</span>
                       {message.role === 'user' && !message.id.startsWith('pending-') && (
                         <button
                           className="chat-retry-button"
                           type="button"
                           disabled={sendingMessage}
                           onClick={() => void retryDirectorMessage(message)}
-                          title="从这里重试"
-                          aria-label="删除此条及后续对话并重试"
+                          title={text('从这里重试', 'Retry from here')}
+                          aria-label={text('删除此条及后续对话并重试', 'Delete this and later messages, then retry')}
                         >
                           <RotateCcw size={13} aria-hidden="true" />
                         </button>
@@ -1532,7 +1557,7 @@ function App() {
                     </span>
                   </header>
                   {message.processEvents && message.processEvents.length > 0 && (
-                    <ol className="process-trace" aria-label="执行过程">
+                    <ol className="process-trace" aria-label={text('执行过程', 'Execution trace')}>
                       {message.processEvents.map((processEvent, index) => (
                         <li className={processEvent.stage === 'error' ? 'error' : undefined} key={`${processEvent.stage}-${index}`}>
                           <span className="process-trace-dot" aria-hidden="true" />
@@ -1540,13 +1565,13 @@ function App() {
                             {processEvent.message}
                             {processEvent.data?.imagePrompt && (
                               <span className="process-image-prompt">
-                                <strong>实际提示词</strong>
+                                <strong>{text('实际提示词', 'Actual prompt')}</strong>
                                 <pre>{processEvent.data.imagePrompt}</pre>
                               </span>
                             )}
                             {processEvent.data?.videoPrompt && (
                               <span className="process-image-prompt">
-                                <strong>实际视频提示词</strong>
+                                <strong>{text('实际视频提示词', 'Actual video prompt')}</strong>
                                 {processEvent.data.workflowFileName && (
                                   <small>
                                     {processEvent.data.workflowFileName}
@@ -1554,7 +1579,7 @@ function App() {
                                       ? ` · ${processEvent.data.width}×${processEvent.data.height}`
                                       : ''}
                                     {processEvent.data.frameCount
-                                      ? ` · ${processEvent.data.frameCount} 帧`
+                                      ? text(` · ${processEvent.data.frameCount} 帧`, ` · ${processEvent.data.frameCount} frames`)
                                       : ''}
                                     {processEvent.data.fps ? ` · ${processEvent.data.fps} FPS` : ''}
                                   </small>
@@ -1568,13 +1593,13 @@ function App() {
                       {message.isStreaming && (
                         <li className="active">
                           <LoaderCircle className="spin" size={12} aria-hidden="true" />
-                          <span>等待下一步回执</span>
+                          <span>{text('等待下一步回执', 'Waiting for the next update')}</span>
                         </li>
                       )}
                     </ol>
                   )}
                   {message.content ? <p>{message.content}</p> : message.isStreaming ? (
-                    <p className="stream-placeholder">执行副导演正在处理…</p>
+                    <p className="stream-placeholder">{text('执行副导演正在处理…', 'The assistant director is working…')}</p>
                   ) : null}
                   {message.generatedAssets?.map((asset) => (
                       <button
@@ -1582,7 +1607,7 @@ function App() {
                         type="button"
                         key={asset.id}
                         onClick={() => openGeneratedAsset(asset)}
-                        aria-label={`${asset.contentType.startsWith('image/') ? '预览图片' : '审阅资源'}：${asset.name}`}
+                        aria-label={`${asset.contentType.startsWith('image/') ? text('预览图片', 'Preview image') : text('审阅资源', 'Review asset')}: ${asset.name}`}
                       >
                         {asset.contentType.startsWith('image/')
                           ? <img src={asset.contentUrl} alt={asset.name} loading="lazy" />
@@ -1599,11 +1624,11 @@ function App() {
           ) : (
             <div className="empty-conversation">
               <span className="prompt-mark">A</span>
-              <h2>{agentStatus?.configured ? '等待导演指令' : 'Azure AI Foundry 未配置'}</h2>
+              <h2>{agentStatus?.configured ? text('等待导演指令', 'Waiting for direction') : text('Azure AI Foundry 未配置', 'Azure AI Foundry is not configured')}</h2>
               <p>
                 {agentStatus?.configured
-                  ? '执行副导演已就绪。'
-                  : '请填写项目根目录 .env 后重启 API。'}
+                  ? text('执行副导演已就绪。', 'The assistant director is ready.')
+                  : text('请在系统配置中填写 Azure AI Foundry 设置。', 'Configure Azure AI Foundry in System Configuration.')}
               </p>
             </div>
           )}
@@ -1613,22 +1638,22 @@ function App() {
           <div className="composer-box">
             <textarea
               id="director-order"
-              aria-label="导演令"
-              placeholder="告诉执行副导演现在要做什么…"
+              aria-label={text('导演令', 'Director instruction')}
+              placeholder={text('告诉执行副导演现在要做什么…', 'Tell the assistant director what to do…')}
               rows={4}
               value={directorOrder}
               onChange={(event) => setDirectorOrder(event.target.value)}
             />
             {attachments.length > 0 && (
-              <div className="attachment-list" aria-label="已添加附件">
+              <div className="attachment-list" aria-label={text('已添加附件', 'Attached files')}>
                 {attachments.map((attachment, index) => (
                   <span className="attachment-chip" key={`${attachment.name}-${attachment.lastModified}`}>
                     <Paperclip size={13} aria-hidden="true" />
                     <span>{attachment.name}</span>
                     <button
                       type="button"
-                      aria-label={`移除 ${attachment.name}`}
-                      title="移除附件"
+                      aria-label={text(`移除 ${attachment.name}`, `Remove ${attachment.name}`)}
+                      title={text('移除附件', 'Remove attachment')}
                       onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
                     >
                       <X size={13} aria-hidden="true" />
@@ -1639,18 +1664,18 @@ function App() {
             )}
             <div className="composer-toolbar">
               <div className="composer-tools">
-                <label className="attachment-button" title="添加附件">
+                <label className="attachment-button" title={text('添加附件', 'Add attachment')}>
                   <Paperclip size={18} aria-hidden="true" />
-                  <span className="sr-only">添加附件</span>
+                  <span className="sr-only">{text('添加附件', 'Add attachment')}</span>
                   <input
                     type="file"
                     multiple
-                    aria-label="添加附件"
+                    aria-label={text('添加附件', 'Add attachment')}
                     onChange={(event) => setAttachments(Array.from(event.target.files ?? []))}
                   />
                 </label>
                 <select
-                  aria-label="选择模型"
+                  aria-label={text('选择模型', 'Select model')}
                   value={selectedModel}
                   onChange={(event) => setSelectedModel(event.target.value)}
                 >
@@ -1662,8 +1687,8 @@ function App() {
               <button
                 className="send-button"
                 type="submit"
-                aria-label="发送导演令"
-                title="发送导演令"
+                aria-label={text('发送导演令', 'Send instruction')}
+                title={text('发送导演令', 'Send instruction')}
                 disabled={
                   sendingMessage
                   || !agentStatus?.configured
@@ -1682,35 +1707,35 @@ function App() {
       <aside className="context-panel">
         <header>
           <h2>{selectedSkillRun
-            ? '剧本拆解结果'
-            : selectedSkill?.title ?? selectedAsset?.name ?? '当前审阅'}</h2>
+            ? text('剧本拆解结果', 'Script analysis')
+            : selectedSkill?.title ?? selectedAsset?.name ?? text('当前审阅', 'Current review')}</h2>
         </header>
         {selectedSkillRun && selectedAnalysis ? (
           <div className="skill-result">
             <div className="analysis-counts">
-              <span><strong>{selectedAnalysis.characters.length}</strong>人物</span>
-              <span><strong>{selectedAnalysis.locations.length}</strong>场景</span>
-              <span><strong>{selectedAnalysis.props.length}</strong>道具</span>
-              <span><strong>{selectedAnalysis.scenes.length}</strong>场次</span>
+              <span><strong>{selectedAnalysis.characters.length}</strong>{text('人物', 'Characters')}</span>
+              <span><strong>{selectedAnalysis.locations.length}</strong>{text('场景', 'Scenes')}</span>
+              <span><strong>{selectedAnalysis.props.length}</strong>{text('道具', 'Props')}</span>
+              <span><strong>{selectedAnalysis.scenes.length}</strong>{text('场次', 'Scenes')}</span>
             </div>
             <section>
-              <h3>人物</h3>
-              <p>{selectedAnalysis.characters.map((item) => item.name).join('、') || '未识别'}</p>
+              <h3>{text('人物', 'Characters')}</h3>
+              <p>{selectedAnalysis.characters.map((item) => item.name).join(language === 'zh-CN' ? '、' : ', ') || text('未识别', 'None identified')}</p>
             </section>
             <section>
-              <h3>场景</h3>
-              <p>{selectedAnalysis.locations.map((item) => item.name).join('、') || '未识别'}</p>
+              <h3>{text('场景', 'Locations')}</h3>
+              <p>{selectedAnalysis.locations.map((item) => item.name).join(language === 'zh-CN' ? '、' : ', ') || text('未识别', 'None identified')}</p>
             </section>
             <section>
-              <h3>道具</h3>
-              <p>{selectedAnalysis.props.map((item) => item.name).join('、') || '未识别'}</p>
+              <h3>{text('道具', 'Props')}</h3>
+              <p>{selectedAnalysis.props.map((item) => item.name).join(language === 'zh-CN' ? '、' : ', ') || text('未识别', 'None identified')}</p>
             </section>
             <section>
-              <h3>每场发生的事情</h3>
+              <h3>{text('每场发生的事情', 'Scene summaries')}</h3>
               <div className="analysis-scenes">
                 {selectedAnalysis.scenes.map((scene, index) => (
                   <article key={`${scene.heading}-${index}`}>
-                    <strong>{scene.heading || `场次 ${index + 1}`}</strong>
+                    <strong>{scene.heading || text(`场次 ${index + 1}`, `Scene ${index + 1}`)}</strong>
                     <small>{[scene.time, scene.location].filter(Boolean).join(' · ')}</small>
                     <p>{scene.summary}</p>
                   </article>
@@ -1718,31 +1743,31 @@ function App() {
               </div>
             </section>
             <section className={selectedAnalysis.ambiguities.length > 0 ? 'analysis-ambiguities' : ''}>
-              <h3>待导演确认</h3>
+              <h3>{text('待导演确认', 'Needs director confirmation')}</h3>
               {selectedAnalysis.ambiguities.length > 0
                 ? <ul>{selectedAnalysis.ambiguities.map((item) => <li key={item}>{item}</li>)}</ul>
-                : <p>没有发现需要确认的歧义。</p>}
+                : <p>{text('没有发现需要确认的歧义。', 'No ambiguities require confirmation.')}</p>}
             </section>
           </div>
         ) : selectedSkillRun ? (
           <div className="empty-review review-error">
             <WandSparkles size={24} aria-hidden="true" />
-            <p>{selectedSkillRun.error ?? '技能结果无法解析'}</p>
+            <p>{selectedSkillRun.error ?? text('技能结果无法解析', 'The skill result could not be parsed')}</p>
           </div>
         ) : selectedSkill ? (
           <div className="skill-preview">
             <div className="skill-preview-summary">
               <span className={selectedSkill.isEnabled ? 'enabled' : 'disabled'}>
-                {selectedSkill.isEnabled ? '已启用' : '已停用'}
+                {selectedSkill.isEnabled ? text('已启用', 'Enabled') : text('已停用', 'Disabled')}
               </span>
               <p>{selectedSkill.description}</p>
             </div>
-            <pre>{selectedSkill.content || '此技能没有可显示的 SKILL.md 内容。'}</pre>
+            <pre>{selectedSkill.content || text('此技能没有可显示的 SKILL.md 内容。', 'This skill has no SKILL.md content to display.')}</pre>
           </div>
         ) : assetPreviewLoading ? (
           <div className="empty-review">
             <LoaderCircle className="spin" size={24} aria-hidden="true" />
-            <p>正在加载内容…</p>
+            <p>{text('正在加载内容…', 'Loading content…')}</p>
           </div>
         ) : assetPreviewError ? (
           <div className="empty-review review-error">
@@ -1756,7 +1781,7 @@ function App() {
               <div className="asset-version-controls">
                 {assetVersions.length > 1 && (
                   <select
-                    aria-label="资源版本"
+                    aria-label={text('资源版本', 'Asset version')}
                     value={selectedAsset.id}
                     onChange={(event) => {
                       const version = assetVersions.find((item) => item.id === event.target.value)
@@ -1765,7 +1790,7 @@ function App() {
                   >
                     {assetVersions.map((version) => (
                       <option key={version.id} value={version.id}>
-                        v{version.version} · {formatDate(version.createdAtUtc)}
+                        v{version.version} · {formatDate(version.createdAtUtc, language)}
                       </option>
                     ))}
                   </select>
@@ -1776,7 +1801,7 @@ function App() {
             {selectedAsset.type === 'shot' && (
               <section className="shot-linked-assets" aria-labelledby="shot-linked-assets-title">
                 <header>
-                  <h3 id="shot-linked-assets-title">镜头素材</h3>
+                  <h3 id="shot-linked-assets-title">{text('镜头素材', 'Shot assets')}</h3>
                   <span>{shotAssetLinks.length}</span>
                 </header>
                 {shotAssetLinks.length > 0 ? (
@@ -1788,7 +1813,7 @@ function App() {
                             type="button"
                             className="shot-linked-media"
                             onClick={() => openImagePreview(link.asset)}
-                            aria-label={`全屏预览${link.asset.name}`}
+                            aria-label={text(`全屏预览${link.asset.name}`, `Preview ${link.asset.name} full screen`)}
                           >
                             <img src={link.asset.contentUrl} alt={link.asset.name} />
                           </button>
@@ -1797,7 +1822,7 @@ function App() {
                             type="button"
                             className="shot-linked-media"
                             onClick={() => openImagePreview(link.asset)}
-                            aria-label={`播放预览${link.asset.name}`}
+                            aria-label={text(`播放预览${link.asset.name}`, `Play ${link.asset.name}`)}
                           >
                             <video src={link.asset.contentUrl} preload="metadata" muted />
                           </button>
@@ -1806,11 +1831,11 @@ function App() {
                         ) : null}
                         <div>
                           <span>{({
-                            'first-frame': '首帧',
-                            'last-frame': '尾帧',
-                            reference: '关键帧 / 参考',
-                            video: '镜头视频',
-                            other: '其他',
+                            'first-frame': text('首帧', 'First frame'),
+                            'last-frame': text('尾帧', 'Last frame'),
+                            reference: text('关键帧 / 参考', 'Keyframe / Reference'),
+                            video: text('镜头视频', 'Shot video'),
+                            other: text('其他', 'Other'),
                           } as const)[link.role]}</span>
                           <strong>{link.asset.name}</strong>
                         </div>
@@ -1818,7 +1843,7 @@ function App() {
                     ))}
                   </div>
                 ) : (
-                  <p>暂无关联素材。生成首帧、尾帧或视频后，Agent 会通过技能绑定到这里。</p>
+                  <p>{text('暂无关联素材。生成首帧、尾帧或视频后，Agent 会通过技能绑定到这里。', 'No linked assets yet. The Agent will link generated first frames, last frames, and videos here.')}</p>
                 )}
               </section>
             )}
@@ -1829,11 +1854,11 @@ function App() {
                 className="asset-image-preview-button"
                 type="button"
                 onClick={() => openImagePreview(selectedAsset)}
-                aria-label={`全屏预览图片：${selectedAsset.name}`}
-                title="全屏预览"
+                aria-label={text(`全屏预览图片：${selectedAsset.name}`, `Preview image full screen: ${selectedAsset.name}`)}
+                title={text('全屏预览', 'Full-screen preview')}
               >
                 <img src={selectedAsset.contentUrl} alt={selectedAsset.name} />
-                <span><Maximize2 size={16} aria-hidden="true" />全屏预览</span>
+                <span><Maximize2 size={16} aria-hidden="true" />{text('全屏预览', 'Full-screen preview')}</span>
               </button>
             ) : selectedAsset.contentType.startsWith('video/') ? (
               <video src={selectedAsset.contentUrl} controls />
@@ -1841,19 +1866,19 @@ function App() {
               <audio src={selectedAsset.contentUrl} controls />
             ) : selectedAsset.contentType === 'application/pdf' ? (
               <object data={selectedAsset.contentUrl} type="application/pdf">
-                <p>浏览器无法预览此 PDF。</p>
+                <p>{text('浏览器无法预览此 PDF。', 'The browser cannot preview this PDF.')}</p>
               </object>
             ) : (
               <div className="unsupported-preview">
                 <FileText size={28} aria-hidden="true" />
-                <p>暂不支持预览此文件格式</p>
+                <p>{text('暂不支持预览此文件格式', 'This file format cannot be previewed')}</p>
               </div>
             )}
           </div>
         ) : (
           <div className="empty-review">
             <span>00:00:00</span>
-            <p>暂无待审内容</p>
+            <p>{text('暂无待审内容', 'Nothing to review')}</p>
           </div>
         )}
         <div className={`asset-detail ${assetDetailExpanded ? '' : 'collapsed'}`}>
@@ -1862,10 +1887,10 @@ function App() {
             type="button"
             aria-expanded={assetDetailExpanded}
             aria-controls="asset-detail-content"
-            title={assetDetailExpanded ? '收起资源信息' : '展开资源信息'}
+            title={assetDetailExpanded ? text('收起资源信息', 'Collapse asset information') : text('展开资源信息', 'Expand asset information')}
             onClick={() => setAssetDetailExpanded((expanded) => !expanded)}
           >
-            <span>{selectedSkillRun ? '技能运行信息' : selectedSkill ? '技能信息' : '当前资源信息'}</span>
+            <span>{selectedSkillRun ? text('技能运行信息', 'Skill run') : selectedSkill ? text('技能信息', 'Skill information') : text('当前资源信息', 'Asset information')}</span>
             {assetDetailExpanded
               ? <ChevronDown size={16} aria-hidden="true" />
               : <ChevronUp size={16} aria-hidden="true" />}
@@ -1873,33 +1898,33 @@ function App() {
           <div className="asset-detail-body" id="asset-detail-content">
             {selectedSkillRun ? (
               <dl>
-                <div><dt>技能</dt><dd>{skills.find((skill) => skill.id === selectedSkillRun.skillId)?.name ?? selectedSkillRun.skillId}</dd></div>
-                <div><dt>状态</dt><dd>{selectedSkillRun.status}</dd></div>
-                <div><dt>模型</dt><dd>{selectedSkillRun.model}</dd></div>
-                <div><dt>输入资源</dt><dd>{selectedAsset?.fileName ?? selectedSkillRun.inputAssetId}</dd></div>
-                <div><dt>开始时间</dt><dd>{formatDate(selectedSkillRun.startedAtUtc)}</dd></div>
-                <div><dt>运行 ID</dt><dd>{selectedSkillRun.id}</dd></div>
+                <div><dt>{text('技能', 'Skill')}</dt><dd>{skills.find((skill) => skill.id === selectedSkillRun.skillId)?.name ?? selectedSkillRun.skillId}</dd></div>
+                <div><dt>{text('状态', 'Status')}</dt><dd>{selectedSkillRun.status}</dd></div>
+                <div><dt>{text('模型', 'Model')}</dt><dd>{selectedSkillRun.model}</dd></div>
+                <div><dt>{text('输入资源', 'Input asset')}</dt><dd>{selectedAsset?.fileName ?? selectedSkillRun.inputAssetId}</dd></div>
+                <div><dt>{text('开始时间', 'Started')}</dt><dd>{formatDate(selectedSkillRun.startedAtUtc, language)}</dd></div>
+                <div><dt>{text('运行 ID', 'Run ID')}</dt><dd>{selectedSkillRun.id}</dd></div>
               </dl>
             ) : selectedSkill ? (
               <dl>
-                <div><dt>名称</dt><dd>{selectedSkill.name}</dd></div>
-                <div><dt>版本</dt><dd>v{selectedSkill.version}</dd></div>
-                <div><dt>类型</dt><dd>{selectedSkill.isSystem ? '系统技能' : '项目技能'}</dd></div>
-                <div><dt>状态</dt><dd>{selectedSkill.isEnabled ? '已启用' : '已停用'}</dd></div>
-                <div><dt>允许工具</dt><dd>{selectedSkill.allowedTools.join('、') || '无'}</dd></div>
+                <div><dt>{text('名称', 'Name')}</dt><dd>{selectedSkill.name}</dd></div>
+                <div><dt>{text('版本', 'Version')}</dt><dd>v{selectedSkill.version}</dd></div>
+                <div><dt>{text('类型', 'Type')}</dt><dd>{selectedSkill.isSystem ? text('系统技能', 'System skill') : text('项目技能', 'Project skill')}</dd></div>
+                <div><dt>{text('状态', 'Status')}</dt><dd>{selectedSkill.isEnabled ? text('已启用', 'Enabled') : text('已停用', 'Disabled')}</dd></div>
+                <div><dt>{text('允许工具', 'Allowed tools')}</dt><dd>{selectedSkill.allowedTools.join(language === 'zh-CN' ? '、' : ', ') || text('无', 'None')}</dd></div>
               </dl>
             ) : selectedAsset ? (
               <dl>
-                <div><dt>名称</dt><dd>{selectedAsset.name}</dd></div>
-                <div><dt>编号</dt><dd>{selectedAsset.number.toString().padStart(3, '0')}</dd></div>
-                <div><dt>版本</dt><dd>v{selectedAsset.version} / {selectedAsset.versionCount}</dd></div>
-                <div><dt>分类</dt><dd>{selectedAssetSection.label}</dd></div>
-                <div><dt>文件名</dt><dd>{selectedAsset.fileName}</dd></div>
-                <div><dt>格式</dt><dd>{selectedAsset.contentType}</dd></div>
-                <div><dt>大小</dt><dd>{formatFileSize(selectedAsset.sizeBytes)}</dd></div>
+                <div><dt>{text('名称', 'Name')}</dt><dd>{selectedAsset.name}</dd></div>
+                <div><dt>{text('编号', 'Number')}</dt><dd>{selectedAsset.number.toString().padStart(3, '0')}</dd></div>
+                <div><dt>{text('版本', 'Version')}</dt><dd>v{selectedAsset.version} / {selectedAsset.versionCount}</dd></div>
+                <div><dt>{text('分类', 'Category')}</dt><dd>{localize(language, selectedAssetSection.label, selectedAssetSection.labelEn)}</dd></div>
+                <div><dt>{text('文件名', 'File name')}</dt><dd>{selectedAsset.fileName}</dd></div>
+                <div><dt>{text('格式', 'Format')}</dt><dd>{selectedAsset.contentType}</dd></div>
+                <div><dt>{text('大小', 'Size')}</dt><dd>{formatFileSize(selectedAsset.sizeBytes)}</dd></div>
                 {selectedAsset.sourceScript && (
                   <div>
-                    <dt>关联剧本</dt>
+                    <dt>{text('关联剧本', 'Source script')}</dt>
                     <dd>
                       <button
                         className="source-script-button"
@@ -1916,32 +1941,32 @@ function App() {
                     </dd>
                   </div>
                 )}
-                <div><dt>添加时间</dt><dd>{formatDate(selectedAsset.createdAtUtc)}</dd></div>
-                <div><dt>资源 ID</dt><dd>{selectedAsset.id}</dd></div>
+                <div><dt>{text('添加时间', 'Added')}</dt><dd>{formatDate(selectedAsset.createdAtUtc, language)}</dd></div>
+                <div><dt>{text('资源 ID', 'Asset ID')}</dt><dd>{selectedAsset.id}</dd></div>
                 {(() => {
                   const metadata = parseImageGenerationMetadata(selectedAsset.generationMetadataJson)
                   if (!selectedAsset.contentType.startsWith('image/') || !metadata) return null
                   return (
                     <>
-                      <div><dt>生成方式</dt><dd>{formatImageOperation(metadata.operation)}</dd></div>
-                      <div><dt>模型</dt><dd>{metadata.model}</dd></div>
+                      <div><dt>{text('生成方式', 'Generation method')}</dt><dd>{formatImageOperation(metadata.operation, language)}</dd></div>
+                      <div><dt>{text('模型', 'Model')}</dt><dd>{metadata.model}</dd></div>
                       <div>
-                        <dt>调用参数</dt>
-                        <dd>{metadata.parameters.size} · {metadata.parameters.quality} · {metadata.parameters.outputFormat} · {metadata.parameters.count} 张{metadata.parameters.apiVersion ? ` · ${metadata.parameters.apiVersion}` : ''}</dd>
+                        <dt>{text('调用参数', 'Parameters')}</dt>
+                        <dd>{metadata.parameters.size} · {metadata.parameters.quality} · {metadata.parameters.outputFormat} · {metadata.parameters.count} {text('张', 'images')}{metadata.parameters.apiVersion ? ` · ${metadata.parameters.apiVersion}` : ''}</dd>
                       </div>
                       {metadata.prompt && (
                         <div className="generation-detail-row">
-                          <dt>提示词</dt><dd><pre>{metadata.prompt}</pre></dd>
+                          <dt>{text('提示词', 'Prompt')}</dt><dd><pre>{metadata.prompt}</pre></dd>
                         </div>
                       )}
                       {metadata.revisedPrompt && metadata.revisedPrompt !== metadata.prompt && (
                         <div className="generation-detail-row">
-                          <dt>修订提示词</dt><dd><pre>{metadata.revisedPrompt}</pre></dd>
+                          <dt>{text('修订提示词', 'Revised prompt')}</dt><dd><pre>{metadata.revisedPrompt}</pre></dd>
                         </div>
                       )}
                       {metadata.sources.length > 0 && (
                         <div className="generation-detail-row">
-                          <dt>来源图片</dt>
+                          <dt>{text('来源图片', 'Source images')}</dt>
                           <dd className="generation-sources">
                             {metadata.sources.map((source) => (
                               <span key={source.assetId}>{source.name} v{source.version}{source.description ? ` · ${source.description}` : ''}</span>
@@ -1957,19 +1982,19 @@ function App() {
                   if (!selectedAsset.contentType.startsWith('video/') || !metadata) return null
                   return (
                     <>
-                      <div><dt>生成方式</dt><dd>ComfyUI 视频生成</dd></div>
-                      <div><dt>模型</dt><dd>{metadata.model}</dd></div>
+                      <div><dt>{text('生成方式', 'Generation method')}</dt><dd>{text('ComfyUI 视频生成', 'ComfyUI video generation')}</dd></div>
+                      <div><dt>{text('模型', 'Model')}</dt><dd>{metadata.model}</dd></div>
                       <div><dt>Workflow</dt><dd>{metadata.parameters.workflow}</dd></div>
                       <div>
-                        <dt>调用参数</dt>
-                        <dd>{metadata.parameters.width}×{metadata.parameters.height} · {metadata.parameters.frameCount} 帧 · {metadata.parameters.fps} FPS · {metadata.parameters.frameFitMode}</dd>
+                        <dt>{text('调用参数', 'Parameters')}</dt>
+                        <dd>{metadata.parameters.width}×{metadata.parameters.height} · {metadata.parameters.frameCount} {text('帧', 'frames')} · {metadata.parameters.fps} FPS · {metadata.parameters.frameFitMode}</dd>
                       </div>
                       <div className="generation-detail-row">
-                        <dt>提示词</dt><dd><pre>{metadata.prompt}</pre></dd>
+                        <dt>{text('提示词', 'Prompt')}</dt><dd><pre>{metadata.prompt}</pre></dd>
                       </div>
                       {metadata.sources.length > 0 && (
                         <div className="generation-detail-row">
-                          <dt>关键帧来源</dt>
+                          <dt>{text('关键帧来源', 'Keyframe sources')}</dt>
                           <dd className="generation-sources">
                             {metadata.sources.map((source) => (
                               <span key={`${source.role}-${source.assetId}`}>{source.role} · {source.assetId}</span>
@@ -1985,19 +2010,19 @@ function App() {
                   if (!selectedAsset.contentType.startsWith('audio/') || !metadata) return null
                   return (
                     <>
-                      <div><dt>生成方式</dt><dd>文本转语音</dd></div>
-                      <div><dt>模型</dt><dd>{metadata.model}</dd></div>
+                      <div><dt>{text('生成方式', 'Generation method')}</dt><dd>{text('文本转语音', 'Text to speech')}</dd></div>
+                      <div><dt>{text('模型', 'Model')}</dt><dd>{metadata.model}</dd></div>
                       <div><dt>Voice</dt><dd>{metadata.parameters.voice}</dd></div>
                       <div>
-                        <dt>调用参数</dt>
+                        <dt>{text('调用参数', 'Parameters')}</dt>
                         <dd>{metadata.parameters.responseFormat} · {metadata.parameters.speed}×{metadata.parameters.apiVersion ? ` · ${metadata.parameters.apiVersion}` : ''}</dd>
                       </div>
                       <div className="generation-detail-row">
-                        <dt>朗读原文</dt><dd><pre>{metadata.prompt}</pre></dd>
+                        <dt>{text('朗读原文', 'Source text')}</dt><dd><pre>{metadata.prompt}</pre></dd>
                       </div>
                       {metadata.parameters.instructions && (
                         <div className="generation-detail-row">
-                          <dt>表演指令</dt><dd><pre>{metadata.parameters.instructions}{metadata.parameters.instructionsApplied ? '' : '\n（当前部署不支持，未提交给模型）'}</pre></dd>
+                          <dt>{text('表演指令', 'Performance direction')}</dt><dd><pre>{metadata.parameters.instructions}{metadata.parameters.instructionsApplied ? '' : text('\n（当前部署不支持，未提交给模型）', '\n(Not supported by the current deployment; not sent to the model.)')}</pre></dd>
                         </div>
                       )}
                     </>
@@ -2005,7 +2030,7 @@ function App() {
                 })()}
               </dl>
             ) : (
-              <p className="asset-detail-empty">选择一个资源后查看详细信息</p>
+              <p className="asset-detail-empty">{text('选择一个资源后查看详细信息', 'Select an asset to view details')}</p>
             )}
           </div>
         </div>
@@ -2016,7 +2041,7 @@ function App() {
           className="image-lightbox"
           role="dialog"
           aria-modal="true"
-          aria-label={`媒体预览：${previewImage.name}`}
+          aria-label={text(`媒体预览：${previewImage.name}`, `Media preview: ${previewImage.name}`)}
         >
           <header className="image-lightbox-header">
             <div>
@@ -2026,21 +2051,21 @@ function App() {
             <div className="image-lightbox-tools">
               {previewImage.contentType.startsWith('image/') && (
                 <>
-                  <button type="button" title="缩小" aria-label="缩小" onClick={() => changePreviewZoom(previewZoom - 0.25)}>
+                  <button type="button" title={text('缩小', 'Zoom out')} aria-label={text('缩小', 'Zoom out')} onClick={() => changePreviewZoom(previewZoom - 0.25)}>
                     <Minus size={18} aria-hidden="true" />
                   </button>
-                  <button type="button" title="适应窗口" aria-label="适应窗口" onClick={resetImagePreview}>
+                  <button type="button" title={text('适应窗口', 'Fit to window')} aria-label={text('适应窗口', 'Fit to window')} onClick={resetImagePreview}>
                     <Maximize2 size={18} aria-hidden="true" />
                   </button>
-                  <button type="button" title="放大" aria-label="放大" onClick={() => changePreviewZoom(previewZoom + 0.25)}>
+                  <button type="button" title={text('放大', 'Zoom in')} aria-label={text('放大', 'Zoom in')} onClick={() => changePreviewZoom(previewZoom + 0.25)}>
                     <Plus size={18} aria-hidden="true" />
                   </button>
                 </>
               )}
-              <a href={previewImage.contentUrl} download={previewImage.fileName} title="下载文件" aria-label="下载文件">
+              <a href={previewImage.contentUrl} download={previewImage.fileName} title={text('下载文件', 'Download file')} aria-label={text('下载文件', 'Download file')}>
                 <Download size={18} aria-hidden="true" />
               </a>
-              <button type="button" title="关闭" aria-label="关闭媒体预览" onClick={closeImagePreview}>
+              <button type="button" title={text('关闭', 'Close')} aria-label={text('关闭媒体预览', 'Close media preview')} onClick={closeImagePreview}>
                 <X size={19} aria-hidden="true" />
               </button>
             </div>
@@ -2085,21 +2110,21 @@ function App() {
         </div>
       )}
 
-      <nav className="mobile-panel-switcher" aria-label="手机屏幕切换">
+      <nav className="mobile-panel-switcher" aria-label={text('手机屏幕切换', 'Mobile panel navigation')}>
         <button
           type="button"
-          aria-label={`切换到${mobilePanels[Math.max(0, mobilePanelIndex - 1)].label}`}
-          title="上一个屏幕"
+          aria-label={text(`切换到${mobilePanels[Math.max(0, mobilePanelIndex - 1)].label}`, `Switch to ${mobilePanels[Math.max(0, mobilePanelIndex - 1)].labelEn}`)}
+          title={text('上一个屏幕', 'Previous panel')}
           disabled={mobilePanelIndex === 0}
           onClick={() => setMobilePanel(mobilePanels[mobilePanelIndex - 1].id)}
         >
           <ChevronLeft size={21} aria-hidden="true" />
         </button>
-        <span className="sr-only" aria-live="polite">当前屏幕：{mobilePanels[mobilePanelIndex].label}</span>
+        <span className="sr-only" aria-live="polite">{text(`当前屏幕：${mobilePanels[mobilePanelIndex].label}`, `Current panel: ${mobilePanels[mobilePanelIndex].labelEn}`)}</span>
         <button
           type="button"
-          aria-label={`切换到${mobilePanels[Math.min(mobilePanels.length - 1, mobilePanelIndex + 1)].label}`}
-          title="下一个屏幕"
+          aria-label={text(`切换到${mobilePanels[Math.min(mobilePanels.length - 1, mobilePanelIndex + 1)].label}`, `Switch to ${mobilePanels[Math.min(mobilePanels.length - 1, mobilePanelIndex + 1)].labelEn}`)}
+          title={text('下一个屏幕', 'Next panel')}
           disabled={mobilePanelIndex === mobilePanels.length - 1}
           onClick={() => setMobilePanel(mobilePanels[mobilePanelIndex + 1].id)}
         >

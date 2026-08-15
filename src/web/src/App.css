@@ -18,6 +18,43 @@
   background: rgba(249, 248, 244, 0.94);
 }
 
+.gate-brand .language-switch {
+  margin-left: auto;
+}
+
+.language-switch {
+  height: 28px;
+  display: inline-grid;
+  grid-template-columns: 44px 36px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid #c9c5b9;
+  border-radius: 4px;
+  background: #e8e5dc;
+}
+
+.language-switch button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  color: #6e7069;
+  background: transparent;
+  font: 10px/1 Bahnschrift, sans-serif;
+  cursor: pointer;
+}
+
+.language-switch button.active {
+  color: #202420;
+  background: #fffef9;
+  box-shadow: 0 1px 2px rgba(31, 35, 31, 0.14);
+}
+
+.language-switch button:focus-visible {
+  outline: 2px solid #566158;
+  outline-offset: 1px;
+}
+
 .gate-brand strong,
 .gate-brand span {
   display: block;
@@ -878,6 +915,16 @@
   border-bottom: 1px solid #d7d4ca;
 }
 
+.brand > div:not(.language-switch) {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.brand .language-switch {
+  grid-template-columns: 34px 28px;
+  margin-left: auto;
+}
+
 .brand-mark,
 .prompt-mark {
   width: 34px;
@@ -1054,6 +1101,11 @@
 .desk-header h1 {
   font-size: 18px;
   line-height: 1;
+}
+
+.desk-header .language-switch {
+  display: none;
+  margin-left: auto;
 }
 
 h1,
@@ -2294,6 +2346,10 @@ button:disabled {
   .desk-header,
   .composer {
     padding-inline: 16px;
+  }
+
+  .desk-header .language-switch {
+    display: inline-grid;
   }
 
   .composer textarea {

@@ -1,11 +1,13 @@
 import { ChevronDown, ChevronUp, LoaderCircle, RefreshCw, Trash2, Upload, type LucideIcon } from 'lucide-react'
 import type { ChangeEvent } from 'react'
+import { localize, type Language } from '../../i18n'
 import type { AssetRecord } from '../../models'
 
 export interface AssetSection {
   id: string
   type: string
   label: string
+  labelEn: string
   accept: string
   icon: LucideIcon
   contentTypePrefix?: string
@@ -13,6 +15,7 @@ export interface AssetSection {
 }
 
 interface AssetPanelProps {
+  language: Language
   projectName: string
   selectedSection: AssetSection
   groupedSections: AssetSection[]
@@ -43,6 +46,7 @@ function formatFileSize(sizeBytes: number) {
 }
 
 export function AssetPanel({
+  language,
   projectName,
   selectedSection,
   groupedSections,
@@ -65,21 +69,23 @@ export function AssetPanel({
   onDeleteAsset,
   onToggleSection,
 }: AssetPanelProps) {
+  const text = (chinese: string, english: string) => localize(language, chinese, english)
+  const sectionLabel = (section: AssetSection) => localize(language, section.label, section.labelEn)
   return (
     <section className="assets-panel" aria-labelledby="assets-title">
       <header className="assets-header">
         <div>
-          <p className="section-label">当前项目</p>
+          <p className="section-label">{text('当前项目', 'CURRENT PROJECT')}</p>
           <p className="current-project-name">{projectName}</p>
         </div>
         <button className="switch-project" type="button" onClick={onSwitchProject}>
-          切换
+          {text('切换', 'Switch')}
         </button>
       </header>
       <div className="assets-title-row">
         <div>
           <p className="section-label">ASSETS</p>
-          <h2 id="assets-title">{isGroupedSection ? '资产' : selectedSection.label}</h2>
+          <h2 id="assets-title">{isGroupedSection ? text('资产', 'Assets') : sectionLabel(selectedSection)}</h2>
         </div>
         <div className="assets-actions">
           <span className="asset-count">
@@ -88,22 +94,22 @@ export function AssetPanel({
           <button
             className="asset-refresh-button"
             type="button"
-            title="刷新资产"
-            aria-label="刷新资产"
+            title={text('刷新资产', 'Refresh assets')}
+            aria-label={text('刷新资产', 'Refresh assets')}
             disabled={assetsLoading || refreshingAssets}
             onClick={onRefresh}
           >
             <RefreshCw className={refreshingAssets ? 'spin' : undefined} size={14} aria-hidden="true" />
           </button>
           {!isGroupedSection && (
-            <label className="asset-upload-button" title={`上传${selectedSection.label}`}>
+            <label className="asset-upload-button" title={text(`上传${selectedSection.label}`, `Upload ${selectedSection.labelEn}`)}>
               <Upload size={14} aria-hidden="true" />
-              <span className="sr-only">上传{selectedSection.label}</span>
+              <span className="sr-only">{text(`上传${selectedSection.label}`, `Upload ${selectedSection.labelEn}`)}</span>
               <input
                 type="file"
                 multiple
                 accept={selectedSection.accept}
-                aria-label={`上传${selectedSection.label}`}
+                aria-label={text(`上传${selectedSection.label}`, `Upload ${selectedSection.labelEn}`)}
                 disabled={uploadingAssets}
                 onChange={(event) => onUpload(event, selectedSection)}
               />
@@ -115,7 +121,7 @@ export function AssetPanel({
       {assetsLoading || uploadingAssets ? (
         <div className="asset-empty">
           <Upload size={22} strokeWidth={1.4} aria-hidden="true" />
-          <p>{uploadingAssets ? '正在上传…' : '正在加载…'}</p>
+          <p>{uploadingAssets ? text('正在上传…', 'Uploading…') : text('正在加载…', 'Loading…')}</p>
         </div>
       ) : (
         <div className="asset-groups">
@@ -142,13 +148,14 @@ export function AssetPanel({
                       deleting={deletingAssetId === asset.id}
                       onReview={onReviewAsset}
                       onDelete={onDeleteAsset}
+                      language={language}
                     />
                   ))}
                 </div>
               ) : (
                 <div className="asset-empty" key={section.id}>
                   <Icon size={22} strokeWidth={1.4} aria-hidden="true" />
-                  <p>暂无{section.label}</p>
+                  <p>{text(`暂无${section.label}`, `No ${section.labelEn.toLowerCase()} yet`)}</p>
                 </div>
               )
             }
@@ -163,20 +170,20 @@ export function AssetPanel({
                     onClick={() => onToggleSection(section.id)}
                   >
                     <Icon size={16} strokeWidth={1.6} aria-hidden="true" />
-                    <strong>{section.label}</strong>
+                    <strong>{sectionLabel(section)}</strong>
                     <span>{sectionAssets.length}</span>
                     {isExpanded
                       ? <ChevronUp size={14} aria-hidden="true" />
                       : <ChevronDown size={14} aria-hidden="true" />}
                   </button>
-                  <label className="asset-upload-button" title={`上传${section.label}`}>
+                  <label className="asset-upload-button" title={text(`上传${section.label}`, `Upload ${section.labelEn}`)}>
                     <Upload size={14} aria-hidden="true" />
-                    <span className="sr-only">上传{section.label}</span>
+                    <span className="sr-only">{text(`上传${section.label}`, `Upload ${section.labelEn}`)}</span>
                     <input
                       type="file"
                       multiple
                       accept={section.accept}
-                      aria-label={`上传${section.label}`}
+                      aria-label={text(`上传${section.label}`, `Upload ${section.labelEn}`)}
                       disabled={uploadingAssets}
                       onChange={(event) => onUpload(event, section)}
                     />
@@ -193,11 +200,12 @@ export function AssetPanel({
                         deleting={deletingAssetId === asset.id}
                         onReview={onReviewAsset}
                         onDelete={onDeleteAsset}
+                        language={language}
                       />
                     ))}
                   </div>
                 ) : (
-                  <p className="asset-group-empty">暂无{section.label}</p>
+                  <p className="asset-group-empty">{text(`暂无${section.label}`, `No ${section.labelEn.toLowerCase()} yet`)}</p>
                 ))}
               </section>
             )
@@ -209,6 +217,7 @@ export function AssetPanel({
 }
 
 interface AssetRowProps {
+  language: Language
   asset: AssetRecord
   icon: LucideIcon
   selected: boolean
@@ -217,7 +226,8 @@ interface AssetRowProps {
   onDelete: (asset: AssetRecord) => void
 }
 
-function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete }: AssetRowProps) {
+function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete, language }: AssetRowProps) {
+  const text = (chinese: string, english: string) => localize(language, chinese, english)
   return (
     <div
       className={`asset-row ${selected ? 'active' : ''}`}
@@ -225,7 +235,7 @@ function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete }:
       <button
         type="button"
         className="asset-row-review"
-        title={`审阅 ${asset.fileName}`}
+        title={text(`审阅 ${asset.fileName}`, `Review ${asset.fileName}`)}
         aria-pressed={selected}
         onClick={() => onReview(asset)}
       >
@@ -235,7 +245,7 @@ function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete }:
           <strong>{asset.name}</strong>
           <small>
             {asset.versionCount > 1
-              ? `当前 v${asset.version} · 共 ${asset.versionCount} 版 · `
+              ? text(`当前 v${asset.version} · 共 ${asset.versionCount} 版 · `, `Current v${asset.version} · ${asset.versionCount} versions · `)
               : ''}
             {formatFileSize(asset.sizeBytes)}
           </small>
@@ -244,8 +254,8 @@ function AssetRow({ asset, icon: Icon, selected, deleting, onReview, onDelete }:
       <button
         type="button"
         className="asset-row-delete"
-        title={`删除 ${asset.name}`}
-        aria-label={`删除 ${asset.name}`}
+        title={text(`删除 ${asset.name}`, `Delete ${asset.name}`)}
+        aria-label={text(`删除 ${asset.name}`, `Delete ${asset.name}`)}
         disabled={deleting}
         onClick={() => onDelete(asset)}
       >
