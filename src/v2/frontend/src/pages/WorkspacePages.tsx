@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   NavLink,
   useLocation,
@@ -17,11 +17,20 @@ import {
   MoreHorizontal,
   Play,
   Plus,
+  Save,
   Search,
   Sparkles,
   Upload,
   WandSparkles,
 } from "lucide-react";
+import {
+  assistProjectSettingsField,
+  generateProjectCover,
+  getProjectSettings,
+  saveProjectSettings,
+  type ProjectSettings,
+  type ProjectSettingsAssistField,
+} from "../api/projectSettings";
 
 const episodes = [
   { id: "production-e01", code: "E01", title: "失控的早晨", state: "review" },
@@ -85,92 +94,526 @@ function EpisodeSelect({ value = "production-e01" }: { value?: string }) {
 }
 
 export function SettingsPage() {
-  const [ratio, setRatio] = useState("16:9");
+  const { projectId = "" } = useParams();
+  return <ProjectSettingsEditor key={projectId} projectId={projectId} />;
+}
+
+const ratioPresets = [
+  { ratio: "16:9" as const, width: 1920, height: 1080, label: "横屏叙事" },
+  { ratio: "9:16" as const, width: 1080, height: 1920, label: "竖屏短剧" },
+  { ratio: "2.39:1" as const, width: 2048, height: 858, label: "宽银幕" },
+];
+
+const resolutionPresets = [
+  { id: "480p", label: "480p", sizes: { "16:9": [854, 480], "9:16": [480, 854], "2.39:1": [1148, 480] } },
+  { id: "720p", label: "720p", sizes: { "16:9": [1280, 720], "9:16": [720, 1280], "2.39:1": [1720, 720] } },
+  { id: "1024", label: "1024", sizes: { "16:9": [1024, 576], "9:16": [576, 1024], "2.39:1": [1024, 428] } },
+  { id: "1080p", label: "1080p", sizes: { "16:9": [1920, 1080], "9:16": [1080, 1920], "2.39:1": [2580, 1080] } },
+  { id: "2k", label: "2K", sizes: { "16:9": [2048, 1152], "9:16": [1152, 2048], "2.39:1": [2048, 858] } },
+  { id: "4k", label: "4K", sizes: { "16:9": [3840, 2160], "9:16": [2160, 3840], "2.39:1": [3840, 1608] } },
+] as const;
+
+const settingSections = [
+  { id: "settings-basics", label: "基础与片型" },
+  { id: "settings-delivery", label: "画幅与交付" },
+  { id: "settings-visual", label: "视觉与角色" },
+  { id: "settings-language", label: "摄影与声音" },
+  { id: "settings-generation", label: "生成约束" },
+];
+
+const assistFieldLabels: Record<ProjectSettingsAssistField, string> = {
+  visualStyle: "视觉风格",
+  protagonistSpecies: "主角物种",
+  artDirection: "美术方向",
+  characterDesign: "角色造型硬约束",
+  colorPalette: "色彩策略",
+  cameraLanguage: "摄影语言",
+  soundStrategy: "声音策略",
+  imagePromptPrefix: "图像生成约束",
+};
+
+function ProjectSettingsEditor({ projectId }: { projectId: string }) {
+  const [settings, setSettings] = useState<ProjectSettings | null>(null);
+  const [activeSection, setActiveSection] = useState(settingSections[0].id);
+  const [status, setStatus] = useState<"loading" | "idle" | "dirty" | "saving" | "saved" | "error">("loading");
+  const [generatingCover, setGeneratingCover] = useState(false);
+  const [coverConfirmation, setCoverConfirmation] = useState(false);
+  const [coverInstruction, setCoverInstruction] = useState("");
+  const [assistingField, setAssistingField] = useState<ProjectSettingsAssistField | null>(null);
+  const [assistConfirmation, setAssistConfirmation] = useState<ProjectSettingsAssistField | null>(null);
+  const [assistInstruction, setAssistInstruction] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getProjectSettings(projectId, controller.signal)
+      .then((loaded) => {
+        setSettings(loaded);
+        setStatus("idle");
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "项目设定加载失败。");
+        setStatus("error");
+      });
+    return () => controller.abort();
+  }, [projectId]);
+
+  function updateField<Key extends keyof ProjectSettings>(
+    field: Key,
+    value: ProjectSettings[Key],
+  ) {
+    setSettings((current) => current ? { ...current, [field]: value } : current);
+    setStatus("dirty");
+    setError(null);
+  }
+
+  function selectRatio(ratio: ProjectSettings["aspectRatio"]) {
+    setSettings((current) => {
+      if (!current) return current;
+      const resolution = resolutionPresets.find((item) => {
+        const [width, height] = item.sizes[current.aspectRatio];
+        return width === current.outputWidth && height === current.outputHeight;
+      }) ?? resolutionPresets.find((item) => item.id === "1080p")!;
+      const [outputWidth, outputHeight] = resolution.sizes[ratio];
+      return { ...current, aspectRatio: ratio, outputWidth, outputHeight };
+    });
+    setStatus("dirty");
+  }
+
+  function selectResolution(resolutionId: string) {
+    const preset = resolutionPresets.find((item) => item.id === resolutionId);
+    if (!preset) return;
+    const [outputWidth, outputHeight] = preset.sizes[settings!.aspectRatio];
+    setSettings((current) => current ? { ...current, outputWidth, outputHeight } : current);
+    setStatus("dirty");
+  }
+
+  async function submitSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settings || status === "saving") return;
+    setStatus("saving");
+    setError(null);
+    try {
+      const saved = await saveProjectSettings(projectId, settings);
+      setSettings(saved);
+      setStatus("saved");
+      window.dispatchEvent(new CustomEvent("alex:project-updated", {
+        detail: { projectId, name: saved.projectName },
+      }));
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "项目设定保存失败。");
+      setStatus("error");
+    }
+  }
+
+  async function generateCover(instruction?: string) {
+    const currentSettings = settings;
+    if (!currentSettings || generatingCover || status === "saving") return;
+    setGeneratingCover(true);
+    setError(null);
+    try {
+      let current = currentSettings;
+      if (status === "dirty" || currentSettings.version === 0) {
+        setStatus("saving");
+        current = await saveProjectSettings(projectId, currentSettings);
+        setSettings(current);
+      }
+      const cover = await generateProjectCover(projectId, instruction);
+      setSettings({ ...current, cover });
+      setStatus("saved");
+    } catch (coverError) {
+      setError(coverError instanceof Error ? coverError.message : "概念封面生成失败。");
+      setStatus("error");
+    } finally {
+      setGeneratingCover(false);
+    }
+  }
+
+  function requestCoverGeneration() {
+    if (!settings?.cover) {
+      void generateCover();
+      return;
+    }
+    setCoverInstruction("");
+    setCoverConfirmation(true);
+  }
+
+  async function assistField(field: ProjectSettingsAssistField, instruction?: string) {
+    const currentSettings = settings;
+    if (!currentSettings || assistingField) return;
+    setAssistingField(field);
+    setError(null);
+    try {
+      const result = await assistProjectSettingsField(
+        projectId,
+        field,
+        String(currentSettings[field] ?? ""),
+        currentSettings,
+        instruction,
+      );
+      updateField(field, result.value);
+    } catch (assistError) {
+      setError(assistError instanceof Error ? assistError.message : "AI 帮写失败。");
+    } finally {
+      setAssistingField(null);
+    }
+  }
+
+  function requestAssist(field: ProjectSettingsAssistField) {
+    const hasContent = Boolean(String(settings?.[field] ?? "").trim());
+    if (!hasContent) {
+      void assistField(field);
+      return;
+    }
+    setAssistInstruction("");
+    setAssistConfirmation(field);
+  }
+
+  function renderAiFieldAction(field: ProjectSettingsAssistField) {
+    const hasContent = Boolean(String(settings?.[field] ?? "").trim());
+    return (
+      <button
+        className="ai-field-action"
+        type="button"
+        onClick={() => requestAssist(field)}
+        disabled={Boolean(assistingField)}
+        title={hasContent ? "使用 GPT-5.4 优化当前内容" : "使用 GPT-5.4 生成内容"}
+      >
+        <WandSparkles size={12} />
+        {assistingField === field ? "处理中" : hasContent ? "AI 优化" : "AI 生成"}
+      </button>
+    );
+  }
+
+  function openSection(sectionId: string) {
+    setActiveSection(sectionId);
+    const editor = document.getElementById("project-settings-form");
+    const section = document.getElementById(sectionId);
+    if (!editor || !section) return;
+    const top = section.getBoundingClientRect().top
+      - editor.getBoundingClientRect().top
+      + editor.scrollTop;
+    editor.scrollTo({ top, behavior: "smooth" });
+  }
+
+  if (!settings) {
+    return (
+      <div className="page settings-loading">
+        <span className="spinner" />
+        <strong>{status === "error" ? "项目设定无法加载" : "正在读取项目设定"}</strong>
+        {error && <p>{error}</p>}
+      </div>
+    );
+  }
+
   return (
-    <div className="page">
-      <PageTitle
-        eyebrow="全局设定 / v3 draft"
-        title="项目设定"
-        description="所有生产集共享的交付、视觉、声音与模型边界"
-        action={<button className="primary-button">创建新版本</button>}
-      />
+    <div className="page settings-page">
       <div className="settings-layout">
         <aside className="subnav">
-          {[
-            "基础与片型",
-            "时长与分集",
-            "画面与交付",
-            "视觉风格",
-            "摄影语言",
-            "声音策略",
-            "模型与生成",
-          ].map((item, index) => (
-            <button className={index === 0 ? "active" : ""} key={item}>
-              {item}
-              {index === 3 && <i>!</i>}
+          <div className="settings-version-card">
+            <span>当前版本</span>
+            <strong>{settings.version === 0 ? "草稿" : `v${settings.version}`}</strong>
+            <small>{settings.updatedAtUtc ? new Date(settings.updatedAtUtc).toLocaleString("zh-CN") : "首次保存将创建 v1"}</small>
+          </div>
+          {settingSections.map((item, index) => (
+            <button
+              type="button"
+              className={activeSection === item.id ? "active" : ""}
+              key={item.id}
+              onClick={() => openSection(item.id)}
+            >
+              <b>{String(index + 1).padStart(2, "0")}</b>
+              {item.label}
             </button>
           ))}
         </aside>
-        <section className="editor-surface">
-          <div className="section-heading">
-            <div>
-              <h2>基础与片型</h2>
-              <p>定义内容目标和交付范围。</p>
-            </div>
-            <span className="saved-state">
-              <Check size={13} />
-              草稿已保存
-            </span>
-          </div>
-          <div className="form-grid">
-            <label>
-              <span>项目名称</span>
-              <input defaultValue="天桥食堂" />
-            </label>
-            <label>
-              <span>片型</span>
-              <select defaultValue="feature">
-                <option value="feature">故事片</option>
-                <option>宣传片</option>
-                <option>产品片</option>
-              </select>
-            </label>
-            <label className="span-2">
-              <span>目标受众</span>
-              <input defaultValue="16–35 岁剧情短片观众" />
-            </label>
-            <label>
-              <span>计划生产集数</span>
-              <input type="number" defaultValue="3" />
-            </label>
-            <label>
-              <span>单集目标时长</span>
-              <div className="input-suffix">
-                <input defaultValue="100" />
-                <span>秒</span>
-              </div>
-            </label>
-          </div>
-          <div className="section-heading second">
-            <div>
-              <h2>画幅与交付</h2>
-              <p>生产过程中的所有媒体将继承此规格。</p>
-            </div>
-          </div>
-          <div className="ratio-options">
-            {["16:9", "9:16", "2.39:1"].map((item) => (
-              <button
-                className={ratio === item ? "active" : ""}
-                onClick={() => setRatio(item)}
-                key={item}
-              >
-                <i style={{ aspectRatio: item.replace(":", "/") }} />
-                <strong>{item}</strong>
+        <form className="editor-surface settings-editor" id="project-settings-form" onSubmit={submitSettings}>
+          <section className="creative-brief" aria-label="当前创作基线">
+            <div className="creative-asset-placeholder" style={{ aspectRatio: settings.aspectRatio.replace(":", "/") }}>
+              {settings.cover ? (
+                <img
+                  src={`${settings.cover.contentUrl}?v=${settings.cover.version}`}
+                  alt={`${settings.projectName}概念封面`}
+                />
+              ) : (
+                <><ImagePlus size={28} strokeWidth={1.5} /><strong>尚未生成封面</strong></>
+              )}
+              <button type="button" onClick={requestCoverGeneration} disabled={generatingCover || status === "saving"}>
+                <Sparkles size={12} />
+                {generatingCover ? "生成中" : settings.cover ? "重新生成" : "生成封面"}
               </button>
-            ))}
+              <small>{settings.aspectRatio} · {settings.outputWidth} × {settings.outputHeight}</small>
+            </div>
+            <div className="creative-brief-copy">
+              <span className="eyebrow">项目创作基线 / {settings.version === 0 ? "尚未发布" : `v${settings.version}`}</span>
+              <h1>{settings.projectName}</h1>
+              <p>{settings.description || "为项目建立清晰、可继承的创作基线。"}</p>
+            </div>
+          </section>
+          <section className="settings-section" id="settings-basics">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">01 / FOUNDATION</span>
+                <h2>基础与片型</h2>
+                <p>定义项目身份、受众和生产规模。</p>
+              </div>
+              <span className={`saved-state ${status}`}>
+                <Check size={13} />
+                {status === "dirty" ? "有未保存修改" : status === "saved" ? "新版本已保存" : `v${settings.version} 已同步`}
+              </span>
+            </div>
+            <div className="form-grid">
+              <label>
+                <span>项目名称</span>
+                <input required maxLength={200} value={settings.projectName} onChange={(event) => updateField("projectName", event.target.value)} />
+              </label>
+              <label>
+                <span>片型</span>
+                <select value={settings.contentType} onChange={(event) => updateField("contentType", event.target.value)}>
+                  <option>动画短剧</option>
+                  <option>动画故事片</option>
+                  <option>漫画动态影像</option>
+                </select>
+              </label>
+              <label className="span-2">
+                <span>项目简介</span>
+                <textarea rows={3} maxLength={4000} value={settings.description} onChange={(event) => updateField("description", event.target.value)} />
+              </label>
+              <label className="span-2">
+                <span>目标受众</span>
+                <input required maxLength={300} value={settings.targetAudience} onChange={(event) => updateField("targetAudience", event.target.value)} />
+              </label>
+              <label>
+                <span>计划生产集数</span>
+                <input required type="number" min={1} max={1000} value={settings.plannedEpisodeCount} onChange={(event) => updateField("plannedEpisodeCount", Number(event.target.value))} />
+              </label>
+              <label>
+                <span>单集目标时长</span>
+                <div className="input-suffix">
+                  <input required type="number" min={1} max={86400} value={settings.targetEpisodeSeconds} onChange={(event) => updateField("targetEpisodeSeconds", Number(event.target.value))} />
+                  <span>秒</span>
+                </div>
+              </label>
+            </div>
+          </section>
+
+          <section className="settings-section" id="settings-delivery">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">02 / FRAME</span>
+                <h2>画幅与交付</h2>
+                <p>后续图像、分镜和视频默认继承此规格。</p>
+              </div>
+            </div>
+            <div className="ratio-options">
+              {ratioPresets.map((item) => (
+                <button
+                  type="button"
+                  className={settings.aspectRatio === item.ratio ? "active" : ""}
+                  onClick={() => selectRatio(item.ratio)}
+                  key={item.ratio}
+                >
+                  <i style={{ aspectRatio: item.ratio.replace(":", "/") }} />
+                  <strong>{item.ratio}</strong>
+                  <small>{item.label}</small>
+                </button>
+              ))}
+            </div>
+            <div className="delivery-readout">
+              <label className="resolution-selector">
+                <span>输出分辨率</span>
+                <select
+                  aria-label="输出分辨率"
+                  value={resolutionPresets.find((item) => {
+                    const [width, height] = item.sizes[settings.aspectRatio];
+                    return width === settings.outputWidth && height === settings.outputHeight;
+                  })?.id ?? "custom"}
+                  onChange={(event) => selectResolution(event.target.value)}
+                >
+                  {!resolutionPresets.some((item) => {
+                    const [width, height] = item.sizes[settings.aspectRatio];
+                    return width === settings.outputWidth && height === settings.outputHeight;
+                  }) && (
+                    <option value="custom" disabled>当前 · {settings.outputWidth} × {settings.outputHeight}</option>
+                  )}
+                  {resolutionPresets.map((item) => {
+                    const [width, height] = item.sizes[settings.aspectRatio];
+                    return <option value={item.id} key={item.id}>{item.label} · {width} × {height}</option>;
+                  })}
+                </select>
+              </label>
+              <div><span>画面方向</span><strong>{settings.outputWidth > settings.outputHeight ? "横向" : "纵向"}</strong></div>
+              <div><span>继承范围</span><strong>全项目</strong></div>
+            </div>
+          </section>
+
+          <section className="settings-section" id="settings-visual">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">03 / VISUAL BIBLE</span>
+                <h2>视觉与角色</h2>
+                <p>这里的规则将进入后续角色、场景和镜头生成上下文。</p>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label>
+                <span className="field-heading">视觉风格 {renderAiFieldAction("visualStyle")}</span>
+                <input required maxLength={200} value={settings.visualStyle} onChange={(event) => updateField("visualStyle", event.target.value)} />
+              </label>
+              <label>
+                <span className="field-heading">主角物种 {renderAiFieldAction("protagonistSpecies")}</span>
+                <input required maxLength={200} value={settings.protagonistSpecies} onChange={(event) => updateField("protagonistSpecies", event.target.value)} />
+              </label>
+              <label className="span-2">
+                <span className="field-heading">美术方向 {renderAiFieldAction("artDirection")}</span>
+                <textarea rows={4} maxLength={2000} value={settings.artDirection} onChange={(event) => updateField("artDirection", event.target.value)} />
+              </label>
+              <label className="span-2">
+                <span className="field-heading">角色造型硬约束 {renderAiFieldAction("characterDesign")}</span>
+                <textarea required rows={4} maxLength={1000} value={settings.characterDesign} onChange={(event) => updateField("characterDesign", event.target.value)} />
+                <small>主人公的物种、体型、服装和拟人化程度必须在这里明确。</small>
+              </label>
+              <label className="span-2">
+                <span className="field-heading">色彩策略 {renderAiFieldAction("colorPalette")}</span>
+                <textarea rows={3} maxLength={1000} value={settings.colorPalette} onChange={(event) => updateField("colorPalette", event.target.value)} />
+              </label>
+            </div>
+          </section>
+
+          <section className="settings-section" id="settings-language">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">04 / DIRECTION</span>
+                <h2>摄影与声音</h2>
+                <p>保持每个生产集的镜头语法和听觉识别一致。</p>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label className="span-2">
+                <span className="field-heading">摄影语言 {renderAiFieldAction("cameraLanguage")}</span>
+                <textarea rows={4} maxLength={2000} value={settings.cameraLanguage} onChange={(event) => updateField("cameraLanguage", event.target.value)} />
+              </label>
+              <label className="span-2">
+                <span className="field-heading">声音策略 {renderAiFieldAction("soundStrategy")}</span>
+                <textarea rows={4} maxLength={2000} value={settings.soundStrategy} onChange={(event) => updateField("soundStrategy", event.target.value)} />
+              </label>
+            </div>
+          </section>
+
+          <section className="settings-section" id="settings-generation">
+            <div className="section-heading">
+              <div>
+              <span className="eyebrow">05 / GENERATION</span>
+              <h2>图像生成约束</h2>
+              <p>作为所有图像提示词的项目级前缀，不包含具体镜头内容。</p>
+              </div>
+              {renderAiFieldAction("imagePromptPrefix")}
+            </div>
+            <textarea
+              className="prompt-prefix"
+              rows={6}
+              maxLength={4000}
+              value={settings.imagePromptPrefix}
+              onChange={(event) => updateField("imagePromptPrefix", event.target.value)}
+              placeholder="例如：法式彩色冒险漫画，拟人犬角色，清晰墨线……"
+            />
+          </section>
+
+          {error && <p className="settings-error">{error}</p>}
+          <div className="settings-submit-bar">
+            <div>
+              <strong>{status === "dirty" ? "设定有修改" : `当前为 v${settings.version}`}</strong>
+              <span>每次保存都会保留一个可追溯版本。</span>
+            </div>
+            <button className="primary-button" type="submit" disabled={status === "saving" || status === "idle" || status === "saved"}>
+              <Save size={14} />
+              {status === "saving" ? "正在保存" : `保存为 v${settings.version + 1}`}
+            </button>
           </div>
-        </section>
+        </form>
       </div>
+      {coverConfirmation && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={() => setCoverConfirmation(false)}
+        >
+          <form
+            className="dialog ai-assist-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const instruction = coverInstruction.trim();
+              setCoverConfirmation(false);
+              void generateCover(instruction || undefined);
+            }}
+          >
+            <span className="eyebrow">GPT-IMAGE-2 / 重新生成</span>
+            <h2>确认重新生成概念封面</h2>
+            <p>新封面会保存为下一个资产版本，当前版本仍会保留。</p>
+            <label>
+              <span>本次调整意见（可选）</span>
+              <textarea
+                autoFocus
+                rows={4}
+                maxLength={1000}
+                value={coverInstruction}
+                onChange={(event) => setCoverInstruction(event.target.value)}
+                placeholder="例如：强化三位主角的动作姿态，减少背景人物，保留现有漫画风格"
+              />
+            </label>
+            <div>
+              <button className="secondary-button" type="button" onClick={() => setCoverConfirmation(false)}>取消</button>
+              <button className="primary-button" type="submit">
+                <Sparkles size={13} />
+                确认重新生成
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {assistConfirmation && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={() => setAssistConfirmation(null)}
+        >
+          <form
+            className="dialog ai-assist-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const field = assistConfirmation;
+              const instruction = assistInstruction.trim();
+              setAssistConfirmation(null);
+              void assistField(field, instruction || undefined);
+            }}
+          >
+            <span className="eyebrow">GPT-5.4 / AI 优化</span>
+            <h2>确认优化“{assistFieldLabels[assistConfirmation]}”</h2>
+            <p>AI 将基于当前内容和完整项目设定生成替换文本，结果会先回填到表单，不会自动保存版本。</p>
+            <label>
+              <span>补充意见（可选）</span>
+              <textarea
+                autoFocus
+                rows={4}
+                maxLength={1000}
+                value={assistInstruction}
+                onChange={(event) => setAssistInstruction(event.target.value)}
+                placeholder="例如：保留现有方向，减少抽象形容词，强化可执行约束"
+              />
+            </label>
+            <div>
+              <button className="secondary-button" type="button" onClick={() => setAssistConfirmation(null)}>取消</button>
+              <button className="primary-button" type="submit">
+                <WandSparkles size={13} />
+                确认优化
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

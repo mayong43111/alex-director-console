@@ -25,6 +25,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<ProductionRunItem> ProductionRunItems => Set<ProductionRunItem>();
     public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
+    public DbSet<CopilotConversation> CopilotConversations => Set<CopilotConversation>();
+    public DbSet<CopilotMessage> CopilotMessages => Set<CopilotMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -357,6 +359,9 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Endpoint).HasMaxLength(1000).IsRequired();
             entity.Property(item => item.Deployment).HasMaxLength(100).IsRequired();
             entity.Property(item => item.ProtectedApiKey).HasMaxLength(4000).IsRequired();
+            entity.Property(item => item.ImageEndpoint).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.ImageDeployment).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.ProtectedImageApiKey).HasMaxLength(4000).IsRequired();
         });
 
         modelBuilder.Entity<SkillDefinition>(entity =>
@@ -368,6 +373,28 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Description).HasMaxLength(4000).IsRequired();
             entity.Property(item => item.Version).HasMaxLength(40).IsRequired();
             entity.Property(item => item.SourcePath).HasMaxLength(1000).IsRequired();
+        });
+
+        modelBuilder.Entity<CopilotConversation>(entity =>
+        {
+            entity.ToTable("CopilotConversations");
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => item.ProjectId).IsUnique();
+            entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CopilotMessage>(entity =>
+        {
+            entity.ToTable("CopilotMessages", table =>
+                table.HasCheckConstraint("CK_CopilotMessages_Sequence", "Sequence > 0"));
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.ConversationId, item.Sequence }).IsUnique();
+            entity.Property(item => item.Role).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Content).HasMaxLength(100000).IsRequired();
+            entity.Property(item => item.Model).HasMaxLength(100);
+            entity.HasOne<CopilotConversation>().WithMany().HasForeignKey(item => item.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

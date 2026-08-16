@@ -1014,6 +1014,9 @@ export function ServicesPage() {
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
+  const [imageEndpoint, setImageEndpoint] = useState("");
+  const [imageApiKey, setImageApiKey] = useState("");
+  const [clearImageApiKey, setClearImageApiKey] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"saving" | "testing" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -1025,6 +1028,7 @@ export function ServicesPage() {
       .then((loaded) => {
         setConfiguration(loaded);
         setEndpoint(loaded.endpoint);
+        setImageEndpoint(loaded.imageEndpoint);
       })
       .catch((loadError: unknown) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
@@ -1048,11 +1052,17 @@ export function ServicesPage() {
         endpoint,
         apiKey: apiKey || undefined,
         clearApiKey,
+        imageEndpoint,
+        imageApiKey: imageApiKey || undefined,
+        clearImageApiKey,
       });
       setConfiguration(saved);
       setEndpoint(saved.endpoint);
       setApiKey("");
       setClearApiKey(false);
+      setImageEndpoint(saved.imageEndpoint);
+      setImageApiKey("");
+      setClearImageApiKey(false);
       setMessage("配置已安全保存。");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Foundry 配置保存失败。");
@@ -1100,7 +1110,7 @@ export function ServicesPage() {
           </span>
           <span>
             <strong>Azure AI Foundry</strong>
-            <small>GPT-5.4 · 唯一 LLM Provider</small>
+            <small>GPT-5.4 · gpt-image-2</small>
           </span>
           <span className={`connection-state ${configured ? "online" : "offline"}`}>
             <i />
@@ -1153,6 +1163,49 @@ export function ServicesPage() {
                 disabled={Boolean(busy)}
               />
               <span>清除已保存的 API Key</span>
+            </label>
+          )}
+          <div className="span-2 section-heading second">
+            <div>
+              <h2>图像生成</h2>
+              <p>留空 Endpoint 或 API Key 时复用上方 GPT-5.4 配置。</p>
+            </div>
+            {configuration?.imageConfigured && <span className="saved-state"><Check size={13} />gpt-image-2 已配置</span>}
+          </div>
+          <label>
+            <span>Image Endpoint</span>
+            <input
+              type="url"
+              placeholder="留空复用 GPT Endpoint"
+              value={imageEndpoint}
+              onChange={(event) => setImageEndpoint(event.target.value)}
+              disabled={loading || Boolean(busy)}
+            />
+          </label>
+          <label>
+            <span>Image Deployment</span>
+            <input value="gpt-image-2" readOnly />
+          </label>
+          <label>
+            <span>Image API Key</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder={configuration?.imageApiKeyConfigured ? "已配置，留空保持不变" : "留空复用 GPT API Key"}
+              value={imageApiKey}
+              onChange={(event) => setImageApiKey(event.target.value)}
+              disabled={loading || Boolean(busy) || clearImageApiKey}
+            />
+          </label>
+          {configuration?.imageApiKeyConfigured && (
+            <label className="check-field">
+              <input
+                type="checkbox"
+                checked={clearImageApiKey}
+                onChange={(event) => setClearImageApiKey(event.target.checked)}
+                disabled={Boolean(busy)}
+              />
+              <span>清除独立图片 API Key，改为复用 GPT Key</span>
             </label>
           )}
         </div>

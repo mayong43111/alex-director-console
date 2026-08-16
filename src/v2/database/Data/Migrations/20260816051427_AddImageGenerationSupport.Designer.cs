@@ -3,6 +3,7 @@ using System;
 using AlexDirectorConsole.V2.Database.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AlexDirectorConsole.V2.Database.Data.Migrations
 {
     [DbContext(typeof(V2DbContext))]
-    partial class V2DbContextModelSnapshot : ModelSnapshot
+    [Migration("20260816051427_AddImageGenerationSupport")]
+    partial class AddImageGenerationSupport
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -261,9 +264,6 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
-
-                    b.Property<byte[]>("BlobContent")
-                        .HasColumnType("BLOB");
 
                     b.Property<string>("BlobKey")
                         .HasMaxLength(500)

@@ -11,15 +11,24 @@ public sealed record FoundryConfigurationView(
     string Endpoint,
     string Deployment,
     bool ApiKeyConfigured,
+    string ImageEndpoint,
+    string ImageDeployment,
+    bool ImageApiKeyConfigured,
+    bool ImageConfigured,
     DateTimeOffset? UpdatedAtUtc)
 {
     public const string ProviderName = "Azure AI Foundry";
     public const string RequiredDeployment = "gpt-5.4";
+    public const string RequiredImageDeployment = "gpt-image-2";
 
     public static FoundryConfigurationView Empty { get; } = new(
         ProviderName,
         string.Empty,
         RequiredDeployment,
+        false,
+        string.Empty,
+        RequiredImageDeployment,
+        false,
         false,
         null);
 
@@ -28,6 +37,17 @@ public sealed record FoundryConfigurationView(
         configuration.Endpoint,
         configuration.Deployment,
         !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey),
+        configuration.ImageEndpoint,
+        RequiredImageDeployment,
+        !string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey),
+        Uri.TryCreate(
+            string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
+                ? configuration.Endpoint
+                : configuration.ImageEndpoint,
+            UriKind.Absolute,
+            out _)
+        && (!string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey)
+            || !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey)),
         configuration.UpdatedAtUtc);
 }
 
@@ -52,7 +72,10 @@ public sealed class GetFoundryConfigurationHandler(V2DbContext dbContext)
 public sealed record UpdateFoundryConfigurationCommand(
     string? Endpoint,
     string? ApiKey,
-    bool ClearApiKey) : ICommand<UpdateFoundryConfigurationResult>;
+    bool ClearApiKey,
+    string? ImageEndpoint,
+    string? ImageApiKey,
+    bool ClearImageApiKey) : ICommand<UpdateFoundryConfigurationResult>;
 
 public sealed record UpdateFoundryConfigurationResult(
     FoundryConfigurationView? Configuration,
@@ -85,6 +108,15 @@ public sealed class UpdateFoundryConfigurationHandler(
                 "endpoint",
                 "请输入有效的 Azure AI Foundry HTTP(S) Endpoint。");
         }
+            var imageEndpoint = command.ImageEndpoint?.Trim();
+            if (!string.IsNullOrWhiteSpace(imageEndpoint)
+                && (!Uri.TryCreate(imageEndpoint, UriKind.Absolute, out var imageEndpointUri)
+                || imageEndpointUri.Scheme is not ("http" or "https")))
+            {
+                return UpdateFoundryConfigurationResult.Invalid(
+                "imageEndpoint",
+                "请输入有效的图片模型 HTTP(S) Endpoint，或留空复用语言模型 Endpoint。");
+            }
 
         var configuration = await dbContext.FoundryConfigurations
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
@@ -96,6 +128,11 @@ public sealed class UpdateFoundryConfigurationHandler(
 
         configuration.Endpoint = endpoint.TrimEnd('/');
         configuration.Deployment = FoundryConfigurationView.RequiredDeployment;
+        if (command.ImageEndpoint is not null)
+        {
+            configuration.ImageEndpoint = imageEndpoint?.TrimEnd('/') ?? string.Empty;
+        }
+        configuration.ImageDeployment = FoundryConfigurationView.RequiredImageDeployment;
         configuration.UpdatedAtUtc = timeProvider.GetUtcNow();
         var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
         if (command.ClearApiKey)
@@ -105,6 +142,14 @@ public sealed class UpdateFoundryConfigurationHandler(
         else if (!string.IsNullOrWhiteSpace(command.ApiKey))
         {
             configuration.ProtectedApiKey = protector.Protect(command.ApiKey.Trim());
+        }
+        if (command.ClearImageApiKey)
+        {
+            configuration.ProtectedImageApiKey = string.Empty;
+        }
+        else if (!string.IsNullOrWhiteSpace(command.ImageApiKey))
+        {
+            configuration.ProtectedImageApiKey = protector.Protect(command.ImageApiKey.Trim());
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -124,7 +169,8 @@ public sealed record TestFoundryConnectionResult(
 public sealed class TestFoundryConnectionHandler(
     V2DbContext dbContext,
     IDataProtectionProvider dataProtectionProvider,
-    IFoundryConnectionTester connectionTester)
+    IFoundryConnectionTester connectionTester,
+    ILogger<TestFoundryConnectionHandler> logger)
     : ICommandHandler<TestFoundryConnectionCommand, TestFoundryConnectionResult>
 {
     public async Task<TestFoundryConnectionResult> HandleAsync(
@@ -154,6 +200,10 @@ public sealed class TestFoundryConnectionHandler(
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
+            logger.LogWarning(
+                error,
+                "Azure AI Foundry connection test failed for deployment {Deployment}.",
+                configuration.Deployment);
             return new(false, "连接失败，请检查 Endpoint、部署名和 API Key。", configuration.Deployment, true);
         }
     }

@@ -1,5 +1,3 @@
-using Azure;
-using Azure.AI.OpenAI;
 using OpenAI.Chat;
 
 namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
@@ -21,11 +19,10 @@ public sealed class AzureFoundryConnectionTester : IFoundryConnectionTester
         string apiKey,
         CancellationToken cancellationToken)
     {
-        var client = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
-        var chatClient = client.GetChatClient(deployment);
+        var chatClient = AzureFoundryChatClientFactory.Create(endpoint, deployment, apiKey);
         await chatClient.CompleteChatAsync(
             [new UserChatMessage("Reply with OK.")],
-            new ChatCompletionOptions { MaxOutputTokenCount = 8 },
+            new ChatCompletionOptions { MaxOutputTokenCount = 64 },
             cancellationToken);
     }
 }

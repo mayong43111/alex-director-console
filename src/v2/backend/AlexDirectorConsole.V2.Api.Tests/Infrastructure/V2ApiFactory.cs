@@ -1,4 +1,6 @@
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Api.Features.Copilot;
+using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using Microsoft.AspNetCore.Hosting;
@@ -24,9 +26,15 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<V2DbContext>();
             services.RemoveAll<DbContextOptions<V2DbContext>>();
             services.RemoveAll<IFoundryConnectionTester>();
+            services.RemoveAll<IProjectCopilotAgent>();
+            services.RemoveAll<IProjectCoverGenerator>();
+            services.RemoveAll<IProjectSettingsAssistant>();
             services.AddDbContext<V2DbContext>(options =>
                 options.UseSqlite($"Data Source={databasePath};Pooling=False"));
             services.AddSingleton<IFoundryConnectionTester, SuccessfulFoundryConnectionTester>();
+            services.AddScoped<IProjectCopilotAgent, TestProjectCopilotAgent>();
+            services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
+            services.AddSingleton<IProjectSettingsAssistant, TestProjectSettingsAssistant>();
         });
     }
 
@@ -57,5 +65,51 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             string deployment,
             string apiKey,
             CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class TestProjectCopilotAgent : IProjectCopilotAgent
+    {
+        public Task<CopilotAgentReply> ReplyAsync(
+            Guid projectId,
+            string projectName,
+            string page,
+            string episode,
+            IReadOnlyList<CopilotHistoryMessage> history,
+            string message,
+            CancellationToken cancellationToken) => Task.FromResult(
+                new CopilotAgentReply(
+                    $"收到：{message}（历史 {history.Count} 条）",
+                    "gpt-5.4",
+                    "MAF HarnessAgent"));
+    }
+
+    private sealed class TestProjectCoverGenerator : IProjectCoverGenerator
+    {
+        private static readonly byte[] PngBytes = Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+        public Task<GeneratedProjectCover> GenerateAsync(
+            string prompt,
+            string size,
+            CancellationToken cancellationToken) => Task.FromResult(
+                new GeneratedProjectCover(
+                    PngBytes,
+                    "image/png",
+                    ".png",
+                    "gpt-image-2",
+                    "medium",
+                    prompt));
+    }
+
+    private sealed class TestProjectSettingsAssistant : IProjectSettingsAssistant
+    {
+        public Task<ProjectSettingsAssistView> WriteAsync(
+            ProjectSettingsAssistRequest request,
+            CancellationToken cancellationToken) => Task.FromResult(
+                new ProjectSettingsAssistView(
+                    request.Field ?? string.Empty,
+                    $"AI 优化：{request.CurrentValue}",
+                    "gpt-5.4",
+                    "MAF HarnessAgent"));
     }
 }

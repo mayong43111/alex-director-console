@@ -3,6 +3,10 @@ export interface FoundryConfiguration {
   endpoint: string
   deployment: string
   apiKeyConfigured: boolean
+  imageEndpoint: string
+  imageDeployment: string
+  imageApiKeyConfigured: boolean
+  imageConfigured: boolean
   updatedAtUtc: string | null
 }
 
@@ -16,6 +20,7 @@ export interface FoundryConnectionResult {
 interface ValidationProblem {
   title?: string
   detail?: string
+  error?: string
   errors?: Record<string, string[]>
 }
 
@@ -24,7 +29,7 @@ async function readError(response: Response, fallback: string): Promise<Error> {
   const validationMessage = problem?.errors
     ? Object.values(problem.errors).flat().join(' ')
     : null
-  return new Error(validationMessage || problem?.detail || problem?.title || fallback)
+  return new Error(validationMessage || problem?.error || problem?.detail || problem?.title || fallback)
 }
 
 export async function getFoundryConfiguration(signal?: AbortSignal): Promise<FoundryConfiguration> {
@@ -37,6 +42,9 @@ export async function updateFoundryConfiguration(input: {
   endpoint: string
   apiKey?: string
   clearApiKey: boolean
+  imageEndpoint: string
+  imageApiKey?: string
+  clearImageApiKey: boolean
 }): Promise<FoundryConfiguration> {
   const response = await fetch('/api/v2/system/foundry-configuration', {
     method: 'PUT',

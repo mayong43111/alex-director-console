@@ -26,22 +26,34 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.NotNull(configuration);
         Assert.Equal("Azure AI Foundry", configuration.Provider);
         Assert.Equal("gpt-5.4", configuration.Deployment);
+        Assert.Equal("gpt-image-2", configuration.ImageDeployment);
         Assert.False(configuration.ApiKeyConfigured);
+        Assert.False(configuration.ImageConfigured);
     }
 
     [Fact]
     public async Task Save_encrypts_api_key_and_never_returns_it()
     {
         const string apiKey = "test-secret-key";
+        const string imageApiKey = "test-image-secret-key";
         using var client = factory.CreateClient();
 
         var response = await client.PutAsJsonAsync(
             "/api/v2/system/foundry-configuration",
-            new { endpoint = "https://example.openai.azure.com/", apiKey, clearApiKey = false });
+            new
+            {
+                endpoint = "https://example.openai.azure.com/",
+                apiKey,
+                clearApiKey = false,
+                imageEndpoint = "",
+                imageApiKey,
+                clearImageApiKey = false
+            });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var responseText = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(apiKey, responseText, StringComparison.Ordinal);
+        Assert.DoesNotContain(imageApiKey, responseText, StringComparison.Ordinal);
         Assert.DoesNotContain("protectedApiKey", responseText, StringComparison.OrdinalIgnoreCase);
         var configuration = JsonSerializer.Deserialize<FoundryConfigurationResponse>(
             responseText,
@@ -50,12 +62,17 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.True(configuration.ApiKeyConfigured);
         Assert.Equal("https://example.openai.azure.com", configuration.Endpoint);
         Assert.Equal("gpt-5.4", configuration.Deployment);
+        Assert.Equal("gpt-image-2", configuration.ImageDeployment);
+        Assert.True(configuration.ImageApiKeyConfigured);
+        Assert.True(configuration.ImageConfigured);
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         var stored = Assert.Single(dbContext.FoundryConfigurations);
         Assert.NotEqual(apiKey, stored.ProtectedApiKey);
         Assert.DoesNotContain(apiKey, stored.ProtectedApiKey, StringComparison.Ordinal);
+        Assert.NotEqual(imageApiKey, stored.ProtectedImageApiKey);
+        Assert.DoesNotContain(imageApiKey, stored.ProtectedImageApiKey, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -95,6 +112,10 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         string Endpoint,
         string Deployment,
         bool ApiKeyConfigured,
+        string ImageEndpoint,
+        string ImageDeployment,
+        bool ImageApiKeyConfigured,
+        bool ImageConfigured,
         DateTimeOffset? UpdatedAtUtc);
 
     private sealed record TestConnectionResponse(

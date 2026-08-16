@@ -5,7 +5,10 @@ namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 public sealed record UpdateFoundryConfigurationRequest(
     string? Endpoint,
     string? ApiKey,
-    bool ClearApiKey);
+    bool ClearApiKey,
+    string? ImageEndpoint,
+    string? ImageApiKey,
+    bool ClearImageApiKey);
 
 public static class FoundryConfigurationEndpoints
 {
@@ -32,7 +35,10 @@ public static class FoundryConfigurationEndpoints
                 new UpdateFoundryConfigurationCommand(
                     request.Endpoint,
                     request.ApiKey,
-                    request.ClearApiKey),
+                    request.ClearApiKey,
+                    request.ImageEndpoint,
+                    request.ImageApiKey,
+                    request.ClearImageApiKey),
                 cancellationToken);
             return result.IsSuccess
                 ? Results.Ok(result.Configuration)

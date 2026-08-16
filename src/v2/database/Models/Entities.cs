@@ -35,6 +35,7 @@ public sealed class Asset
     public int SchemaVersion { get; set; } = 1;
     public string? DocumentJson { get; set; }
     public string? BlobKey { get; set; }
+    public byte[]? BlobContent { get; set; }
     public string? FileName { get; set; }
     public string? ContentType { get; set; }
     public long SizeBytes { get; set; }
@@ -289,6 +290,9 @@ public sealed class FoundryConfiguration
     public string Endpoint { get; set; } = string.Empty;
     public string Deployment { get; set; } = "gpt-5.4";
     public string ProtectedApiKey { get; set; } = string.Empty;
+    public string ImageEndpoint { get; set; } = string.Empty;
+    public string ImageDeployment { get; set; } = "gpt-image-2";
+    public string ProtectedImageApiKey { get; set; } = string.Empty;
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }
 
@@ -303,4 +307,23 @@ public sealed class SkillDefinition
     public string SourcePath { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class CopilotConversation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProjectId { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class CopilotMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ConversationId { get; set; }
+    public long Sequence { get; set; }
+    public string Role { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public string? Model { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
 }

@@ -171,7 +171,7 @@ alex-director-console/
 └─ start-dev.ps1
 ```
 
-架构演进和边界约束见 [重构计划](docs/refactoring-plan.md)。
+创作域、剧本三件套与参考图片流程见 [创作生产架构](docs/creative-production-architecture.md)；代码架构演进和边界约束见 [重构计划](docs/refactoring-plan.md)。
 
 ### 数据与维护
 
