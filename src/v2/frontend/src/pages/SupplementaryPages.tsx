@@ -1,10 +1,26 @@
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useState,
+  type FormEvent,
+} from "react";
 import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
 import {
   createProject,
   listProjects,
   type ProjectRecord,
 } from "../api/projects";
+import {
+  getFoundryConfiguration,
+  testFoundryConnection,
+  updateFoundryConfiguration,
+  type FoundryConfiguration,
+} from "../api/systemConfiguration";
+import {
+  listSkills,
+  updateSkill,
+  type SkillRecord,
+} from "../api/skills";
 import {
   ArrowLeft,
   Bot,
@@ -13,7 +29,6 @@ import {
   CircleAlert,
   Cloud,
   Code2,
-  Film,
   Grid2X2,
   List,
   MoreHorizontal,
@@ -139,7 +154,11 @@ export function ProjectCenterPage() {
         <div>
           <span className="service-dot" />
           服务在线
-          <button className="icon-button" aria-label="系统设置">
+          <button
+            className="icon-button"
+            aria-label="系统设置"
+            onClick={() => navigate("/settings/services")}
+          >
             <Settings size={17} />
           </button>
         </div>
@@ -943,6 +962,8 @@ function GlobalSettingsShell({
   active: "services" | "skills";
   children: React.ReactNode;
 }) {
+  const returnTo = sessionStorage.getItem("alex-director-v2.lastProjectPath") ?? "/";
+
   return (
     <div className="global-settings">
       <header>
@@ -955,7 +976,7 @@ function GlobalSettingsShell({
           <b>/</b>
           <strong>{active === "services" ? "服务连接" : "Agent 技能"}</strong>
         </div>
-        <Link className="secondary-button" to="/projects/tianqiao/overview">
+        <Link className="secondary-button" to={returnTo}>
           <ArrowLeft size={14} />
           返回项目
         </Link>
@@ -989,28 +1010,73 @@ function GlobalSettingsShell({
 }
 
 export function ServicesPage() {
-  const [editing, setEditing] = useState("");
-  const services = [
-    {
-      name: "Azure OpenAI",
-      detail: "部署 gpt-5.4",
-      status: "online",
-      icon: Cloud,
-    },
-    {
-      name: "Image",
-      detail: "gpt-image-2 · medium",
-      status: "online",
-      icon: Film,
-    },
-    { name: "Speech", detail: "tts · alloy", status: "online", icon: Volume2 },
-    {
-      name: "ComfyUI",
-      detail: "localhost:8188",
-      status: "offline",
-      icon: Server,
-    },
-  ];
+  const [configuration, setConfiguration] = useState<FoundryConfiguration | null>(null);
+  const [endpoint, setEndpoint] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [clearApiKey, setClearApiKey] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<"saving" | "testing" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getFoundryConfiguration(controller.signal)
+      .then((loaded) => {
+        setConfiguration(loaded);
+        setEndpoint(loaded.endpoint);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Foundry 配置加载失败。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function saveConfiguration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+
+    setBusy("saving");
+    setError(null);
+    setMessage(null);
+    try {
+      const saved = await updateFoundryConfiguration({
+        endpoint,
+        apiKey: apiKey || undefined,
+        clearApiKey,
+      });
+      setConfiguration(saved);
+      setEndpoint(saved.endpoint);
+      setApiKey("");
+      setClearApiKey(false);
+      setMessage("配置已安全保存。");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Foundry 配置保存失败。");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function testConnection() {
+    if (busy) return;
+    setBusy("testing");
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await testFoundryConnection();
+      setMessage(result.message);
+    } catch (testError) {
+      setError(testError instanceof Error ? testError.message : "Foundry 连接测试失败。");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const configured = configuration?.apiKeyConfigured && Boolean(configuration.endpoint);
 
   return (
     <GlobalSettingsShell active="services">
@@ -1019,79 +1085,143 @@ export function ServicesPage() {
         title="服务连接"
         description="项目只引用服务能力，不在项目内保存密钥"
         action={
-          <span className="saved-state">
-            <Check size={13} />
-            配置已保存
-          </span>
+          configured ? (
+            <span className="saved-state">
+              <Check size={13} />
+              密钥已加密保存
+            </span>
+          ) : undefined
         }
       />
       <section className="service-list panel">
-        {services.map(({ name, detail, status, icon: Icon }) => (
-          <div className="service-row" key={name}>
-            <span className="service-icon">
-              <Icon size={18} />
-            </span>
-            <span>
-              <strong>{name}</strong>
-              <small>{detail}</small>
-            </span>
-            <span className={`connection-state ${status}`}>
-              <i />
-              {status}
-            </span>
-            <button
-              className="secondary-button"
-              onClick={() => setEditing(name)}
-            >
-              {status === "online" ? "编辑" : "连接"}
-            </button>
-          </div>
-        ))}
-      </section>
-      <section className="connection-form panel">
-        <header className="panel-header">
-          <h2>{editing || "VM 与路径"}</h2>
-          <span>
-            {editing ? "仅展示非敏感连接字段" : "本地媒体与远程执行配置"}
+        <div className="service-row">
+          <span className="service-icon">
+            <Cloud size={18} />
           </span>
+          <span>
+            <strong>Azure AI Foundry</strong>
+            <small>GPT-5.4 · 唯一 LLM Provider</small>
+          </span>
+          <span className={`connection-state ${configured ? "online" : "offline"}`}>
+            <i />
+            {loading ? "loading" : configured ? "configured" : "not configured"}
+          </span>
+          <button className="secondary-button" onClick={() => document.getElementById("foundry-endpoint")?.focus()}>
+            配置
+          </button>
+        </div>
+      </section>
+      <form className="connection-form panel" onSubmit={saveConfiguration}>
+        <header className="panel-header">
+          <h2>Azure AI Foundry</h2>
+          <span>API Key 仅加密存储，保存后不再回传到浏览器</span>
         </header>
         <div className="form-grid">
           <label>
-            <span>Host</span>
-            <input defaultValue="gpu-worker.internal" />
+            <span>Endpoint</span>
+            <input
+              id="foundry-endpoint"
+              type="url"
+              placeholder="https://your-resource.openai.azure.com"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
+              disabled={loading || Boolean(busy)}
+              required
+            />
           </label>
           <label>
-            <span>Port</span>
-            <input defaultValue="22" />
+            <span>Deployment</span>
+            <input value="gpt-5.4" readOnly />
           </label>
           <label>
-            <span>User</span>
-            <input defaultValue="alex-worker" />
+            <span>API Key</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder={configuration?.apiKeyConfigured ? "已配置，留空保持不变" : "输入 Azure API Key"}
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              disabled={loading || Boolean(busy) || clearApiKey}
+            />
           </label>
-          <label>
-            <span>Workspace</span>
-            <input defaultValue="/opt/alex/workspace" />
-          </label>
+          {configuration?.apiKeyConfigured && (
+            <label className="check-field">
+              <input
+                type="checkbox"
+                checked={clearApiKey}
+                onChange={(event) => setClearApiKey(event.target.checked)}
+                disabled={Boolean(busy)}
+              />
+              <span>清除已保存的 API Key</span>
+            </label>
+          )}
         </div>
+        {(message || error) && (
+          <p className={`settings-feedback ${error ? "error" : "success"}`}>
+            {error || message}
+          </p>
+        )}
         <footer>
-          <button className="secondary-button">测试连接</button>
-          <button className="primary-button">保存配置</button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={testConnection}
+            disabled={!configured || Boolean(busy)}
+          >
+            {busy === "testing" ? "测试中..." : "测试连接"}
+          </button>
+          <button className="primary-button" type="submit" disabled={loading || Boolean(busy)}>
+            {busy === "saving" ? "保存中..." : "保存配置"}
+          </button>
         </footer>
-      </section>
+      </form>
     </GlobalSettingsShell>
   );
 }
 
 export function SkillsPage() {
-  const skills = [
-    { name: "剧本创作", version: "v2.3", enabled: true, tools: 4 },
-    { name: "剧本拆解", version: "v1.8", enabled: true, tools: 3 },
-    { name: "分镜设计", version: "v2.1", enabled: true, tools: 5 },
-    { name: "镜头画面", version: "v1.4", enabled: true, tools: 4 },
-    { name: "视频生成", version: "v1.2", enabled: false, tools: 2 },
-  ];
-  const [selected, setSelected] = useState(skills[2]);
-  const [enabled, setEnabled] = useState(skills[2].enabled);
+  const [skills, setSkills] = useState<SkillRecord[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase());
+  const filteredSkills = skills.filter((skill) =>
+    `${skill.name} ${skill.id}`.toLocaleLowerCase().includes(deferredSearch),
+  );
+  const selected = skills.find((skill) => skill.id === selectedId) ?? skills[0];
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listSkills(controller.signal)
+      .then((loaded) => {
+        setSkills(loaded);
+        setSelectedId((current) => current ?? loaded[0]?.id ?? null);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Skill 目录加载失败。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function setSkillEnabled(skill: SkillRecord, isEnabled: boolean) {
+    if (pendingId) return;
+    setPendingId(skill.id);
+    setError(null);
+    try {
+      const updated = await updateSkill(skill.id, isEnabled);
+      setSkills((current) => current.map((item) => item.id === updated.id ? updated : item));
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Skill 状态更新失败。");
+    } finally {
+      setPendingId(null);
+    }
+  }
 
   return (
     <GlobalSettingsShell active="skills">
@@ -1100,7 +1230,7 @@ export function SkillsPage() {
         title="技能目录"
         description="管理技能版本、工具权限与项目副本"
         action={
-          <button className="primary-button">
+          <button className="primary-button" disabled title="Skill 导入将在项目副本阶段开放">
             <Plus size={14} />
             导入技能
           </button>
@@ -1110,16 +1240,21 @@ export function SkillsPage() {
         <section className="skills-list">
           <label>
             <Search size={14} />
-            <input placeholder="搜索技能" />
+            <input
+              placeholder="搜索技能"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
           </label>
-          {skills.map((skill) => (
+          {loading && <p className="settings-empty">正在加载 Skill...</p>}
+          {!loading && filteredSkills.length === 0 && (
+            <p className="settings-empty">没有匹配的 Skill。</p>
+          )}
+          {filteredSkills.map((skill) => (
             <button
-              className={selected.name === skill.name ? "active" : ""}
-              onClick={() => {
-                setSelected(skill);
-                setEnabled(skill.enabled);
-              }}
-              key={skill.name}
+              className={selected?.id === skill.id ? "active" : ""}
+              onClick={() => setSelectedId(skill.id)}
+              key={skill.id}
             >
               <span className="skill-icon">
                 <Sparkles size={15} />
@@ -1127,53 +1262,56 @@ export function SkillsPage() {
               <span>
                 <strong>{skill.name}</strong>
                 <small>
-                  {skill.version} · {skill.tools} tools
+                  v{skill.version} · {skill.allowedTools.length} tools
                 </small>
               </span>
-              <i className={skill.enabled ? "on" : "off"}>
-                {skill.enabled ? "on" : "off"}
+              <i className={skill.isEnabled ? "on" : "off"}>
+                {skill.isEnabled ? "on" : "off"}
               </i>
             </button>
           ))}
         </section>
-        <section className="skill-detail">
-          <header>
-            <div>
-              <span className="eyebrow">{selected.version}</span>
-              <h2>{selected.name}</h2>
+        {selected ? (
+          <section className="skill-detail">
+            <header>
+              <div>
+                <span className="eyebrow">v{selected.version} · {selected.isSystem ? "系统 Skill" : "项目 Skill"}</span>
+                <h2>{selected.name}</h2>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={selected.isEnabled}
+                  onChange={(event) => setSkillEnabled(selected, event.target.checked)}
+                  disabled={pendingId === selected.id}
+                />
+                <i />
+                <span>{pendingId === selected.id ? "saving" : selected.isEnabled ? "enabled" : "disabled"}</span>
+              </label>
+            </header>
+            {error && <p className="settings-feedback error">{error}</p>}
+            <div className="skill-section">
+              <span className="eyebrow">描述</span>
+              <p>{selected.description}</p>
             </div>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={() => setEnabled(!enabled)}
-              />
-              <i />
-              <span>{enabled ? "enabled" : "disabled"}</span>
-            </label>
-          </header>
-          <div className="skill-section">
-            <span className="eyebrow">描述</span>
-            <p>根据剧本场次、视觉资产和时长约束设计可生产的结构化镜头。</p>
-          </div>
-          <div className="skill-section">
-            <span className="eyebrow">Allowed tools</span>
-            <div className="tool-chips">
-              <span>query_storyboard</span>
-              <span>write_storyboard</span>
-              <span>query_asset</span>
-              <span>create_reference_plan</span>
+            <div className="skill-section">
+              <span className="eyebrow">Allowed tools</span>
+              <div className="tool-chips">
+                {selected.allowedTools.map((tool) => <span key={tool}>{tool}</span>)}
+              </div>
             </div>
-          </div>
-          <div className="skill-section">
-            <span className="eyebrow">SKILL.md</span>
-            <pre>{`# 分镜设计\n\n## Goal\n把已批准剧本转换为结构化镜头。\n\n## Constraints\n- 保留 source evidence\n- 每个 shot 归属一个 production episode\n- 写入前生成变更计划`}</pre>
-          </div>
-          <footer>
-            <button className="secondary-button">查看源文件</button>
-            <button className="primary-button">编辑项目副本</button>
-          </footer>
-        </section>
+            <div className="skill-section">
+              <span className="eyebrow">SKILL.md · {selected.sourcePath}</span>
+              <pre>{selected.content}</pre>
+            </div>
+            <footer>
+              <button className="secondary-button" disabled>查看源文件</button>
+              <button className="primary-button" disabled>编辑项目副本</button>
+            </footer>
+          </section>
+        ) : (
+          <section className="skill-detail settings-empty">请选择一个 Skill。</section>
+        )}
       </div>
     </GlobalSettingsShell>
   );

@@ -190,6 +190,9 @@ export function AppShell() {
     return () => controller.abort();
   }, [projectId]);
   useEffect(() => {
+    sessionStorage.setItem("alex-director-v2.lastProjectPath", location.pathname);
+  }, [location.pathname]);
+  useEffect(() => {
     const controller = new AbortController();
     listProjects(controller.signal)
       .then(setProjects)
@@ -333,7 +336,11 @@ export function AppShell() {
             <Bell size={17} />
             <i>3</i>
           </button>
-          <button className="icon-button" aria-label="全局设置">
+          <button
+            className="icon-button"
+            aria-label="全局设置"
+            onClick={() => navigate("/settings/services")}
+          >
             <Settings size={17} />
           </button>
           <button

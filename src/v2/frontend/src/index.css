@@ -803,6 +803,12 @@ button { color: inherit; }
 .connection-state.offline i { background: var(--danger); }
 .connection-form { padding-bottom: 14px; }
 .connection-form .form-grid { padding: 0 16px 14px; }
+.connection-form .check-field { display: flex; align-items: center; align-self: end; gap: 7px; min-height: 30px; }
+.connection-form .check-field input { width: auto; }
+.settings-feedback { margin: 0 16px 10px; padding: 8px 10px; border-left: 3px solid; font-size: 9px; }
+.settings-feedback.success { color: var(--success); background: #edf7f0; border-color: var(--success); }
+.settings-feedback.error { color: var(--danger); background: #fbefee; border-color: var(--danger); }
+.settings-empty { padding: 18px; color: var(--muted); font-size: 9px; }
 .connection-form footer, .skill-detail footer { display: flex; justify-content: flex-end; gap: 7px; padding: 12px 16px 0; border-top: 1px solid var(--line); }
 .skills-workspace { min-height: 620px; display: grid; grid-template-columns: 230px minmax(0, 1fr); border: 1px solid var(--line); background: #fff; }
 .skills-list { padding: 9px; border-right: 1px solid var(--line); background: #f8faf8; }
@@ -819,9 +825,9 @@ button { color: inherit; }
 .skill-detail { min-width: 0; }
 .skill-detail > header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--line); }
 .skill-detail h2 { margin: 3px 0 0; font-size: 17px; }
-.switch { display: flex; align-items: center; gap: 7px; cursor: pointer; font: 8px 'IBM Plex Mono'; }
-.switch input { position: absolute; opacity: 0; }
-.switch i { width: 30px; height: 16px; position: relative; border-radius: 9px; background: #b9c1bd; }
+.switch { position: relative; display: flex; align-items: center; gap: 7px; cursor: pointer; font: 8px 'IBM Plex Mono'; }
+.switch input { position: absolute; z-index: 1; width: 30px; height: 16px; margin: 0; opacity: 0; cursor: pointer; }
+.switch i { width: 30px; height: 16px; position: relative; border-radius: 9px; background: #b9c1bd; pointer-events: none; }
 .switch i::after { content: ''; width: 12px; height: 12px; position: absolute; top: 2px; left: 2px; border-radius: 50%; background: #fff; transition: transform .15s; }
 .switch input:checked + i { background: var(--success); }
 .switch input:checked + i::after { transform: translateX(14px); }

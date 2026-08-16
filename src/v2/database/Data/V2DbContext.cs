@@ -23,6 +23,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<AgentTaskOutput> AgentTaskOutputs => Set<AgentTaskOutput>();
     public DbSet<ProductionRun> ProductionRuns => Set<ProductionRun>();
     public DbSet<ProductionRunItem> ProductionRunItems => Set<ProductionRunItem>();
+    public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
+    public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -31,6 +33,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
         ConfigureCreativeWorkflow(modelBuilder);
         ConfigureAgentWorkflow(modelBuilder);
         ConfigureProduction(modelBuilder);
+        ConfigureSystem(modelBuilder);
     }
 
     private static void ConfigureProjects(ModelBuilder modelBuilder)
@@ -341,6 +344,30 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.HasOne<ProductionEpisode>().WithMany().HasForeignKey(item => item.ProductionEpisodeId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.ShotAssetId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.OutputAssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureSystem(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<FoundryConfiguration>(entity =>
+        {
+            entity.ToTable("FoundryConfigurations", table =>
+                table.HasCheckConstraint("CK_FoundryConfigurations_Singleton", "Id = 1"));
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Endpoint).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.Deployment).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.ProtectedApiKey).HasMaxLength(4000).IsRequired();
+        });
+
+        modelBuilder.Entity<SkillDefinition>(entity =>
+        {
+            entity.ToTable("SkillDefinitions");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Id).HasMaxLength(100);
+            entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(4000).IsRequired();
+            entity.Property(item => item.Version).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.SourcePath).HasMaxLength(1000).IsRequired();
         });
     }
 }

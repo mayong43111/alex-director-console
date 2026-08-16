@@ -1,4 +1,6 @@
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Api.Features.Skills;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -21,8 +23,10 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<V2DbContext>();
             services.RemoveAll<DbContextOptions<V2DbContext>>();
+            services.RemoveAll<IFoundryConnectionTester>();
             services.AddDbContext<V2DbContext>(options =>
                 options.UseSqlite($"Data Source={databasePath};Pooling=False"));
+            services.AddSingleton<IFoundryConnectionTester, SuccessfulFoundryConnectionTester>();
         });
     }
 
@@ -32,6 +36,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         await dbContext.Database.EnsureDeletedAsync();
         await dbContext.Database.MigrateAsync();
+        var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
+        await skillSynchronizer.SynchronizeAsync();
     }
 
     protected override void Dispose(bool disposing)
@@ -42,5 +48,14 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         {
             File.Delete(databasePath);
         }
+    }
+
+    private sealed class SuccessfulFoundryConnectionTester : IFoundryConnectionTester
+    {
+        public Task TestAsync(
+            string endpoint,
+            string deployment,
+            string apiKey,
+            CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

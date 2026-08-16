@@ -282,3 +282,25 @@ public sealed class ProductionRunItem
     public DateTimeOffset? StartedAtUtc { get; set; }
     public DateTimeOffset? CompletedAtUtc { get; set; }
 }
+
+public sealed class FoundryConfiguration
+{
+    public int Id { get; set; } = 1;
+    public string Endpoint { get; set; } = string.Empty;
+    public string Deployment { get; set; } = "gpt-5.4";
+    public string ProtectedApiKey { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class SkillDefinition
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    public bool IsEnabled { get; set; } = true;
+    public bool IsSystem { get; set; } = true;
+    public string SourcePath { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
