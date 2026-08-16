@@ -181,6 +181,58 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Chapter_analysis_replaces_its_partition_and_uses_the_highest_historical_version()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources",
+            new
+            {
+                title = "三个火枪手原著",
+                description = "改编参考",
+                content = "# 第一章\n达达尼昂离开故乡。\n\n# 第二章\n达达尼昂抵达巴黎。",
+                fileName = "chapters-1-2.md"
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var source = await createResponse.Content.ReadFromJsonAsync<ProjectSourceView>();
+        Assert.NotNull(source);
+
+        var first = await AnalyzeChapterAsync(client, projectId, source, source.Chapters[0].Id);
+        Assert.Equal(1, first.Version);
+        Assert.Equal([source.Chapters[0].Id], first.AnalyzedChapterIds);
+        Assert.Equal([source.Chapters[0].Id], first.Characters.Single().ChapterIds);
+
+        var second = await AnalyzeChapterAsync(client, projectId, source, source.Chapters[1].Id);
+        Assert.Equal(2, second.Version);
+        Assert.Equal(source.Chapters.Select(item => item.Id), second.AnalyzedChapterIds);
+        Assert.Equal(source.Chapters.Select(item => item.Id), second.Characters.Single().ChapterIds);
+        Assert.Equal(2, second.PlotBeats.Count);
+
+        var replaced = await AnalyzeChapterAsync(client, projectId, source, source.Chapters[1].Id);
+        Assert.Equal(3, replaced.Version);
+        Assert.Equal(2, replaced.PlotBeats.Count);
+        Assert.Equal(source.Chapters.Select(item => item.Id), replaced.AnalyzedChapterIds);
+
+        var restoreResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{first.AssetId}/versions/current",
+            new { assetId = first.AssetId });
+        restoreResponse.EnsureSuccessStatusCode();
+        var afterRestore = await AnalyzeChapterAsync(client, projectId, source, source.Chapters[1].Id);
+        Assert.Equal(4, afterRestore.Version);
+        Assert.Equal(2, afterRestore.PlotBeats.Count);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var versions = await dbContext.Assets
+            .Where(item => item.ProjectId == projectId && item.Type == "story-material-analysis")
+            .OrderBy(item => item.Version)
+            .Select(item => item.Version)
+            .ToArrayAsync();
+        Assert.Equal([1, 2, 3, 4], versions);
+    }
+
+    [Fact]
     public async Task Script_draft_creates_episodes_only_after_confirmation_and_ignores_later_source_updates()
     {
         using var client = factory.CreateClient();
@@ -234,6 +286,19 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         Assert.Equal(draft.Episodes[0].Title, package.Episode.Title);
         Assert.NotEmpty(package.Episode.Scenes);
 
+        var regenerateResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/1/regenerate",
+            new { instruction = "保留人物身份，改成更适合短剧节奏的主动冲突，不照搬原著。" });
+        regenerateResponse.EnsureSuccessStatusCode();
+        var regeneratedDraft = await regenerateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
+        Assert.NotNull(regeneratedDraft);
+        Assert.Equal("draft", regeneratedDraft.Status);
+        Assert.NotEqual(confirmed.AssetId, regeneratedDraft.AssetId);
+        Assert.Empty(regeneratedDraft.ProductionEpisodeIds);
+        var unchangedPackage = await client.GetFromJsonAsync<ProductionScriptPackageView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{confirmed.ProductionEpisodeIds[0]}/script-package");
+        Assert.Equal(confirmed.AssetId, unchangedPackage?.AdaptationScriptAssetId);
+
         var appendResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/sources/{source.Id}/chapters",
             new { content = "# 第三章\n达达尼昂得到接见。", fileName = "chapter-3.md" });
@@ -241,8 +306,8 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var unchangedScript = await client.GetFromJsonAsync<AdaptationScriptView>(
             $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft");
         Assert.NotNull(unchangedScript);
-        Assert.Equal(confirmed.AssetId, unchangedScript.AssetId);
-        Assert.Equal("confirmed", unchangedScript.Status);
+        Assert.Equal(regeneratedDraft.AssetId, unchangedScript.AssetId);
+        Assert.Equal("draft", unchangedScript.Status);
         Assert.True(unchangedScript.HasNewerSourceVersion);
 
         await using var finalScope = factory.Services.CreateAsyncScope();
@@ -279,12 +344,19 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var draft = await generateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
         Assert.NotNull(draft);
         Assert.Equal(3, draft.Episodes.Count);
-        Assert.NotEmpty(draft.OverallSmallHooks);
-        Assert.NotEmpty(draft.OverallBigHooks);
+        Assert.Empty(draft.OverallSmallHooks);
+        Assert.Empty(draft.OverallBigHooks);
         Assert.All(draft.Episodes, episode =>
         {
             Assert.NotEmpty(episode.SmallHooks!);
             Assert.NotEmpty(episode.BigHooks!);
+            var scene = Assert.Single(episode.Scenes);
+            Assert.Equal(episode.TargetSeconds, scene.TargetSeconds);
+            Assert.False(string.IsNullOrWhiteSpace(scene.Rhythm));
+            Assert.False(string.IsNullOrWhiteSpace(scene.VisualContrast));
+            var shotPlan = Assert.IsAssignableFrom<IReadOnlyList<AdaptationShotPlanDraft>>(scene.ShotPlan);
+            Assert.Equal([1, 2], shotPlan.Select(item => item.ShotNumber));
+            Assert.Equal(episode.TargetSeconds, shotPlan.Sum(item => item.DurationSeconds));
         });
         var originalTitles = draft.Episodes.Select(item => item.Title).ToArray();
 
@@ -300,10 +372,35 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         Assert.Equal(4, appended.Episodes[3].ProposalNumber);
         Assert.Empty(appended.ProductionEpisodeIds);
 
+        var regenerateResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/2/regenerate",
+            new { instruction = "把本集改编成以误会冲突为主、集尾反转的短剧，不要照搬原著。" });
+        regenerateResponse.EnsureSuccessStatusCode();
+        var regenerated = await regenerateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
+        Assert.NotNull(regenerated);
+        Assert.Equal(3, regenerated.Version);
+        Assert.Equal(4, regenerated.Episodes.Count);
+        Assert.Equal(originalTitles[0], regenerated.Episodes[0].Title);
+        Assert.NotEqual(originalTitles[1], regenerated.Episodes[1].Title);
+        Assert.Equal(2, regenerated.Episodes[1].ProposalNumber);
+        Assert.Equal(originalTitles[2], regenerated.Episodes[2].Title);
+        Assert.Equal(appended.Episodes[3].Title, regenerated.Episodes[3].Title);
+
+        var restoreResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{draft.AssetId}/versions/current",
+            new { assetId = draft.AssetId });
+        restoreResponse.EnsureSuccessStatusCode();
+        var regenerateHistoricalResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/1/regenerate",
+            new { instruction = "从这个历史方案重新改编第一集。" });
+        regenerateHistoricalResponse.EnsureSuccessStatusCode();
+        var regeneratedFromHistory = await regenerateHistoricalResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
+        Assert.Equal(4, regeneratedFromHistory?.Version);
+
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
-        Assert.Equal(2, await dbContext.Assets.CountAsync(item => item.Type == "adaptation-script-draft"));
+        Assert.Equal(4, await dbContext.Assets.CountAsync(item => item.Type == "adaptation-script-draft"));
     }
 
     private static async Task<Guid> CreateProjectAsync(HttpClient client)
@@ -314,6 +411,20 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         response.EnsureSuccessStatusCode();
         var project = await response.Content.ReadFromJsonAsync<CreatedProjectResponse>();
         return Assert.IsType<CreatedProjectResponse>(project).Id;
+    }
+
+    private static async Task<StoryMaterialAnalysisView> AnalyzeChapterAsync(
+        HttpClient client,
+        Guid projectId,
+        ProjectSourceView source,
+        Guid chapterId)
+    {
+        var response = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/chapters/{chapterId}/analysis",
+            null);
+        response.EnsureSuccessStatusCode();
+        return Assert.IsType<StoryMaterialAnalysisView>(
+            await response.Content.ReadFromJsonAsync<StoryMaterialAnalysisView>());
     }
 
     private sealed record CreatedProjectResponse(Guid Id);

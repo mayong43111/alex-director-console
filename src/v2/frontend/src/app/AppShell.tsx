@@ -90,7 +90,7 @@ function getWorkflow(
         ? { label: "建立改编方案", to: `${projectBase}/story/adaptation` }
         : { label: "进入正式剧本", to: `${projectBase}/script` };
     return {
-      label: "故事结构",
+      label: "原文资料",
       tabs: [
         { label: "原文资料", to: `${projectBase}/story/source` },
         { label: "素材图谱", to: `${projectBase}/story/material` },
@@ -234,21 +234,24 @@ export function AppShell() {
     window.addEventListener("alex:project-updated", updateProject);
     return () => window.removeEventListener("alex:project-updated", updateProject);
   }, [projectId]);
+  const [isAgentOverlay, setIsAgentOverlay] = useState(
+    () => window.matchMedia("(max-width: 1279px)").matches,
+  );
   const [agentOpen, setAgentOpen] = useState(
-    () => localStorage.getItem("alex-director-v2.agentOpen") !== "false",
+    () => window.matchMedia("(min-width: 1280px)").matches,
   );
   const updateAgentOpen = (open: boolean) => {
-    localStorage.setItem("alex-director-v2.agentOpen", String(open));
     setAgentOpen(open);
   };
   useEffect(() => {
-    const mobileQuery = window.matchMedia("(max-width: 767px)");
-    const closeForMobile = (event: MediaQueryListEvent | MediaQueryList) => {
-      if (event.matches) setAgentOpen(false);
+    const mobileQuery = window.matchMedia("(max-width: 1279px)");
+    const syncAgentVisibility = (event: MediaQueryListEvent | MediaQueryList) => {
+      setIsAgentOverlay(event.matches);
+      setAgentOpen(!event.matches);
     };
-    closeForMobile(mobileQuery);
-    mobileQuery.addEventListener("change", closeForMobile);
-    return () => mobileQuery.removeEventListener("change", closeForMobile);
+    syncAgentVisibility(mobileQuery);
+    mobileQuery.addEventListener("change", syncAgentVisibility);
+    return () => mobileQuery.removeEventListener("change", syncAgentVisibility);
   }, []);
   const [isMobile, setIsMobile] = useState(
     () => window.matchMedia("(max-width: 767px)").matches,
@@ -415,7 +418,7 @@ export function AppShell() {
             icon={<Bot size={16} />}
             aria-label="副导演"
             aria-expanded={agentOpen}
-            onClick={() => updateAgentOpen(!agentOpen)}
+            onClick={isAgentOverlay ? () => updateAgentOpen(!agentOpen) : undefined}
           />
         </Tooltip>,
       ]}
@@ -448,7 +451,7 @@ export function AppShell() {
             episode={currentEpisodeData
               ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
               : "未创建"}
-            onClose={() => updateAgentOpen(false)}
+            onClose={isAgentOverlay ? () => updateAgentOpen(false) : undefined}
           />
         )}
         {queueOpen && workflow?.queue && (
@@ -574,7 +577,7 @@ function AgentPanel({
   projectName: string;
   page: string;
   episode: string;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<CopilotMessage[]>([]);
@@ -675,9 +678,11 @@ function AgentPanel({
           >
             <RotateCcw size={16} />
           </button>
-          <button className="icon-button" onClick={onClose} aria-label="关闭副导演">
-            <X size={17} />
-          </button>
+          {onClose && (
+            <button className="icon-button" onClick={onClose} aria-label="关闭副导演">
+              <X size={17} />
+            </button>
+          )}
         </div>
       </header>
       <div className="context-block">

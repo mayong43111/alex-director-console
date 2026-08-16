@@ -1,7 +1,7 @@
 ---
 name: storyboard-design
 title: 分镜设计
-description: 将已批准剧本转换为结构化、可校验、可生产的镜头设计。
+description: 将当前正式剧本转换为结构化、可校验、可生产的镜头设计。
 version: 2.1.0
 allowed-tools: query_storyboard write_storyboard query_asset create_reference_plan
 ---

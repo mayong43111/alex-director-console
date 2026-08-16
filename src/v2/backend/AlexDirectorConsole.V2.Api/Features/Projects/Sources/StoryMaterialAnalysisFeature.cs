@@ -17,13 +17,15 @@ public sealed record StoryCharacterMaterial(
     string Role,
     string Goal,
     IReadOnlyList<string> Traits,
-    IReadOnlyList<int> ChapterNumbers);
+    IReadOnlyList<int> ChapterNumbers,
+    IReadOnlyList<Guid>? ChapterIds = null);
 
 public sealed record StoryLocationMaterial(
     string Name,
     string Function,
     string Atmosphere,
-    IReadOnlyList<int> ChapterNumbers);
+    IReadOnlyList<int> ChapterNumbers,
+    IReadOnlyList<Guid>? ChapterIds = null);
 
 public sealed record StoryPlotBeatMaterial(
     int Order,
@@ -31,13 +33,28 @@ public sealed record StoryPlotBeatMaterial(
     string Summary,
     IReadOnlyList<int> ChapterNumbers,
     IReadOnlyList<string> CharacterNames,
-    string? LocationName);
+    string? LocationName,
+    IReadOnlyList<Guid>? ChapterIds = null);
 
 public sealed record StoryRelationMaterial(
     string Source,
     string Target,
     string Type,
-    string Evidence);
+    string Evidence,
+    IReadOnlyList<int>? ChapterNumbers = null,
+    IReadOnlyList<Guid>? ChapterIds = null);
+
+internal sealed record StoryChapterMaterialAnalysis(
+    Guid ChapterId,
+    int ChapterNumber,
+    string ChapterTitle,
+    string Summary,
+    IReadOnlyList<StoryCharacterMaterial> Characters,
+    IReadOnlyList<StoryLocationMaterial> Locations,
+    IReadOnlyList<StoryPlotBeatMaterial> PlotBeats,
+    IReadOnlyList<StoryRelationMaterial> Relations,
+    string Model,
+    string Runtime);
 
 public sealed record StoryMaterialAnalysisResult(
     string Summary,
@@ -62,6 +79,7 @@ public sealed record StoryMaterialAnalysisView(
     IReadOnlyList<StoryLocationMaterial> Locations,
     IReadOnlyList<StoryPlotBeatMaterial> PlotBeats,
     IReadOnlyList<StoryRelationMaterial> Relations,
+    IReadOnlyList<Guid> AnalyzedChapterIds,
     string Model,
     string Runtime,
     DateTimeOffset UpdatedAtUtc);
@@ -76,7 +94,8 @@ internal sealed record StoryMaterialAnalysisDocument(
     IReadOnlyList<StoryPlotBeatMaterial> PlotBeats,
     IReadOnlyList<StoryRelationMaterial> Relations,
     string Model,
-    string Runtime);
+    string Runtime,
+    IReadOnlyList<StoryChapterMaterialAnalysis>? ChapterAnalyses = null);
 
 public interface IStoryMaterialAnalyzer
 {
@@ -89,7 +108,7 @@ public interface IStoryMaterialAnalyzer
 public sealed record GetStoryMaterialAnalysisQuery(Guid ProjectId, Guid SourceResourceId)
     : IQuery<StoryMaterialAnalysisView?>;
 
-public sealed record AnalyzeStoryMaterialCommand(Guid ProjectId, Guid SourceResourceId)
+public sealed record AnalyzeStoryMaterialCommand(Guid ProjectId, Guid SourceResourceId, Guid? ChapterId = null)
     : ICommand<StoryMaterialAnalysisView?>;
 
 public sealed class GetStoryMaterialAnalysisQueryHandler(V2DbContext dbContext)
@@ -131,44 +150,85 @@ public sealed class AnalyzeStoryMaterialCommandHandler(
             item => item.Id == sourceState.CurrentAssetId,
             cancellationToken);
         var source = ProjectSourceMapper.ToView(sourceAsset);
-        var result = await analyzer.AnalyzeAsync(project.Name, source.Chapters, cancellationToken);
-        var document = new StoryMaterialAnalysisDocument(
-            source.Id,
-            source.AssetId,
-            source.Version,
-            result.Summary,
-            result.Characters.Take(16).ToArray(),
-            result.Locations.Take(12).ToArray(),
-            result.PlotBeats.Take(16).ToArray(),
-            result.Relations.Take(30).ToArray(),
-            result.Model,
-            result.Runtime);
-        var documentJson = JsonSerializer.Serialize(document, ProjectSourceDefaults.JsonOptions);
+        var targetChapters = command.ChapterId is Guid chapterId
+            ? source.Chapters.Where(item => item.Id == chapterId).ToArray()
+            : source.Chapters.ToArray();
+        if (targetChapters.Length == 0) return null;
+
         var previous = await StoryMaterialAnalysisQueries.FindCurrentAssetAsync(
             dbContext,
             command.ProjectId,
             command.SourceResourceId,
             cancellationToken);
+        var currentChapterIds = source.Chapters.Select(item => item.Id).ToHashSet();
+        var targetChapterIds = targetChapters.Select(item => item.Id).ToHashSet();
+        var chapterAnalyses = previous.Asset is null
+            ? []
+            : StoryMaterialAnalysisQueries.ReadDocument(previous.Asset).ChapterAnalyses?
+                .Where(item => currentChapterIds.Contains(item.ChapterId)
+                    && !targetChapterIds.Contains(item.ChapterId))
+                .ToList() ?? [];
+        foreach (var chapter in targetChapters)
+        {
+            var result = await analyzer.AnalyzeAsync(project.Name, [chapter], cancellationToken);
+            chapterAnalyses.Add(new StoryChapterMaterialAnalysis(
+                chapter.Id,
+                chapter.Number,
+                chapter.Title,
+                result.Summary,
+                result.Characters.Take(16).Select(item => item with
+                {
+                    ChapterNumbers = [chapter.Number],
+                    ChapterIds = [chapter.Id]
+                }).ToArray(),
+                result.Locations.Take(12).Select(item => item with
+                {
+                    ChapterNumbers = [chapter.Number],
+                    ChapterIds = [chapter.Id]
+                }).ToArray(),
+                result.PlotBeats.Take(16).Select(item => item with
+                {
+                    ChapterNumbers = [chapter.Number],
+                    ChapterIds = [chapter.Id]
+                }).ToArray(),
+                result.Relations.Take(30).Select(item => item with
+                {
+                    ChapterNumbers = [chapter.Number],
+                    ChapterIds = [chapter.Id]
+                }).ToArray(),
+                result.Model,
+                result.Runtime));
+        }
+
+        var document = StoryMaterialAnalysisQueries.AggregateDocument(source, chapterAnalyses);
+        var documentJson = JsonSerializer.Serialize(document, ProjectSourceDefaults.JsonOptions);
         var now = timeProvider.GetUtcNow();
         var number = previous.Asset?.Number
             ?? (await dbContext.Assets
                 .Where(item => item.ProjectId == command.ProjectId)
                 .Select(item => (int?)item.Number)
                 .MaxAsync(cancellationToken) ?? 0) + 1;
+        var resourceId = previous.Asset?.ResourceId ?? Guid.NewGuid();
+        var version = previous.Asset is null
+            ? 1
+            : await dbContext.Assets
+                .Where(item => item.ProjectId == command.ProjectId && item.ResourceId == resourceId)
+                .MaxAsync(item => item.Version, cancellationToken) + 1;
         var asset = new Asset
         {
             ProjectId = command.ProjectId,
             ProductionEpisodeId = null,
-            ResourceId = previous.Asset?.ResourceId ?? Guid.NewGuid(),
-            Version = (previous.Asset?.Version ?? 0) + 1,
+            ResourceId = resourceId,
+            Version = version,
             Number = number,
             Type = StoryMaterialAnalysisQueries.AssetType,
+            SchemaVersion = 2,
             Name = $"{source.Title} · 素材分析",
             DocumentJson = documentJson,
             ContentType = "application/json",
             SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
             GenerationMetadataJson = JsonSerializer.Serialize(
-                new { result.Model, result.Runtime },
+                new { document.Model, document.Runtime, ChapterIds = targetChapterIds },
                 ProjectSourceDefaults.JsonOptions),
             CreatedAtUtc = now,
             UpdatedAtUtc = now
@@ -256,6 +316,81 @@ internal static class StoryMaterialAnalysisQueries
             ProjectSourceDefaults.JsonOptions)
         ?? throw new InvalidOperationException("素材分析内容无效。");
 
+    public static StoryMaterialAnalysisDocument AggregateDocument(
+        ProjectSourceView source,
+        IReadOnlyList<StoryChapterMaterialAnalysis> chapterAnalyses)
+    {
+        var ordered = chapterAnalyses.OrderBy(item => item.ChapterNumber).ToArray();
+        var characters = ordered
+            .SelectMany(item => item.Characters)
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var first = group.First();
+                return new StoryCharacterMaterial(
+                    first.Name,
+                    first.Role,
+                    first.Goal,
+                    group.SelectMany(item => item.Traits).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                    group.SelectMany(item => item.ChapterNumbers).Distinct().Order().ToArray(),
+                    group.SelectMany(item => item.ChapterIds ?? []).Distinct().ToArray());
+            })
+            .ToArray();
+        var locations = ordered
+            .SelectMany(item => item.Locations)
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var first = group.First();
+                return new StoryLocationMaterial(
+                    first.Name,
+                    first.Function,
+                    first.Atmosphere,
+                    group.SelectMany(item => item.ChapterNumbers).Distinct().Order().ToArray(),
+                    group.SelectMany(item => item.ChapterIds ?? []).Distinct().ToArray());
+            })
+            .ToArray();
+        var plotBeats = ordered
+            .SelectMany(chapter => chapter.PlotBeats
+                .OrderBy(item => item.Order)
+                .Select(item => (Chapter: chapter, Beat: item)))
+            .Select((item, index) => item.Beat with
+            {
+                Order = index + 1,
+                ChapterNumbers = [item.Chapter.ChapterNumber],
+                ChapterIds = [item.Chapter.ChapterId]
+            })
+            .ToArray();
+        var relations = ordered
+            .SelectMany(item => item.Relations)
+            .GroupBy(item => new { item.Source, item.Target, item.Type })
+            .Select(group =>
+            {
+                var first = group.First();
+                return new StoryRelationMaterial(
+                    first.Source,
+                    first.Target,
+                    first.Type,
+                    string.Join("；", group.Select(item => item.Evidence).Distinct()),
+                    group.SelectMany(item => item.ChapterNumbers ?? []).Distinct().Order().ToArray(),
+                    group.SelectMany(item => item.ChapterIds ?? []).Distinct().ToArray());
+            })
+            .ToArray();
+        var latest = ordered.Last();
+        return new StoryMaterialAnalysisDocument(
+            source.Id,
+            source.AssetId,
+            source.Version,
+            string.Join(Environment.NewLine, ordered.Select(item => $"第{item.ChapterNumber}章：{item.Summary}")),
+            characters,
+            locations,
+            plotBeats,
+            relations,
+            latest.Model,
+            latest.Runtime,
+            ordered);
+    }
+
     public static StoryMaterialAnalysisView ToView(
         Asset asset,
         ResourceState state,
@@ -273,6 +408,7 @@ internal static class StoryMaterialAnalysisQueries
             document.Locations,
             document.PlotBeats,
             document.Relations,
+            document.ChapterAnalyses?.Select(item => item.ChapterId).Distinct().ToArray() ?? [],
             document.Model,
             document.Runtime,
             asset.UpdatedAtUtc);
@@ -430,6 +566,34 @@ public static class StoryMaterialAnalysisEndpoints
                     statusCode: StatusCodes.Status502BadGateway);
             }
         });
+        app.MapPost(
+            "/api/v2/projects/{projectId:guid}/sources/{sourceResourceId:guid}/chapters/{chapterId:guid}/analysis",
+            async (
+                Guid projectId,
+                Guid sourceResourceId,
+                Guid chapterId,
+                ICommandDispatcher dispatcher,
+                CancellationToken cancellationToken) =>
+            {
+                try
+                {
+                    var analysis = await dispatcher.SendAsync(
+                        new AnalyzeStoryMaterialCommand(projectId, sourceResourceId, chapterId),
+                        cancellationToken);
+                    return analysis is null ? Results.NotFound() : Results.Ok(analysis);
+                }
+                catch (ProjectGenerationConfigurationException error)
+                {
+                    return Results.Conflict(new { error = error.Message });
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    return Results.Problem(
+                        title: "原文章节素材分析失败",
+                        detail: error.Message,
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+            });
         return app;
     }
 }

@@ -49,4 +49,4 @@ dotnet ef migrations add <MigrationName> `
   --output-dir Data/Migrations
 ```
 
-结构化创作文档以 `Asset.DocumentJson` 保存，使用统一文档信封。`ResourceState` 保存逻辑资源的当前和批准版本指针；运行、校验和 Agent 任务必须固定具体 `AssetId`。
+结构化创作文档以 `Asset.DocumentJson` 保存，使用统一文档信封。`ResourceState` 保存逻辑资源的当前版本指针；运行、校验和 Agent 任务必须固定具体 `AssetId`。

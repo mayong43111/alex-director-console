@@ -3,8 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.Projects.Versions;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -73,32 +75,102 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Post_approve_locks_the_current_settings_version_and_records_the_decision()
+    public async Task Put_marks_current_required_dependents_stale_recursively()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
-        var saveResponse = await client.PutAsJsonAsync(
+        var firstResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("欧式冒险漫画"));
+        firstResponse.EnsureSuccessStatusCode();
+
+        var shot = CreateDependentAsset(projectId, 100, "storyboard-shot", "测试镜头");
+        var frame = CreateDependentAsset(projectId, 101, "storyboard-first-frame", "测试首帧");
+        var unrelated = CreateDependentAsset(projectId, 102, "storyboard-shot", "无关镜头");
+        var historicalShot = CreateDependentAsset(projectId, 103, "storyboard-shot", "历史镜头 v1");
+        var currentShot = CreateDependentAsset(projectId, 103, "storyboard-shot", "当前镜头 v2");
+        currentShot.ResourceId = historicalShot.ResourceId;
+        currentShot.Version = 2;
+        var historicalDownstream = CreateDependentAsset(projectId, 104, "storyboard-first-frame", "依赖历史镜头的当前首帧");
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var firstAssetId = (await dbContext.Projects.SingleAsync(item => item.Id == projectId))
+                .CurrentCreativeSettingsId;
+            Assert.NotNull(firstAssetId);
+            dbContext.Assets.AddRange(shot, frame, unrelated, historicalShot, currentShot, historicalDownstream);
+            dbContext.ResourceStates.AddRange(
+                CreateState(projectId, shot),
+                CreateState(projectId, frame),
+                CreateState(projectId, unrelated),
+                CreateState(projectId, currentShot),
+                CreateState(projectId, historicalDownstream));
+            dbContext.AssetDependencies.AddRange(
+                CreateDependency(projectId, shot.Id, firstAssetId.Value),
+                CreateDependency(projectId, frame.Id, shot.Id),
+                CreateDependency(projectId, historicalShot.Id, firstAssetId.Value),
+                CreateDependency(projectId, historicalDownstream.Id, historicalShot.Id));
+            await dbContext.SaveChangesAsync();
+        }
+
+        var secondResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings",
             ValidSettings("法式彩色冒险漫画"));
-        saveResponse.EnsureSuccessStatusCode();
+        secondResponse.EnsureSuccessStatusCode();
 
-        var approveResponse = await client.PostAsync(
+        await using var verificationScope = factory.Services.CreateAsyncScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var states = await verificationDb.ResourceStates
+            .Where(item => item.ProjectId == projectId)
+            .ToDictionaryAsync(item => item.ResourceId);
+        Assert.True(states[shot.ResourceId].IsStale);
+        Assert.True(states[frame.ResourceId].IsStale);
+        Assert.False(states[unrelated.ResourceId].IsStale);
+        Assert.False(states[currentShot.ResourceId].IsStale);
+        Assert.True(states[historicalDownstream.ResourceId].IsStale);
+        Assert.Contains("v1 更新为 v2", states[frame.ResourceId].StaleReason);
+    }
+
+    [Fact]
+    public async Task Versions_can_restore_historical_settings_as_current()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var firstResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("欧式冒险漫画"));
+        var secondResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("法式彩色冒险漫画"));
+        var first = await firstResponse.Content.ReadFromJsonAsync<ProjectSettingsResponse>();
+        var second = await secondResponse.Content.ReadFromJsonAsync<ProjectSettingsResponse>();
+        Assert.NotNull(first?.AssetId);
+        Assert.NotNull(second?.AssetId);
+
+        var versions = await client.GetFromJsonAsync<List<ResourceVersionView>>(
+            $"/api/v2/projects/{projectId}/assets/{second.AssetId}/versions");
+        Assert.Equal([2, 1], versions?.Select(item => item.Version));
+        Assert.True(versions?[0].IsCurrent);
+
+        var switchResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{second.AssetId}/versions/current",
+            new { assetId = first.AssetId });
+        switchResponse.EnsureSuccessStatusCode();
+
+        var restored = await client.GetFromJsonAsync<ProjectSettingsResponse>(
+            $"/api/v2/projects/{projectId}/settings");
+        Assert.Equal(1, restored?.Version);
+        Assert.Equal("欧式冒险漫画", restored?.VisualStyle);
+
+        var removedApprovalResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/settings/approve",
             null);
-
-        approveResponse.EnsureSuccessStatusCode();
-        var approved = await approveResponse.Content.ReadFromJsonAsync<ProjectSettingsView>();
-        Assert.NotNull(approved);
-        Assert.Equal("approved", approved.ApprovalStatus);
-        Assert.NotNull(approved.AssetId);
+        Assert.Equal(HttpStatusCode.NotFound, removedApprovalResponse.StatusCode);
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        var state = await dbContext.ResourceStates.SingleAsync(
-            item => item.ProjectId == projectId && item.ResourceType == "creative-settings");
-        Assert.Equal(approved.AssetId, state.ApprovedAssetId);
-        Assert.Single(await dbContext.DirectorDecisions.Where(
-            item => item.ProjectId == projectId && item.SubjectType == "creative-settings").ToListAsync());
+        var project = await dbContext.Projects.SingleAsync(item => item.Id == projectId);
+        Assert.Equal(first.AssetId, project.CurrentCreativeSettingsId);
     }
 
     [Fact]
@@ -192,11 +264,19 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
             item.ConsumerAssetId == second.AssetId && item.Role == "uses-settings"));
 
+        var switchCoverResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{second.AssetId}/versions/current",
+            new { assetId = first.AssetId });
+        switchCoverResponse.EnsureSuccessStatusCode();
+        var switchedSettings = await client.GetFromJsonAsync<ProjectSettingsResponse>(
+            $"/api/v2/projects/{projectId}/settings");
+        Assert.Equal(first.AssetId, switchedSettings?.Cover?.AssetId);
+
         var resaveResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings",
             ValidSettings("法式彩色冒险漫画"));
         var resaved = await resaveResponse.Content.ReadFromJsonAsync<ProjectSettingsResponse>();
-        Assert.Equal(second.AssetId, resaved?.Cover?.AssetId);
+        Assert.Equal(first.AssetId, resaved?.Cover?.AssetId);
     }
 
     [Fact]
@@ -252,6 +332,39 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Equal("法式彩色冒险漫画", updated.VisualStyle);
         Assert.Equal("三个火枪手", updated.ProjectName);
     }
+
+    private static Asset CreateDependentAsset(Guid projectId, int number, string type, string name) => new()
+    {
+        ProjectId = projectId,
+        ResourceId = Guid.NewGuid(),
+        Version = 1,
+        Number = number,
+        Type = type,
+        Name = name,
+        ContentType = "application/json",
+        CreatedAtUtc = DateTimeOffset.UtcNow,
+        UpdatedAtUtc = DateTimeOffset.UtcNow
+    };
+
+    private static ResourceState CreateState(Guid projectId, Asset asset) => new()
+    {
+        ProjectId = projectId,
+        ResourceId = asset.ResourceId,
+        ResourceType = asset.Type,
+        CurrentAssetId = asset.Id,
+        LifecycleStatus = "draft",
+        UpdatedAtUtc = DateTimeOffset.UtcNow
+    };
+
+    private static AssetDependency CreateDependency(Guid projectId, Guid consumerAssetId, Guid sourceAssetId) => new()
+    {
+        ProjectId = projectId,
+        ConsumerAssetId = consumerAssetId,
+        SourceAssetId = sourceAssetId,
+        Role = "required-test-input",
+        IsRequired = true,
+        CreatedAtUtc = DateTimeOffset.UtcNow
+    };
 
     private static async Task<Guid> CreateProjectAsync(HttpClient client)
     {
@@ -311,7 +424,8 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         int OutputWidth,
         int OutputHeight,
         string VisualStyle,
-        ProjectCoverResponse? Cover);
+        ProjectCoverResponse? Cover,
+        Guid? AssetId = null);
 
     private sealed record ProjectCoverResponse(
         Guid AssetId,

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -202,6 +203,16 @@ public sealed class SaveVisualAssetCommandHandler(
                 IsRequired = true,
                 CreatedAtUtc = now
             });
+        }
+
+        if (previousAsset is not null)
+        {
+            await AssetStalenessPropagation.MarkRequiredDependentsStaleAsync(
+                dbContext,
+                previousAsset,
+                asset,
+                now,
+                cancellationToken);
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);

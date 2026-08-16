@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
@@ -167,6 +168,8 @@ public sealed class GenerateStoryboardCommandHandler(
             new GetProductionScriptPackageQuery(command.ProjectId, command.ProductionEpisodeId),
             cancellationToken);
         if (scriptPackage is null) return null;
+        if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
+            throw new InvalidOperationException("正式剧本缺少上游拍摄计划，请重新生成并确认改编方案后再生成分镜。");
 
         var settings = await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
             new GetProjectSettingsQuery(command.ProjectId),
@@ -177,6 +180,11 @@ public sealed class GenerateStoryboardCommandHandler(
             cancellationToken);
         var result = await designer.DesignAsync(settings, scriptPackage, visualAssets, cancellationToken);
         var shots = Normalize(result.Shots, scriptPackage);
+        var beatIds = BuildBeatIdQueues(scriptPackage);
+        var previousClaims = await dbContext.ShotBeatClaims
+            .Where(item => item.ScriptPackageAssetId == scriptPackage.AssetId)
+            .ToListAsync(cancellationToken);
+        dbContext.ShotBeatClaims.RemoveRange(previousClaims);
 
         var definitions = await dbContext.ShotDefinitions
             .Where(item => item.ProjectId == command.ProjectId
@@ -258,6 +266,26 @@ public sealed class GenerateStoryboardCommandHandler(
                 UpdatedAtUtc = now
             };
             dbContext.Assets.Add(shotAsset);
+            var ordinalInShot = 0;
+            foreach (var hook in document.Hooks ?? [])
+            {
+                var key = HookKey(hook);
+                if (!beatIds.TryGetValue(key, out var availableBeatIds)
+                    || !availableBeatIds.TryDequeue(out var beatId))
+                {
+                    throw new InvalidOperationException("分镜爆点无法映射到正式剧本 BeatId。");
+                }
+                dbContext.ShotBeatClaims.Add(new ShotBeatClaim
+                {
+                    ProjectId = command.ProjectId,
+                    ProductionEpisodeId = command.ProductionEpisodeId,
+                    ScriptPackageAssetId = scriptPackage.AssetId,
+                    BeatId = beatId,
+                    ShotAssetId = shotAsset.Id,
+                    ShotResourceId = resourceId,
+                    OrdinalInShot = ordinalInShot++
+                });
+            }
 
             state ??= new ResourceState
             {
@@ -337,21 +365,31 @@ public sealed class GenerateStoryboardCommandHandler(
 
         ValidateHooks(proposed, scriptPackage);
 
-        var target = scriptPackage.TargetSeconds ?? scriptPackage.Episode.TargetSeconds;
-        var total = proposed.Sum(item => item.DurationSeconds);
-        var scale = target > 0 && total > 0 ? target / total : 1;
-        var normalized = proposed
+        if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
+            throw new InvalidOperationException("正式剧本缺少上游拍摄计划，请重新生成并确认改编方案后再生成分镜。");
+
+        var plannedShots = scriptPackage.Episode.Scenes
+            .SelectMany(scene => scene.ShotPlan!.Select(shot => (scene.SceneNumber, Shot: shot)))
+            .ToDictionary(item => (item.SceneNumber, item.Shot.ShotNumber), item => item.Shot);
+        var proposedKeys = proposed.Select(item => (item.SceneNumber, item.ShotNumber)).ToHashSet();
+        if (!proposedKeys.SetEquals(plannedShots.Keys))
+            throw new InvalidOperationException("分镜镜号必须与正式剧本中的镜头计划完全一致。");
+
+        return proposed
             .OrderBy(item => item.SceneNumber)
             .ThenBy(item => item.ShotNumber)
-            .Select(item => item with { DurationSeconds = Math.Max(.5, Math.Round(item.DurationSeconds * scale, 1)) })
+            .Select(item =>
+            {
+                var plan = plannedShots[(item.SceneNumber, item.ShotNumber)];
+                return item with
+                {
+                    DurationSeconds = plan.DurationSeconds,
+                    ShotSize = plan.ShotSize,
+                    CameraAngle = plan.CameraAngle,
+                    CameraMovement = plan.CameraMovement
+                };
+            })
             .ToArray();
-        if (target > 0)
-        {
-            var difference = Math.Round(target - normalized.Sum(item => item.DurationSeconds), 1);
-            var last = normalized[^1];
-            normalized[^1] = last with { DurationSeconds = Math.Max(.5, Math.Round(last.DurationSeconds + difference, 1)) };
-        }
-        return normalized;
     }
 
     private static string[] NormalizeNames(IReadOnlyList<string> values) => values
@@ -389,6 +427,41 @@ public sealed class GenerateStoryboardCommandHandler(
         if (expectedCounts.Count != actualCounts.Count
             || expectedCounts.Any(item => !actualCounts.TryGetValue(item.Key, out var count) || count != item.Value))
             throw new InvalidOperationException("每条正式剧本爆点必须原文映射到且仅映射到一个具体分镜，不能遗漏或新增。");
+    }
+
+    private static Dictionary<string, Queue<Guid>> BuildBeatIdQueues(
+        ProductionScriptPackageView scriptPackage)
+    {
+        var hooks = (scriptPackage.Episode.SmallHooks ?? [])
+            .Select(item => new StoryboardHookDraft("small", item.Trim()))
+            .Concat((scriptPackage.Episode.BigHooks ?? [])
+                .Select(item => new StoryboardHookDraft("big", item.Trim())))
+            .Where(item => item.Description.Length > 0)
+            .ToArray();
+        return hooks
+            .Select((hook, index) => new
+            {
+                Key = HookKey(hook),
+                BeatId = CreateBeatId(scriptPackage.AssetId, hook, index)
+            })
+            .GroupBy(item => item.Key, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => new Queue<Guid>(group.Select(item => item.BeatId)),
+                StringComparer.Ordinal);
+    }
+
+    private static string HookKey(StoryboardHookDraft hook) =>
+        $"{hook.Type}\n{hook.Description}";
+
+    private static Guid CreateBeatId(
+        Guid scriptPackageAssetId,
+        StoryboardHookDraft hook,
+        int ordinal)
+    {
+        var bytes = Encoding.UTF8.GetBytes(
+            $"{scriptPackageAssetId:N}\n{hook.Type}\n{ordinal}\n{hook.Description}");
+        return new Guid(SHA256.HashData(bytes).AsSpan(0, 16));
     }
 
     private static IEnumerable<VisualAssetView> MatchAssets(
@@ -622,10 +695,31 @@ internal static class StoryboardQueries
             .Where(item => runIds.Contains(item.Id))
             .ToListAsync(cancellationToken);
         var run = runs.OrderByDescending(item => item.CreatedAtUtc).First();
-        return ShotProductionModes.ToView(
+        var view = ShotProductionModes.ToView(
             run,
             items.Where(item => item.RunId == run.Id).ToArray(),
             definition.DurationSeconds);
+        if (view.OutputAssetId is not Guid outputAssetId) return view;
+
+        var output = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == outputAssetId
+                && item.ProjectId == definition.ProjectId
+                && item.Type == ShotFrameService.AssetType,
+            cancellationToken);
+        if (output is null) return view;
+        var currentFrameId = await dbContext.ResourceStates.AsNoTracking()
+            .Where(item => item.ProjectId == definition.ProjectId
+                && item.ResourceId == output.ResourceId
+                && item.ResourceType == ShotFrameService.AssetType)
+            .Select(item => (Guid?)item.CurrentAssetId)
+            .SingleOrDefaultAsync(cancellationToken);
+        return currentFrameId is null || currentFrameId == outputAssetId
+            ? view
+            : view with
+            {
+                OutputAssetId = currentFrameId,
+                OutputUrl = $"/api/v2/projects/{definition.ProjectId}/storyboard/frames/{currentFrameId}/content"
+            };
     }
 }
 
@@ -668,11 +762,11 @@ public sealed class MafStoryboardDesigner(
                     ChatOptions = new ChatOptions
                     {
                         Instructions = """
-                            你是动画导演和分镜师。将已批准的正式剧本转换为可生产的结构化镜头。
+                            你是动画导演和分镜师。将当前正式剧本中的上游拍摄计划细化为可生产的结构化镜头。
                             不得改写事件顺序、人物身份和对白含义。每个镜头必须属于输入中的真实场次，sceneNumber 必须原样使用；shotNumber 在每场从 1 连续编号。
-                            根据项目画幅、摄影语言、视觉资产和单集目标时长设计景别、机位、运镜、构图、画面、动作、对白与声音。
-                            镜头时长总和应等于目标时长。characters 和 props 只能使用输入剧本或资产中的名称。
-                            episode.smallHooks 和 episode.bigHooks 是已批准的爆点。必须根据事件内容把每条爆点落实到最能体现它的一个具体镜头：在该镜头 hooks 中写入 type（small 或 big）和 description。description 必须逐字复制输入爆点，不得改写、遗漏、新增或重复；允许一个镜头承载多条爆点，无爆点镜头返回空数组。
+                            episode.scenes[].shotPlan 是正式剧本已确定的摄影骨架。必须逐镜保留其中的 sceneNumber、shotNumber、durationSeconds、shotSize、cameraAngle 和 cameraMovement，不得新增、删除、合并、拆分或重新定时；只负责细化构图、画面、动作、对白与声音。
+                            characters 和 props 只能使用输入剧本或资产中的名称。
+                            episode.smallHooks 和 episode.bigHooks 是当前剧本中的爆点。必须根据事件内容把每条爆点落实到最能体现它的一个具体镜头：在该镜头 hooks 中写入 type（small 或 big）和 description。description 必须逐字复制输入爆点，不得改写、遗漏、新增或重复；允许一个镜头承载多条爆点，无爆点镜头返回空数组。
                             只返回 JSON，不要 Markdown。结构：
                             {"shots":[{"sceneNumber":1,"shotNumber":1,"durationSeconds":3.5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","composition":"...","visualDescription":"...","action":"...","dialogue":"...","sound":"...","characters":["..."],"props":["..."],"hooks":[{"type":"small","description":"逐字复制的既有爆点"}]}]}
                             """,
@@ -749,10 +843,17 @@ public static class StoryboardEndpoints
             ICommandDispatcher dispatcher,
             CancellationToken cancellationToken) =>
         {
-            var storyboard = await dispatcher.SendAsync(
-                new GenerateStoryboardCommand(projectId, productionEpisodeId),
-                cancellationToken);
-            return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
+            try
+            {
+                var storyboard = await dispatcher.SendAsync(
+                    new GenerateStoryboardCommand(projectId, productionEpisodeId),
+                    cancellationToken);
+                return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.Conflict(new { error = error.Message });
+            }
         });
         app.MapPut($"{route}/shots/{{shotResourceId:guid}}/assets", async (
             Guid projectId,
@@ -931,17 +1032,6 @@ public sealed class StartShotProductionCommandHandler(
             return ShotProductionModes.ToView(activeRun, activeItems.Select(item => item.Item).ToArray(), definition.DurationSeconds);
         }
 
-        var preview = await frameService.PreviewFirstFrameAsync(
-            command.ProjectId,
-            command.ProductionEpisodeId,
-            command.ShotResourceId,
-            cancellationToken)
-            ?? throw new InvalidOperationException("镜头不存在。");
-        if (!string.Equals(command.ConfirmedPrompt, preview.Prompt, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
-        }
-
         var project = await dbContext.Projects.AsNoTracking().SingleAsync(
             item => item.Id == command.ProjectId,
             cancellationToken);
@@ -950,10 +1040,41 @@ public sealed class StartShotProductionCommandHandler(
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
             item => item.Id == definition.ShotAssetId,
             cancellationToken);
-        var productionInputs = await ShotProductionPreflight.ResolveAsync(
+        var preflight = await ShotProductionPreflight.EvaluateAsync(
             dbContext,
             definition,
             cancellationToken);
+        if (!preflight.Passed)
+        {
+            CreateValidationRun(
+                command,
+                shotAsset.Id,
+                preflight,
+                timeProvider.GetUtcNow());
+            await dbContext.SaveChangesAsync(cancellationToken);
+            throw new InvalidOperationException(preflight.FailureMessage);
+        }
+
+        var preview = await frameService.PreviewFirstFrameAsync(
+            command.ProjectId,
+            command.ProductionEpisodeId,
+            command.ShotResourceId,
+            creativeSettingsAssetId,
+            preflight.Inputs.ReferenceImageAssetIds,
+            preflight.Inputs.PropAssetIds,
+            cancellationToken)
+            ?? throw new InvalidOperationException("镜头不存在。");
+        if (!string.Equals(command.ConfirmedPrompt, preview.Prompt, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
+        }
+        var validationRun = CreateValidationRun(
+            command,
+            shotAsset.Id,
+            preflight,
+            timeProvider.GetUtcNow());
+
+        var productionInputs = preflight.Inputs;
         var inputAssetIds = productionInputs.ReferenceImageAssetIds
             .Concat(productionInputs.PropAssetIds)
             .Append(shotAsset.Id)
@@ -969,6 +1090,7 @@ public sealed class StartShotProductionCommandHandler(
             ProductionEpisodeId = command.ProductionEpisodeId,
             ScriptPackageAssetId = definition.ScriptPackageAssetId,
             CreativeSettingsAssetId = creativeSettingsAssetId,
+            PreflightValidationRunId = validationRun.Id,
             Status = "queued",
             CurrentStage = stages[0],
             SpecJson = JsonSerializer.Serialize(new
@@ -1021,15 +1143,79 @@ public sealed class StartShotProductionCommandHandler(
                 ? null
                 : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{outputAssetId}/content");
     }
+
+    private ValidationRun CreateValidationRun(
+        StartShotProductionCommand command,
+        Guid shotAssetId,
+        ShotProductionPreflightReport preflight,
+        DateTimeOffset now)
+    {
+        var validationRun = new ValidationRun
+        {
+            ProjectId = command.ProjectId,
+            ProductionEpisodeId = command.ProductionEpisodeId,
+            SubjectAssetId = shotAssetId,
+            ValidatorSet = "shot-production-preflight",
+            ValidatorVersion = "1.0",
+            Status = "completed",
+            StartedAtUtc = now,
+            CompletedAtUtc = now
+        };
+        dbContext.ValidationRuns.Add(validationRun);
+        foreach (var gate in preflight.Gates)
+        {
+            dbContext.ValidationResults.Add(new ValidationResult
+            {
+                ValidationRunId = validationRun.Id,
+                GateId = gate.GateId,
+                Severity = gate.Status == "pass" ? "info" : "blocker",
+                Status = gate.Status,
+                Message = gate.Message,
+                SubjectType = StoryboardDefaults.AssetType,
+                SubjectId = command.ShotResourceId,
+                ReferencesJson = JsonSerializer.Serialize(gate.ReferenceAssetIds, StoryboardDefaults.JsonOptions),
+                SuggestedAction = gate.SuggestedAction
+            });
+        }
+        return validationRun;
+    }
 }
 
 internal sealed record ShotProductionInputs(
     IReadOnlyList<Guid> ReferenceImageAssetIds,
     IReadOnlyList<Guid> PropAssetIds);
 
+internal sealed record ShotProductionPreflightGate(
+    string GateId,
+    string Status,
+    string Message,
+    string? SuggestedAction,
+    IReadOnlyList<Guid> ReferenceAssetIds);
+
+internal sealed record ShotProductionPreflightReport(
+    ShotProductionInputs Inputs,
+    IReadOnlyList<ShotProductionPreflightGate> Gates)
+{
+    public bool Passed => Gates.All(item => item.Status == "pass");
+    public string FailureMessage => Gates.First(item => item.Status != "pass").Message;
+}
+
 internal static class ShotProductionPreflight
 {
     public static async Task<ShotProductionInputs> ResolveAsync(
+        V2DbContext dbContext,
+        ShotDefinition definition,
+        CancellationToken cancellationToken)
+    {
+        var report = await EvaluateAsync(dbContext, definition, cancellationToken);
+        if (!report.Passed)
+        {
+            throw new InvalidOperationException(report.FailureMessage);
+        }
+        return report.Inputs;
+    }
+
+    public static async Task<ShotProductionPreflightReport> EvaluateAsync(
         V2DbContext dbContext,
         ShotDefinition definition,
         CancellationToken cancellationToken)
@@ -1054,7 +1240,26 @@ internal static class ShotProductionPreflight
         var scenes = subjects.Where(item => item.Document.Kind == "scene").ToArray();
         if (scenes.Length == 0)
         {
-            throw new InvalidOperationException("开始制作前必须为镜头关联场景。");
+            return new(
+                new([], subjects
+                    .Where(item => item.Document.Kind == "prop")
+                    .Select(item => item.Asset.Id)
+                    .Distinct()
+                    .ToArray()),
+                [
+                    new(
+                        "shot.scene-linked",
+                        "fail",
+                        "开始制作前必须为镜头关联场景。",
+                        "请在镜头详情中关联至少一个场景资产。",
+                        linkedAssetIds),
+                    new(
+                        "shot.references-complete",
+                        "fail",
+                        "场景关联未通过，无法完成参考图校验。",
+                        "请先修复场景关联后重新预检。",
+                        [])
+                ]);
         }
 
         var requiredSubjects = characters.Concat(scenes).ToArray();
@@ -1090,16 +1295,60 @@ internal static class ShotProductionPreflight
                 details.Add($"人物缺少参考图：{string.Join("、", missingCharacters)}");
             if (missingScenes.Length > 0)
                 details.Add($"场景缺少参考图：{string.Join("、", missingScenes)}");
-            throw new InvalidOperationException(string.Join("；", details));
+            var message = string.Join("；", details);
+            return new(
+                new(
+                    references.Select(item => item.ImageAssetId).Distinct().ToArray(),
+                    subjects
+                        .Where(item => item.Document.Kind == "prop")
+                        .Select(item => item.Asset.Id)
+                        .Distinct()
+                        .ToArray()),
+                [
+                    new(
+                        "shot.scene-linked",
+                        "pass",
+                        "镜头已关联场景资产。",
+                        null,
+                        scenes.Select(item => item.Asset.Id).ToArray()),
+                    new(
+                        "shot.references-complete",
+                        "fail",
+                        message,
+                        "请为缺失的人物或场景生成参考图。",
+                        requiredSubjects.Select(item => item.Asset.Id)
+                            .Concat(references.Select(item => item.ImageAssetId))
+                            .Distinct()
+                            .ToArray())
+                ]);
         }
 
-        return new ShotProductionInputs(
-            references.Select(item => item.ImageAssetId).Distinct().ToArray(),
-            subjects
-                .Where(item => item.Document.Kind == "prop")
-                .Select(item => item.Asset.Id)
-                .Distinct()
-                .ToArray());
+        var referenceImageAssetIds = references.Select(item => item.ImageAssetId).Distinct().ToArray();
+        return new(
+            new(
+                referenceImageAssetIds,
+                subjects
+                    .Where(item => item.Document.Kind == "prop")
+                    .Select(item => item.Asset.Id)
+                    .Distinct()
+                    .ToArray()),
+            [
+                new(
+                    "shot.scene-linked",
+                    "pass",
+                    "镜头已关联场景资产。",
+                    null,
+                    scenes.Select(item => item.Asset.Id).ToArray()),
+                new(
+                    "shot.references-complete",
+                    "pass",
+                    "人物和场景参考图齐全。",
+                    null,
+                    requiredSubjects.Select(item => item.Asset.Id)
+                        .Concat(referenceImageAssetIds)
+                        .Distinct()
+                        .ToArray())
+            ]);
     }
 }
 

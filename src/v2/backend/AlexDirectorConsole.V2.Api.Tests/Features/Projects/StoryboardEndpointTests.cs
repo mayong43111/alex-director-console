@@ -12,6 +12,7 @@ using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Features.Projects;
 
@@ -53,6 +54,10 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(first.TargetSeconds, first.TotalDurationSeconds);
         Assert.All(first.Shots, shot => Assert.Equal(1, shot.Version));
         Assert.Equal([1, 2], first.Shots.Select(item => item.ShotNumber));
+        Assert.Equal([40d, 60d], first.Shots.Select(item => item.DurationSeconds));
+        Assert.Equal(["全景", "中景"], first.Shots.Select(item => item.ShotSize));
+        Assert.Equal(["平视", "平视"], first.Shots.Select(item => item.CameraAngle));
+        Assert.Equal(["固定", "缓慢推进"], first.Shots.Select(item => item.CameraMovement));
         var hooks = first.Shots.SelectMany(item => item.Hooks).ToArray();
         Assert.Equal(["small", "big"], hooks.Select(item => item.Type));
         Assert.Equal(["推荐信不翼而飞", "幕后势力首次现身"], hooks.Select(item => item.Description));
@@ -63,6 +68,16 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.NotNull(getResponse);
         Assert.Equal(first.ScriptPackageAssetId, getResponse.ScriptPackageAssetId);
         Assert.False(getResponse.IsStale);
+        Guid[] firstBeatIds;
+        await using (var firstScope = factory.Services.CreateAsyncScope())
+        {
+            var firstDb = firstScope.ServiceProvider.GetRequiredService<V2DbContext>();
+            firstBeatIds = await firstDb.ShotBeatClaims
+                .OrderBy(item => item.BeatId)
+                .Select(item => item.BeatId)
+                .ToArrayAsync();
+        }
+        Assert.Equal(2, firstBeatIds.Length);
 
         var secondResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/generate",
@@ -74,12 +89,32 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(resourceIds, second.Shots.Select(item => item.ResourceId));
         Assert.All(second.Shots, shot => Assert.Equal(2, shot.Version));
 
+        var crossResourceResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{second.Shots[0].AssetId}/versions/current",
+            new { assetId = first.Shots[1].AssetId });
+        Assert.Equal(HttpStatusCode.NotFound, crossResourceResponse.StatusCode);
+
+        var switchResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/assets/{second.Shots[0].AssetId}/versions/current",
+            new { assetId = first.Shots[0].AssetId });
+        switchResponse.EnsureSuccessStatusCode();
+        var restored = await client.GetFromJsonAsync<StoryboardView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
+        Assert.Equal(1, restored?.Shots.Single(item => item.ResourceId == first.Shots[0].ResourceId).Version);
+        Assert.Equal(2, restored?.Shots.Single(item => item.ResourceId == first.Shots[1].ResourceId).Version);
+
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         Assert.Equal(2, await dbContext.ShotDefinitions.CountAsync());
         Assert.Equal(4, await dbContext.Assets.CountAsync(item => item.Type == "storyboard-shot"));
         Assert.Equal(4, await dbContext.AssetDependencies.CountAsync(item => item.Role == "derived-from-script"));
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item => item.Role.StartsWith("uses-")));
+        var claims = await dbContext.ShotBeatClaims.OrderBy(item => item.BeatId).ToListAsync();
+        Assert.Equal(firstBeatIds, claims.Select(item => item.BeatId));
+        Assert.Equal(2, claims.Count);
+        var currentShotAssetIds = await dbContext.ShotDefinitions.Select(item => item.ShotAssetId).ToArrayAsync();
+        Assert.Contains(first.Shots[0].AssetId, currentShotAssetIds);
+        Assert.All(claims, claim => Assert.Contains(claim.ShotAssetId, currentShotAssetIds));
         Assert.Equal(1, await dbContext.ProductionEpisodes.CountAsync());
     }
 
@@ -159,6 +194,31 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             var secondDefinition = await dbContext.ShotDefinitions.SingleAsync(
                 item => item.ShotResourceId == secondShot.ResourceId);
             secondDefinition.DurationSeconds = 15;
+            await dbContext.SaveChangesAsync();
+        }
+
+        var rejectedResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/start",
+            new { confirmedPrompt = "尚未通过预检" });
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
+        await using (var failedValidationScope = factory.Services.CreateAsyncScope())
+        {
+            var failedValidationDb = failedValidationScope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var failedRun = Assert.Single(await failedValidationDb.ValidationRuns.ToListAsync());
+            Assert.Equal("completed", failedRun.Status);
+            var failedResults = await failedValidationDb.ValidationResults
+                .Where(item => item.ValidationRunId == failedRun.Id)
+                .ToListAsync();
+            Assert.Equal(2, failedResults.Count);
+            Assert.Contains(failedResults, item => item.GateId == "shot.references-complete"
+                && item.Status == "fail"
+                && item.Severity == "blocker");
+        }
+
+        await using (var referenceScope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = referenceScope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var now = DateTimeOffset.UtcNow;
             var nextAssetNumber = await dbContext.Assets.MaxAsync(item => item.Number);
             foreach (var linkedAsset in updated.Shots.SelectMany(shot => shot.LinkedAssets)
                 .Where(item => item.Kind is "character" or "scene")
@@ -187,17 +247,32 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                     SubjectType = linkedAsset.Kind,
                     Purpose = "generation-reference",
                     Source = "test",
-                    ReviewStatus = "approved",
+                    ReviewStatus = "active",
+                    CreatedAtUtc = now
+                });
+                dbContext.AssetDependencies.Add(new AssetDependency
+                {
+                    ProjectId = projectId,
+                    ConsumerAssetId = image.Id,
+                    SourceAssetId = linkedAsset.AssetId,
+                    Role = "reference-for",
+                    IsRequired = true,
                     CreatedAtUtc = now
                 });
             }
             await dbContext.SaveChangesAsync();
         }
 
-        var rejectedResponse = await client.PostAsync(
+        var stalePromptResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/start",
-            null);
-        Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
+            new { confirmedPrompt = "过期的确认提示词" });
+        Assert.Equal(HttpStatusCode.BadRequest, stalePromptResponse.StatusCode);
+        await using (var stalePromptScope = factory.Services.CreateAsyncScope())
+        {
+            var stalePromptDb = stalePromptScope.ServiceProvider.GetRequiredService<V2DbContext>();
+            Assert.Equal(1, await stalePromptDb.ValidationRuns.CountAsync());
+            Assert.Equal(0, await stalePromptDb.ProductionRuns.CountAsync());
+        }
 
         var longPreviewResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/preview",
@@ -267,6 +342,18 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(2, await verificationDb.ShotAssetLinks.CountAsync());
         Assert.Equal(2, await verificationDb.ProductionRuns.CountAsync());
         Assert.Equal(3, await verificationDb.ProductionRunItems.CountAsync());
+        Assert.Equal(3, await verificationDb.ValidationRuns.CountAsync());
+        Assert.Equal(6, await verificationDb.ValidationResults.CountAsync());
+        var productionRuns = await verificationDb.ProductionRuns.ToListAsync();
+        Assert.All(productionRuns, run => Assert.NotNull(run.PreflightValidationRunId));
+        foreach (var productionRun in productionRuns)
+        {
+            var validationResults = await verificationDb.ValidationResults
+                .Where(item => item.ValidationRunId == productionRun.PreflightValidationRunId)
+                .ToListAsync();
+            Assert.Equal(2, validationResults.Count);
+            Assert.All(validationResults, result => Assert.Equal("pass", result.Status));
+        }
         Assert.Equal(2, await verificationDb.Assets.CountAsync(item => item.Type == ShotFrameService.AssetType));
         Assert.All(
             await verificationDb.ProductionRunItems.Where(item => item.Stage == "first-frame").ToListAsync(),
@@ -280,6 +367,116 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.All(
             directMetadata.RootElement.GetProperty("references").EnumerateArray(),
             reference => Assert.True(reference.GetProperty("version").GetInt32() > 0));
+
+        var sourceRun = productionRuns.Single(item => item.Id == directProduction.RunId);
+        var sourceItem = await verificationDb.ProductionRunItems.SingleAsync(
+            item => item.RunId == directProduction.RunId);
+        var inputAssetIds = JsonSerializer.Deserialize<Guid[]>(sourceItem.InputAssetIdsJson)!;
+        var referenceImage = await verificationDb.Assets.FirstAsync(item =>
+            inputAssetIds.Contains(item.Id) && item.Type == VisualReferenceService.AssetType);
+        var referenceDependency = await verificationDb.AssetDependencies.SingleAsync(item =>
+            item.ConsumerAssetId == referenceImage.Id && item.Role == "reference-for");
+        var referencedSubject = await verificationDb.Assets.SingleAsync(
+            item => item.Id == referenceDependency.SourceAssetId);
+        var subjectState = await verificationDb.ResourceStates.SingleAsync(item =>
+            item.ProjectId == projectId && item.ResourceId == referencedSubject.ResourceId);
+        var updatedDocument = JsonNode.Parse(referencedSubject.DocumentJson!)!.AsObject();
+        updatedDocument["name"] = $"{referencedSubject.Name}新版";
+        var referencedSubjectV2 = new Asset
+        {
+            ProjectId = referencedSubject.ProjectId,
+            ResourceId = referencedSubject.ResourceId,
+            Version = referencedSubject.Version + 1,
+            Number = referencedSubject.Number,
+            Type = referencedSubject.Type,
+            Name = $"{referencedSubject.Name}新版",
+            DocumentJson = updatedDocument.ToJsonString(),
+            ContentType = referencedSubject.ContentType,
+            SizeBytes = referencedSubject.SizeBytes,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        verificationDb.Assets.Add(referencedSubjectV2);
+        subjectState.CurrentAssetId = referencedSubjectV2.Id;
+
+        var (snapshotRun, snapshotItem) = CloneFirstFrameRun(sourceRun, sourceItem);
+        verificationDb.ProductionRuns.Add(snapshotRun);
+        verificationDb.ProductionRunItems.Add(snapshotItem);
+        await verificationDb.SaveChangesAsync();
+        var snapshotService = new ShotFrameService(
+            verificationDb,
+            verificationScope.ServiceProvider.GetRequiredService<IShotFrameGenerator>(),
+            TimeProvider.System);
+        await snapshotService.GenerateFirstFrameAsync(
+            snapshotRun.Id,
+            directPreview.Prompt,
+            CancellationToken.None);
+        Assert.Equal("completed", snapshotItem.Status);
+        Assert.NotNull(snapshotItem.OutputAssetId);
+
+        var (cancelledRun, cancelledItem) = CloneFirstFrameRun(sourceRun, sourceItem);
+        verificationDb.ProductionRuns.Add(cancelledRun);
+        verificationDb.ProductionRunItems.Add(cancelledItem);
+        await verificationDb.SaveChangesAsync();
+        var cancellingService = new ShotFrameService(
+            verificationDb,
+            new CancellingShotFrameGenerator(),
+            TimeProvider.System);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancellingService.GenerateFirstFrameAsync(
+            cancelledRun.Id,
+            directPreview.Prompt,
+            CancellationToken.None));
+        Assert.Equal("running", cancelledRun.Status);
+        Assert.Equal("running", cancelledItem.Status);
+        Assert.Null(cancelledRun.LastError);
+        Assert.Null(cancelledRun.CompletedAtUtc);
+        Assert.Null(cancelledItem.ErrorCode);
+        Assert.Null(cancelledItem.ErrorDetail);
+        Assert.Null(cancelledItem.CompletedAtUtc);
+    }
+
+    private static (ProductionRun Run, ProductionRunItem Item) CloneFirstFrameRun(
+        ProductionRun sourceRun,
+        ProductionRunItem sourceItem)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var run = new ProductionRun
+        {
+            ProjectId = sourceRun.ProjectId,
+            ProductionEpisodeId = sourceRun.ProductionEpisodeId,
+            ScriptPackageAssetId = sourceRun.ScriptPackageAssetId,
+            CreativeSettingsAssetId = sourceRun.CreativeSettingsAssetId,
+            Status = "queued",
+            CurrentStage = "first-frame",
+            SpecJson = sourceRun.SpecJson,
+            OriginalInstruction = "测试固定输入快照重放。",
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        var item = new ProductionRunItem
+        {
+            RunId = run.Id,
+            ProjectId = sourceItem.ProjectId,
+            ProductionEpisodeId = sourceItem.ProductionEpisodeId,
+            ShotResourceId = sourceItem.ShotResourceId,
+            ShotAssetId = sourceItem.ShotAssetId,
+            ShotName = sourceItem.ShotName,
+            Stage = "first-frame",
+            Status = "queued",
+            InputAssetIdsJson = sourceItem.InputAssetIdsJson,
+            CreatedAtUtc = now
+        };
+        return (run, item);
+    }
+
+    private sealed class CancellingShotFrameGenerator : IShotFrameGenerator
+    {
+        public Task<GeneratedShotFrame> GenerateAsync(
+            string prompt,
+            string size,
+            IReadOnlyList<ShotFrameReference> references,
+            CancellationToken cancellationToken) =>
+            Task.FromException<GeneratedShotFrame>(new OperationCanceledException(cancellationToken));
     }
 
     private static async Task<(Guid ProjectId, Guid ProductionEpisodeId)> CreateFormalScriptAsync(HttpClient client)

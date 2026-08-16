@@ -27,11 +27,16 @@ internal static class ProjectCoverQueries
         Guid projectId,
         CancellationToken cancellationToken)
     {
-        var asset = await dbContext.Assets
-            .AsNoTracking()
-            .Where(item => item.ProjectId == projectId && item.Type == AssetType)
-            .OrderByDescending(item => item.Version)
-            .FirstOrDefaultAsync(cancellationToken);
+        var asset = await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join current in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals current.Id
+            where state.ProjectId == projectId && state.ResourceType == AssetType
+            select current)
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? await dbContext.Assets.AsNoTracking()
+                .Where(item => item.ProjectId == projectId && item.Type == AssetType)
+                .OrderByDescending(item => item.Version)
+                .FirstOrDefaultAsync(cancellationToken);
         return asset is null ? null : ToView(asset);
     }
 
@@ -338,6 +343,21 @@ public sealed class ProjectCoverService(
             UpdatedAtUtc = now
         };
         dbContext.Assets.Add(asset);
+        var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == resourceId
+                && item.ResourceType == ProjectCoverQueries.AssetType,
+            cancellationToken);
+        state ??= new ResourceState
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            ResourceType = ProjectCoverQueries.AssetType
+        };
+        if (state.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(state);
+        state.CurrentAssetId = asset.Id;
+        state.LifecycleStatus = "active";
+        state.UpdatedAtUtc = now;
         dbContext.AssetDependencies.Add(new AssetDependency
         {
             ProjectId = projectId,

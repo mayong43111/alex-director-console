@@ -172,7 +172,26 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                             ["达达尼昂"],
                             ["推荐信", "椅子"],
                             "建立目标与行动空间",
-                            "对白保持简洁，突出外乡人的直率。")],
+                            "对白保持简洁，突出外乡人的直率。",
+                            projectSettings.TargetEpisodeSeconds,
+                            "快速建立空间后，以稳定节奏推进人物入场。",
+                            "开场全景的陌生感对比结尾中景的人物决心。",
+                            [
+                                new AdaptationShotPlanDraft(
+                                    1,
+                                    projectSettings.TargetEpisodeSeconds * .4,
+                                    "全景",
+                                    "平视",
+                                    "固定",
+                                    "建立巴黎街道与人物位置"),
+                                new AdaptationShotPlanDraft(
+                                    2,
+                                    projectSettings.TargetEpisodeSeconds * .6,
+                                    "中景",
+                                    "平视",
+                                    "缓慢推进",
+                                    "推进达达尼昂进入行动空间")
+                            ])],
                         ["推荐信不翼而飞"],
                         ["幕后势力首次现身"])).ToArray(),
                     "gpt-5.4-test",

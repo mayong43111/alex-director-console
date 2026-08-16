@@ -27,6 +27,7 @@ export interface StoryCharacterMaterial {
   goal: string
   traits: string[]
   chapterNumbers: number[]
+  chapterIds: string[]
 }
 
 export interface StoryLocationMaterial {
@@ -34,6 +35,7 @@ export interface StoryLocationMaterial {
   function: string
   atmosphere: string
   chapterNumbers: number[]
+  chapterIds: string[]
 }
 
 export interface StoryPlotBeatMaterial {
@@ -43,6 +45,7 @@ export interface StoryPlotBeatMaterial {
   chapterNumbers: number[]
   characterNames: string[]
   locationName: string | null
+  chapterIds: string[]
 }
 
 export interface StoryRelationMaterial {
@@ -50,6 +53,8 @@ export interface StoryRelationMaterial {
   target: string
   type: string
   evidence: string
+  chapterNumbers: number[]
+  chapterIds: string[]
 }
 
 export interface StoryMaterialAnalysis {
@@ -66,9 +71,19 @@ export interface StoryMaterialAnalysis {
   locations: StoryLocationMaterial[]
   plotBeats: StoryPlotBeatMaterial[]
   relations: StoryRelationMaterial[]
+  analyzedChapterIds?: string[]
   model: string
   runtime: string
   updatedAtUtc: string
+}
+
+export interface AdaptationShotPlanDraft {
+  shotNumber: number
+  durationSeconds: number
+  shotSize: string
+  cameraAngle: string
+  cameraMovement: string
+  purpose: string
 }
 
 export interface AdaptationSceneDraft {
@@ -79,6 +94,10 @@ export interface AdaptationSceneDraft {
   props: string[]
   storyFunction: string
   dialogueNotes: string
+  targetSeconds?: number | null
+  rhythm?: string | null
+  visualContrast?: string | null
+  shotPlan?: AdaptationShotPlanDraft[] | null
 }
 
 export interface AdaptationEpisodeDraft {
@@ -198,8 +217,9 @@ export async function getStoryMaterialAnalysis(
 export async function analyzeStoryMaterial(
   projectId: string,
   sourceId: string,
+  chapterId: string,
 ): Promise<StoryMaterialAnalysis> {
-  const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/analysis`, {
+  const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/chapters/${chapterId}/analysis`, {
     method: 'POST',
   })
   if (!response.ok) throw await readError(response, '素材分析失败。')
@@ -242,6 +262,24 @@ export async function appendAdaptationEpisode(
     body: JSON.stringify(input),
   })
   if (!response.ok) throw await readError(response, '添加剧集失败。')
+  return response.json() as Promise<AdaptationScript>
+}
+
+export async function regenerateAdaptationEpisode(
+  projectId: string,
+  sourceId: string,
+  episodeNumber: number,
+  input: { instruction: string },
+): Promise<AdaptationScript> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}/regenerate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  )
+  if (!response.ok) throw await readError(response, '重新生成剧集失败。')
   return response.json() as Promise<AdaptationScript>
 }
 

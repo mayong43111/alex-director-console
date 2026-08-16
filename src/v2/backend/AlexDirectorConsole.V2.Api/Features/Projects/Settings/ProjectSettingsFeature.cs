@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
@@ -28,7 +29,6 @@ public sealed record ProjectSettingsView(
     string SoundStrategy,
     string ImagePromptPrefix,
     Guid? AssetId,
-    string ApprovalStatus,
     int ImpactedAssetCount,
     ProjectCoverView? Cover,
     DateTimeOffset? UpdatedAtUtc);
@@ -74,11 +74,6 @@ public sealed class GetProjectSettingsQueryHandler(V2DbContext dbContext)
         var document = JsonSerializer.Deserialize<ProjectSettingsDocument>(
             asset.DocumentJson,
             ProjectSettingsDefaults.JsonOptions);
-        var state = await dbContext.ResourceStates.AsNoTracking().SingleOrDefaultAsync(
-            item => item.ProjectId == project.Id
-                && item.ResourceId == asset.ResourceId
-                && item.ResourceType == ProjectSettingsDefaults.AssetType,
-            cancellationToken);
         var impactedAssetCount = await dbContext.AssetDependencies.AsNoTracking().CountAsync(
             item => item.ProjectId == project.Id && item.SourceAssetId == asset.Id,
             cancellationToken);
@@ -89,7 +84,6 @@ public sealed class GetProjectSettingsQueryHandler(V2DbContext dbContext)
                 asset.Version,
                 asset.UpdatedAtUtc,
                 asset.Id,
-                state?.ApprovedAssetId == asset.Id ? "approved" : "draft",
                 impactedAssetCount,
                 cover);
     }
@@ -209,6 +203,15 @@ public sealed class SaveProjectSettingsCommandHandler(
         project.Description = document.Description;
         project.CurrentCreativeSettingsId = asset.Id;
         project.UpdatedAtUtc = now;
+        if (previousAsset is not null)
+        {
+            await AssetStalenessPropagation.MarkRequiredDependentsStaleAsync(
+                dbContext,
+                previousAsset,
+                asset,
+                now,
+                cancellationToken);
+        }
         await dbContext.SaveChangesAsync(cancellationToken);
         var cover = await ProjectCoverQueries.GetLatestAsync(
             dbContext,
@@ -217,7 +220,7 @@ public sealed class SaveProjectSettingsCommandHandler(
 
         return new(
             SaveProjectSettingsStatus.Success,
-            document.ToView(project.Id, version, now, asset.Id, "draft", 0, cover),
+            document.ToView(project.Id, version, now, asset.Id, 0, cover),
             errors);
     }
 
@@ -252,75 +255,6 @@ public sealed class SaveProjectSettingsCommandHandler(
     {
         if (string.IsNullOrWhiteSpace(value)) errors[field] = [requiredMessage];
         else if (value.Trim().Length > maxLength) errors[field] = [$"内容不能超过 {maxLength} 字符。"];
-    }
-}
-
-public sealed record ApproveProjectSettingsCommand(Guid ProjectId)
-    : ICommand<ProjectSettingsView?>;
-
-public sealed class ApproveProjectSettingsCommandHandler(
-    V2DbContext dbContext,
-    TimeProvider timeProvider)
-    : ICommandHandler<ApproveProjectSettingsCommand, ProjectSettingsView?>
-{
-    public async Task<ProjectSettingsView?> HandleAsync(
-        ApproveProjectSettingsCommand command,
-        CancellationToken cancellationToken)
-    {
-        var project = await dbContext.Projects.SingleOrDefaultAsync(
-            item => item.Id == command.ProjectId,
-            cancellationToken);
-        if (project?.CurrentCreativeSettingsId is null) return null;
-        var asset = await dbContext.Assets.SingleOrDefaultAsync(
-            item => item.Id == project.CurrentCreativeSettingsId
-                && item.ProjectId == project.Id
-                && item.Type == ProjectSettingsDefaults.AssetType,
-            cancellationToken);
-        if (asset is null) return null;
-        var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
-            item => item.ProjectId == project.Id
-                && item.ResourceId == asset.ResourceId
-                && item.ResourceType == ProjectSettingsDefaults.AssetType,
-            cancellationToken);
-        if (state is null)
-        {
-            state = new ResourceState
-            {
-                ProjectId = project.Id,
-                ResourceId = asset.ResourceId,
-                ResourceType = ProjectSettingsDefaults.AssetType,
-                CurrentAssetId = asset.Id,
-                LifecycleStatus = "draft",
-                UpdatedAtUtc = timeProvider.GetUtcNow()
-            };
-            dbContext.ResourceStates.Add(state);
-        }
-        if (state.ApprovedAssetId != asset.Id)
-        {
-            var now = timeProvider.GetUtcNow();
-            state.ApprovedAssetId = asset.Id;
-            state.LifecycleStatus = "approved";
-            state.UpdatedAtUtc = now;
-            dbContext.DirectorDecisions.Add(new DirectorDecision
-            {
-                ProjectId = project.Id,
-                DecisionType = "approve",
-                SubjectType = ProjectSettingsDefaults.AssetType,
-                SubjectResourceId = asset.ResourceId,
-                SubjectAssetId = asset.Id,
-                Question = $"批准项目设定 v{asset.Version}",
-                OptionsJson = "[\"approve\"]",
-                SelectedOption = "approve",
-                DecisionText = $"项目设定 v{asset.Version} 已批准。",
-                Status = "decided",
-                RequestedAtUtc = now,
-                DecidedAtUtc = now
-            });
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-        return await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
-            new GetProjectSettingsQuery(project.Id),
-            cancellationToken);
     }
 }
 
@@ -391,16 +325,6 @@ public static class ProjectSettingsEndpoints
                 SaveProjectSettingsStatus.NotFound => Results.NotFound(),
                 _ => Results.ValidationProblem(result.Errors)
             };
-        });
-        group.MapPost("/approve", async (
-            Guid projectId,
-            ICommandDispatcher dispatcher,
-            CancellationToken cancellationToken) =>
-        {
-            var settings = await dispatcher.SendAsync(
-                new ApproveProjectSettingsCommand(projectId),
-                cancellationToken);
-            return settings is null ? Results.NotFound() : Results.Ok(settings);
         });
         group.MapPost("/cover", async (
             Guid projectId,
@@ -563,7 +487,6 @@ internal sealed record ProjectSettingsDocument(
         int version,
         DateTimeOffset updatedAtUtc,
         Guid? assetId = null,
-        string approvalStatus = "draft",
         int impactedAssetCount = 0,
         ProjectCoverView? cover = null) => new(
         projectId,
@@ -586,7 +509,6 @@ internal sealed record ProjectSettingsDocument(
         SoundStrategy,
         ImagePromptPrefix,
         assetId,
-        approvalStatus,
         impactedAssetCount,
         cover,
         updatedAtUtc);
@@ -618,7 +540,6 @@ internal static class ProjectSettingsDefaults
         string.Empty,
         string.Empty,
         null,
-        "unsaved",
         0,
         null,
         null);

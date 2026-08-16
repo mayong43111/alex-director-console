@@ -7,6 +7,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using SkiaSharp;
@@ -82,6 +83,85 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.Equal([1, 2], versions.Select(item => item.Version));
         Assert.Single(versions.Select(item => item.ResourceId).Distinct());
         Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
+    }
+
+    [Fact]
+    public async Task Updating_visual_asset_marks_its_current_required_consumer_stale()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人牛，身形灵敏",
+                mustKeep = new[] { "短角" },
+                avoid = Array.Empty<string>(),
+                storyReferences = new[] { "第一章" }
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var created = await createResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(created);
+
+        var shot = new Asset
+        {
+            ProjectId = projectId,
+            ResourceId = Guid.NewGuid(),
+            Version = 1,
+            Number = 100,
+            Type = "storyboard-shot",
+            Name = "依赖人物的镜头",
+            ContentType = "application/json",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            dbContext.Assets.Add(shot);
+            dbContext.ResourceStates.Add(new ResourceState
+            {
+                ProjectId = projectId,
+                ResourceId = shot.ResourceId,
+                ResourceType = shot.Type,
+                CurrentAssetId = shot.Id,
+                LifecycleStatus = "draft",
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            dbContext.AssetDependencies.Add(new AssetDependency
+            {
+                ProjectId = projectId,
+                ConsumerAssetId = shot.Id,
+                SourceAssetId = created.AssetId,
+                Role = "uses-character",
+                IsRequired = true,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var updateResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{created.ResourceId}",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人牛，蓝色旧披风",
+                mustKeep = new[] { "短角", "蓝色披风" },
+                avoid = Array.Empty<string>(),
+                storyReferences = new[] { "第一章" }
+            });
+        updateResponse.EnsureSuccessStatusCode();
+
+        await using var verificationScope = factory.Services.CreateAsyncScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var state = await verificationDb.ResourceStates.SingleAsync(item => item.ResourceId == shot.ResourceId);
+        Assert.True(state.IsStale);
+        Assert.NotNull(state.StaleSinceUtc);
     }
 
     [Fact]

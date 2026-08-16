@@ -164,6 +164,15 @@ public interface IShotFrameService
         Guid shotResourceId,
         CancellationToken cancellationToken);
 
+    Task<ImageGenerationPreviewView?> PreviewFirstFrameAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        Guid settingsAssetId,
+        IReadOnlyList<Guid> referenceImageAssetIds,
+        IReadOnlyList<Guid> propAssetIds,
+        CancellationToken cancellationToken);
+
     Task GenerateFirstFrameAsync(
         Guid runId,
         string confirmedPrompt,
@@ -197,11 +206,53 @@ public sealed class ShotFrameService(
             throw new InvalidOperationException("开始制作前必须先保存项目设定。");
         }
         var inputs = await ShotProductionPreflight.ResolveAsync(dbContext, definition, cancellationToken);
+        return await BuildPreviewAsync(
+            projectId,
+            definition,
+            settingsAssetId,
+            inputs.ReferenceImageAssetIds,
+            inputs.PropAssetIds,
+            cancellationToken);
+    }
+
+    public async Task<ImageGenerationPreviewView?> PreviewFirstFrameAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        Guid settingsAssetId,
+        IReadOnlyList<Guid> referenceImageAssetIds,
+        IReadOnlyList<Guid> propAssetIds,
+        CancellationToken cancellationToken)
+    {
+        var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleOrDefaultAsync(
+            candidate => candidate.ProjectId == projectId
+                && candidate.ProductionEpisodeId == productionEpisodeId
+                && candidate.ShotResourceId == shotResourceId,
+            cancellationToken);
+        return definition is null
+            ? null
+            : await BuildPreviewAsync(
+                projectId,
+                definition,
+                settingsAssetId,
+                referenceImageAssetIds,
+                propAssetIds,
+                cancellationToken);
+    }
+
+    private async Task<ImageGenerationPreviewView> BuildPreviewAsync(
+        Guid projectId,
+        ShotDefinition definition,
+        Guid settingsAssetId,
+        IReadOnlyList<Guid> referenceImageAssetIds,
+        IReadOnlyList<Guid> propAssetIds,
+        CancellationToken cancellationToken)
+    {
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
             candidate => candidate.Id == definition.ShotAssetId,
             cancellationToken);
         var settingsAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-            candidate => candidate.Id == settingsAssetId,
+            candidate => candidate.Id == settingsAssetId && candidate.ProjectId == projectId,
             cancellationToken);
         var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
             settingsAsset.DocumentJson ?? "{}",
@@ -211,9 +262,9 @@ public sealed class ShotFrameService(
             shotAsset.DocumentJson ?? "{}",
             StoryboardDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前镜头内容无法读取。");
-        var references = await LoadReferencesAsync(projectId, inputs.ReferenceImageAssetIds, cancellationToken);
+        var references = await LoadReferencesAsync(projectId, referenceImageAssetIds, cancellationToken);
         var props = await dbContext.Assets.AsNoTracking()
-            .Where(candidate => inputs.PropAssetIds.Contains(candidate.Id))
+            .Where(candidate => candidate.ProjectId == projectId && propAssetIds.Contains(candidate.Id))
             .ToListAsync(cancellationToken);
         var prompt = BuildPrompt(settings, shot, references, props);
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
@@ -260,18 +311,34 @@ public sealed class ShotFrameService(
 
         try
         {
-            var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleAsync(
-                candidate => candidate.ProjectId == run.ProjectId
-                    && candidate.ProductionEpisodeId == run.ProductionEpisodeId
-                    && candidate.ShotResourceId == item.ShotResourceId,
-                cancellationToken);
-            var inputs = await ShotProductionPreflight.ResolveAsync(dbContext, definition, cancellationToken);
-            var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-                candidate => candidate.Id == item.ShotAssetId,
-                cancellationToken);
-            var settingsAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-                candidate => candidate.Id == run.CreativeSettingsAssetId,
-                cancellationToken);
+            var inputAssetIds = JsonSerializer.Deserialize<Guid[]>(
+                    item.InputAssetIdsJson,
+                    StoryboardDefaults.JsonOptions)
+                ?? [];
+            var inputAssetIdSet = inputAssetIds.ToHashSet();
+            if (!inputAssetIdSet.Contains(item.ShotAssetId)
+                || !inputAssetIdSet.Contains(run.CreativeSettingsAssetId))
+            {
+                throw new InvalidOperationException("生产输入快照缺少镜头或项目设定资产。");
+            }
+            var inputAssets = await dbContext.Assets.AsNoTracking()
+                .Where(candidate => candidate.ProjectId == run.ProjectId
+                    && inputAssetIdSet.Contains(candidate.Id))
+                .ToListAsync(cancellationToken);
+            if (inputAssets.Count != inputAssetIdSet.Count)
+            {
+                throw new InvalidOperationException("生产输入快照包含不存在或不属于当前项目的资产。");
+            }
+            var shotAsset = inputAssets.Single(candidate => candidate.Id == item.ShotAssetId);
+            var settingsAsset = inputAssets.Single(candidate => candidate.Id == run.CreativeSettingsAssetId);
+            var referenceImageAssetIds = inputAssets
+                .Where(candidate => candidate.Type == VisualReferenceService.AssetType)
+                .Select(candidate => candidate.Id)
+                .ToArray();
+            var props = inputAssets
+                .Where(candidate => candidate.Type == VisualAssetDefaults.AssetType)
+                .Where(candidate => VisualAssetMapper.ReadDocument(candidate).Kind == "prop")
+                .ToArray();
             var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
                 settingsAsset.DocumentJson ?? "{}",
                 ProjectSettingsDefaults.JsonOptions)
@@ -282,11 +349,8 @@ public sealed class ShotFrameService(
                 ?? throw new InvalidOperationException("当前镜头内容无法读取。");
             var references = await LoadReferencesAsync(
                 run.ProjectId,
-                inputs.ReferenceImageAssetIds,
+                referenceImageAssetIds,
                 cancellationToken);
-            var props = await dbContext.Assets.AsNoTracking()
-                .Where(candidate => inputs.PropAssetIds.Contains(candidate.Id))
-                .ToListAsync(cancellationToken);
             var prompt = BuildPrompt(settings, shot, references, props);
             if (!string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
             {
@@ -350,8 +414,8 @@ public sealed class ShotFrameService(
                     item.ShotResourceId,
                     shotAssetId = shotAsset.Id,
                     settingsAssetId = settingsAsset.Id,
-                    referenceImageAssetIds = inputs.ReferenceImageAssetIds,
-                    specialPropAssetIds = inputs.PropAssetIds,
+                    referenceImageAssetIds,
+                    specialPropAssetIds = props.Select(prop => prop.Id),
                     deployment = generated.Deployment,
                     quality = generated.Quality,
                     prompt,
@@ -388,12 +452,27 @@ public sealed class ShotFrameService(
                 UpdatedAtUtc = now
             };
             dbContext.Assets.Add(output);
+            var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
+                candidate => candidate.ProjectId == run.ProjectId
+                    && candidate.ResourceId == resourceId
+                    && candidate.ResourceType == AssetType,
+                cancellationToken);
+            state ??= new ResourceState
+            {
+                ProjectId = run.ProjectId,
+                ResourceId = resourceId,
+                ResourceType = AssetType
+            };
+            if (state.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(state);
+            state.CurrentAssetId = output.Id;
+            state.LifecycleStatus = "active";
+            state.UpdatedAtUtc = now;
             AddDependency(run.ProjectId, output.Id, shotAsset.Id, "frame-for-shot", now);
             AddDependency(run.ProjectId, output.Id, settingsAsset.Id, "uses-settings", now);
-            foreach (var referenceId in inputs.ReferenceImageAssetIds)
+            foreach (var referenceId in referenceImageAssetIds)
                 AddDependency(run.ProjectId, output.Id, referenceId, "uses-reference", now);
-            foreach (var propId in inputs.PropAssetIds)
-                AddDependency(run.ProjectId, output.Id, propId, "uses-special-prop", now);
+            foreach (var prop in props)
+                AddDependency(run.ProjectId, output.Id, prop.Id, "uses-special-prop", now);
             item.OutputAssetId = output.Id;
             item.Status = "completed";
             item.CompletedAtUtc = now;
@@ -416,7 +495,7 @@ public sealed class ShotFrameService(
             run.UpdatedAtUtc = now;
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-        catch (Exception error)
+        catch (Exception error) when (error is not OperationCanceledException)
         {
             now = timeProvider.GetUtcNow();
             item.Status = "failed";
@@ -440,14 +519,19 @@ public sealed class ShotFrameService(
         var rows = await (
             from reference in dbContext.VisualReferences.AsNoTracking()
             join image in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals image.Id
-            join state in dbContext.ResourceStates.AsNoTracking()
-                on new { reference.ProjectId, ResourceId = reference.SubjectResourceId }
-                equals new { state.ProjectId, state.ResourceId }
-            join subject in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals subject.Id
+            join dependency in dbContext.AssetDependencies.AsNoTracking()
+                on image.Id equals dependency.ConsumerAssetId
+            join subject in dbContext.Assets.AsNoTracking() on dependency.SourceAssetId equals subject.Id
             where reference.ProjectId == projectId
                 && imageAssetIds.Contains(image.Id)
+                && dependency.ProjectId == projectId
+                && dependency.Role == "reference-for"
             select new { Reference = reference, Image = image, Subject = subject })
             .ToListAsync(cancellationToken);
+        if (rows.Select(row => row.Image.Id).Distinct().Count() != imageAssetIds.Count)
+        {
+            throw new InvalidOperationException("生产输入快照中的参考图缺少主体版本引用。");
+        }
         return rows.Select(row =>
         {
             var document = VisualAssetMapper.ReadDocument(row.Subject);

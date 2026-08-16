@@ -37,13 +37,23 @@ internal static class VisualReferenceQueries
                 && image.BlobContent != null
             select new { Reference = reference, Image = image })
             .ToListAsync(cancellationToken);
+        var resourceIds = rows.Select(item => item.Image.ResourceId).Distinct().ToArray();
+        var currentAssetIds = await dbContext.ResourceStates.AsNoTracking()
+            .Where(item => item.ProjectId == projectId
+                && item.ResourceType == VisualReferenceService.AssetType
+                && resourceIds.Contains(item.ResourceId))
+            .Select(item => item.CurrentAssetId)
+            .ToListAsync(cancellationToken);
         return rows
             .GroupBy(item => item.Reference.SubjectResourceId)
             .ToDictionary(
                 group => group.Key,
                 group =>
                 {
-                    var latest = group.OrderByDescending(item => item.Image.Version).First();
+                    var latest = group
+                        .OrderByDescending(item => currentAssetIds.Contains(item.Image.Id))
+                        .ThenByDescending(item => item.Image.Version)
+                        .First();
                     return VisualReferenceService.ToView(
                         latest.Image,
                         latest.Reference.SubjectResourceId,
@@ -197,6 +207,21 @@ public sealed class VisualReferenceService(
             UpdatedAtUtc = now
         };
         dbContext.Assets.Add(image);
+        var referenceState = await dbContext.ResourceStates.SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == resourceId
+                && item.ResourceType == AssetType,
+            cancellationToken);
+        referenceState ??= new ResourceState
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            ResourceType = AssetType
+        };
+        if (referenceState.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(referenceState);
+        referenceState.CurrentAssetId = image.Id;
+        referenceState.LifecycleStatus = "active";
+        referenceState.UpdatedAtUtc = now;
         dbContext.VisualReferences.Add(new VisualReference
         {
             ProjectId = projectId,
@@ -205,7 +230,7 @@ public sealed class VisualReferenceService(
             SubjectType = document.Kind,
             Purpose = Purpose,
             Source = "gpt-image-2",
-            ReviewStatus = "generated",
+            ReviewStatus = "active",
             InheritsFromAssetId = previous?.Id,
             CreatedAtUtc = now
         });
