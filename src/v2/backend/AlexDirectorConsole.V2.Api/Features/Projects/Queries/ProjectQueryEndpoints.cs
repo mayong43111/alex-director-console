@@ -31,6 +31,18 @@ public static class ProjectQueryEndpoints
             .Produces<ProjectView>()
             .Produces(StatusCodes.Status404NotFound);
 
+        endpoints.MapGet(
+                "/api/v2/projects/{projectId:guid}/production-episodes",
+                async (
+                    Guid projectId,
+                    IQueryDispatcher dispatcher,
+                    CancellationToken cancellationToken) =>
+                    Results.Ok(await dispatcher.QueryAsync(
+                        new ListProductionEpisodesQuery(projectId),
+                        cancellationToken)))
+            .WithName("ListV2ProductionEpisodes")
+            .Produces<IReadOnlyList<ProductionEpisodeView>>();
+
         return endpoints;
     }
 }

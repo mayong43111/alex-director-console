@@ -44,3 +44,32 @@ public sealed class GetProjectQueryHandler(V2DbContext dbContext)
                 project.UpdatedAtUtc))
             .SingleOrDefaultAsync(cancellationToken);
 }
+
+public sealed record ProductionEpisodeView(
+    Guid Id,
+    int EpisodeNumber,
+    string Title,
+    double? TargetSeconds,
+    string Status);
+
+public sealed record ListProductionEpisodesQuery(Guid ProjectId)
+    : IQuery<IReadOnlyList<ProductionEpisodeView>>;
+
+public sealed class ListProductionEpisodesQueryHandler(V2DbContext dbContext)
+    : IQueryHandler<ListProductionEpisodesQuery, IReadOnlyList<ProductionEpisodeView>>
+{
+    public async Task<IReadOnlyList<ProductionEpisodeView>> HandleAsync(
+        ListProductionEpisodesQuery query,
+        CancellationToken cancellationToken) =>
+        await dbContext.ProductionEpisodes
+            .AsNoTracking()
+            .Where(episode => episode.ProjectId == query.ProjectId)
+            .OrderBy(episode => episode.EpisodeNumber)
+            .Select(episode => new ProductionEpisodeView(
+                episode.Id,
+                episode.EpisodeNumber,
+                episode.Title,
+                episode.TargetSeconds,
+                episode.Status))
+            .ToArrayAsync(cancellationToken);
+}

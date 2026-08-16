@@ -39,8 +39,10 @@ import {
 import { project } from "../data/mockData";
 import {
   getProject,
+  listProductionEpisodes,
   listProjects,
   type ProjectRecord,
+  type ProductionEpisodeRecord,
 } from "../api/projects";
 import {
   getCopilotConversation,
@@ -50,25 +52,18 @@ import {
 } from "../api/copilot";
 
 const navigation = [
-  { label: "驾驶舱", icon: LayoutDashboard, to: "overview" },
   { label: "项目设定", icon: SlidersHorizontal, to: "settings" },
-  { label: "故事结构", icon: BookOpenText, to: "story/source/source-e01" },
-  { label: "资产圣经", icon: Boxes, to: "assets/characters" },
-  { label: "剧本", icon: Film, to: "script/episodes/production-e01" },
-  { label: "视觉参考", icon: Images, to: "references" },
+  { label: "故事结构", icon: BookOpenText, to: "story/source" },
+  { label: "剧本", icon: Film, to: "script" },
+  { label: "资产圣经 · DEMO", icon: Boxes, to: "assets/characters" },
+  { label: "视觉参考 · DEMO", icon: Images, to: "references" },
   {
-    label: "分镜",
+    label: "分镜 · DEMO",
     icon: Clapperboard,
-    to: "storyboard/episodes/production-e01",
+    to: "storyboard",
   },
-  { label: "生产", icon: Gauge, to: "production" },
-  { label: "审阅交付", icon: Sparkles, to: "review/episodes/production-e01" },
-];
-
-const productionEpisodes = [
-  { id: "production-e01", code: "E01", title: "失控的早晨" },
-  { id: "production-e02", code: "E02", title: "追查与反转" },
-  { id: "production-e03", code: "E03", title: "真相回收" },
+  { label: "生产 · DEMO", icon: Gauge, to: "production" },
+  { label: "审阅交付 · DEMO", icon: Sparkles, to: "review" },
 ];
 
 type Workflow = {
@@ -87,21 +82,21 @@ function getWorkflow(
     return {
       label: "项目设定",
       tabs: [],
-      next: { label: "进入原文分集", to: `${projectBase}/story/source/source-e01` },
+      next: { label: "导入原文资料", to: `${projectBase}/story/source` },
     };
   }
   if (pathname.includes("/story/")) {
-    const next = pathname.includes("/source/")
-      ? { label: "建立改编映射", to: `${projectBase}/story/outline` }
-      : pathname.endsWith("/outline")
-        ? { label: "规划章节与爆点", to: `${projectBase}/story/chapters` }
-        : { label: "进入共享资产", to: `${projectBase}/assets/characters` };
+    const next = pathname.includes("/story/source")
+      ? { label: "分析素材图谱", to: `${projectBase}/story/material` }
+      : pathname.includes("/story/material")
+        ? { label: "建立改编方案", to: `${projectBase}/story/adaptation` }
+        : { label: "进入正式剧本", to: `${projectBase}/script` };
     return {
       label: "故事结构",
       tabs: [
-        { label: "原文分集", to: `${projectBase}/story/source/source-e01` },
-        { label: "改编映射", to: `${projectBase}/story/outline` },
-        { label: "章节与爆点", to: `${projectBase}/story/chapters` },
+        { label: "原文资料", to: `${projectBase}/story/source` },
+        { label: "素材图谱", to: `${projectBase}/story/material` },
+        { label: "改编方案", to: `${projectBase}/story/adaptation` },
       ],
       next,
     };
@@ -119,20 +114,9 @@ function getWorkflow(
     };
   }
   if (pathname.includes("/script/")) {
-    const next = pathname.endsWith("/duration")
-      ? { label: "打开分集剧本", to: `${projectBase}/script/episodes/${episodeId}` }
-      : pathname.includes("/episodes/")
-        ? { label: "检查台词与配音", to: `${projectBase}/script/dialogue` }
-        : { label: "进入视觉参考", to: `${projectBase}/references` };
     return {
       label: "剧本",
-      tabs: [
-        { label: "时长仪表", to: `${projectBase}/script/duration` },
-        { label: "分集剧本", to: `${projectBase}/script/episodes/${episodeId}` },
-        { label: "台词本", to: `${projectBase}/script/dialogue` },
-      ],
-      queue: pathname.endsWith("/dialogue") ? "3 条待制作" : "1 项时长阻断",
-      next,
+      tabs: episodeId ? [{ label: "分集剧本", to: `${projectBase}/script/episodes/${episodeId}` }] : [],
     };
   }
   if (pathname.endsWith("/references")) {
@@ -171,6 +155,8 @@ export function AppShell() {
   const { projectId = "tianqiao" } = useParams();
   const mainCanvasRef = useRef<HTMLElement>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [productionEpisodes, setProductionEpisodes] = useState<ProductionEpisodeRecord[]>([]);
+  const [selectedEpisode, setSelectedEpisode] = useState("");
   const [projectName, setProjectName] = useState(() => {
     const navigationName = (location.state as { projectName?: string } | null)
       ?.projectName;
@@ -204,6 +190,27 @@ export function AppShell() {
     return () => controller.abort();
   }, [projectId]);
   useEffect(() => {
+    const controller = new AbortController();
+    const loadEpisodes = () => {
+      listProductionEpisodes(projectId, controller.signal)
+        .then((items) => {
+          setProductionEpisodes(items);
+          setSelectedEpisode((current) =>
+            items.some((item) => item.id === current) ? current : (items[0]?.id ?? ""));
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          console.warn("生产剧集列表加载失败", error);
+        });
+    };
+    loadEpisodes();
+    window.addEventListener("alex:production-episodes-updated", loadEpisodes);
+    return () => {
+      controller.abort();
+      window.removeEventListener("alex:production-episodes-updated", loadEpisodes);
+    };
+  }, [projectId]);
+  useEffect(() => {
     sessionStorage.setItem("alex-director-v2.lastProjectPath", location.pathname);
     mainCanvasRef.current?.scrollTo({ top: 0, left: 0 });
   }, [location.pathname]);
@@ -234,40 +241,34 @@ export function AppShell() {
     return () => window.removeEventListener("alex:project-updated", updateProject);
   }, [projectId]);
   const [agentOpen, setAgentOpen] = useState(
-    () => window.matchMedia("(min-width: 1280px)").matches,
+    () => localStorage.getItem("alex-director-v2.agentOpen") !== "false",
   );
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(min-width: 1280px)");
-    const syncAgentState = (event?: MediaQueryListEvent) => {
-      setAgentOpen(event?.matches ?? mediaQuery.matches);
-    };
-    syncAgentState();
-    mediaQuery.addEventListener("change", syncAgentState);
-    return () => mediaQuery.removeEventListener("change", syncAgentState);
-  }, []);
+  const updateAgentOpen = (open: boolean) => {
+    localStorage.setItem("alex-director-v2.agentOpen", String(open));
+    setAgentOpen(open);
+  };
   const [siderCollapsed, setSiderCollapsed] = useState(
-    () => window.matchMedia("(max-width: 1366px)").matches,
+    () => window.matchMedia("(max-width: 1100px)").matches,
   );
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 1366px)");
+    const mediaQuery = window.matchMedia("(max-width: 1100px)");
     const syncCollapsedState = (event: MediaQueryListEvent) => {
       setSiderCollapsed(event.matches);
     };
     mediaQuery.addEventListener("change", syncCollapsedState);
     return () => mediaQuery.removeEventListener("change", syncCollapsedState);
   }, []);
-  const [selectedEpisode, setSelectedEpisode] = useState("production-e01");
   const [queueOpen, setQueueOpen] = useState(false);
-  const routeEpisode = location.pathname.match(/production-e\d+/)?.[0];
+  const routeEpisode = location.pathname.match(/(?:script|storyboard|production|review)\/episodes\/([^/]+)/)?.[1];
   const currentEpisode = routeEpisode ?? selectedEpisode;
   const currentEpisodeData =
-    productionEpisodes.find((episode) => episode.id === currentEpisode) ??
-    productionEpisodes[0];
+    productionEpisodes.find((episode) => episode.id === currentEpisode) ?? productionEpisodes[0];
+  const routingEpisode = currentEpisode;
   const projectBase = `/projects/${projectId}`;
-  const workflow = getWorkflow(location.pathname, projectBase, currentEpisode);
+  const workflow = getWorkflow(location.pathname, projectBase, routingEpisode);
   const scopedNavigation = navigation.map((item) => ({
     ...item,
-    to: item.to.replace("production-e01", currentEpisode),
+    to: item.to.replace("production-e01", routingEpisode),
   }));
   const active = navigation.find((item) =>
     location.pathname.includes(item.to.split("/")[0]),
@@ -288,7 +289,7 @@ export function AppShell() {
 
   const switchProject = (nextProject: ProjectRecord) => {
     setProjectName(nextProject.name);
-    navigate(`/projects/${nextProject.id}/overview`, {
+    navigate(`/projects/${nextProject.id}/settings`, {
       state: { projectName: nextProject.name },
     });
   };
@@ -374,11 +375,13 @@ export function AppShell() {
           className="header-episode-select"
           key="episode"
           aria-label="当前生产集"
-          value={currentEpisode}
+          value={currentEpisode || undefined}
+          placeholder="尚未创建生产集"
+          disabled={productionEpisodes.length === 0}
           onChange={changeEpisode}
           options={productionEpisodes.map((episode) => ({
             value: episode.id,
-            label: `${episode.code} · ${episode.title}`,
+            label: `E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.title}`,
           }))}
         />,
         <Button className="command-search" icon={<Search size={15} />} key="search">
@@ -404,7 +407,8 @@ export function AppShell() {
             type={agentOpen ? "primary" : "default"}
             icon={<Bot size={16} />}
             aria-label="副导演"
-            onClick={() => setAgentOpen(!agentOpen)}
+            aria-expanded={agentOpen}
+            onClick={() => updateAgentOpen(!agentOpen)}
           />
         </Tooltip>,
       ]}
@@ -434,8 +438,10 @@ export function AppShell() {
             projectId={projectId}
             projectName={projectName}
             page={active?.label ?? "驾驶舱"}
-            episode={currentEpisodeData.code}
-            onClose={() => setAgentOpen(false)}
+            episode={currentEpisodeData
+              ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
+              : "未创建"}
+            onClose={() => updateAgentOpen(false)}
           />
         )}
         {queueOpen && workflow?.queue && (
@@ -446,11 +452,9 @@ export function AppShell() {
           />
         )}
         <div className="activity-bar">
-          <Badge status="processing" />
-          <strong>2 个任务运行中</strong>
-          <span>E01 视频 11/18</span>
-          <span>E02 首帧 6/16</span>
-          <button>展开活动</button>
+          <Badge status="default" />
+          <strong>{productionEpisodes.length === 0 ? "暂无生产任务" : `${productionEpisodes.length} 个生产集`}</strong>
+          <span>{productionEpisodes.length === 0 ? "创建生产剧集后可安排脚本、分镜与生成任务" : "尚未接入实时任务状态"}</span>
         </div>
       </div>
     </ProLayout>
@@ -472,7 +476,7 @@ function WorkflowToolbar({
   return (
     <div className="workflow-toolbar">
       <nav className="workflow-breadcrumb" aria-label="面包屑导航">
-        <Link to={`${projectBase}/overview`}>{projectName}</Link>
+        <Link to={`${projectBase}/settings`}>{projectName}</Link>
         <ChevronRight size={13} />
         {currentTab ? (
           <>

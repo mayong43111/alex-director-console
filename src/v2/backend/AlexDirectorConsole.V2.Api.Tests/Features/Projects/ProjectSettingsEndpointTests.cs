@@ -72,6 +72,35 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Post_approve_locks_the_current_settings_version_and_records_the_decision()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var saveResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("法式彩色冒险漫画"));
+        saveResponse.EnsureSuccessStatusCode();
+
+        var approveResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/settings/approve",
+            null);
+
+        approveResponse.EnsureSuccessStatusCode();
+        var approved = await approveResponse.Content.ReadFromJsonAsync<ProjectSettingsView>();
+        Assert.NotNull(approved);
+        Assert.Equal("approved", approved.ApprovalStatus);
+        Assert.NotNull(approved.AssetId);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var state = await dbContext.ResourceStates.SingleAsync(
+            item => item.ProjectId == projectId && item.ResourceType == "creative-settings");
+        Assert.Equal(approved.AssetId, state.ApprovedAssetId);
+        Assert.Single(await dbContext.DirectorDecisions.Where(
+            item => item.ProjectId == projectId && item.SubjectType == "creative-settings").ToListAsync());
+    }
+
+    [Fact]
     public async Task Invalid_ratio_returns_400_without_creating_an_asset()
     {
         using var client = factory.CreateClient();

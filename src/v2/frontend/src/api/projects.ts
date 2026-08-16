@@ -50,3 +50,20 @@ export async function getProject(
   if (!response.ok) throw new Error('项目信息加载失败。')
   return response.json() as Promise<ProjectRecord>
 }
+
+export interface ProductionEpisodeRecord {
+  id: string
+  episodeNumber: number
+  title: string
+  targetSeconds: number | null
+  status: string
+}
+
+export async function listProductionEpisodes(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProductionEpisodeRecord[]> {
+  const response = await fetch(`/api/v2/projects/${projectId}/production-episodes`, { signal })
+  if (!response.ok) throw new Error('生产剧集列表加载失败。')
+  return response.json() as Promise<ProductionEpisodeRecord[]>
+}

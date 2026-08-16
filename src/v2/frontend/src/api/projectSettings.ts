@@ -18,6 +18,9 @@ export interface ProjectSettings {
   cameraLanguage: string
   soundStrategy: string
   imagePromptPrefix: string
+  assetId: string | null
+  approvalStatus: 'unsaved' | 'draft' | 'approved'
+  impactedAssetCount: number
   updatedAtUtc: string | null
   cover: ProjectCover | null
 }
@@ -81,6 +84,14 @@ export async function saveProjectSettings(
     body: JSON.stringify(settings),
   })
   if (!response.ok) throw await readError(response, '项目设定保存失败。')
+  return response.json() as Promise<ProjectSettings>
+}
+
+export async function approveProjectSettings(projectId: string): Promise<ProjectSettings> {
+  const response = await fetch(`/api/v2/projects/${projectId}/settings/approve`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await readError(response, '项目设定批准失败。')
   return response.json() as Promise<ProjectSettings>
 }
 

@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  Navigate,
   NavLink,
   useLocation,
   useNavigate,
@@ -14,7 +15,6 @@ import {
   Edit3,
   Filter,
   ImagePlus,
-  Link2,
   MoreHorizontal,
   Play,
   Plus,
@@ -25,6 +25,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import {
+  approveProjectSettings,
   assistProjectSettingsField,
   generateProjectCover,
   getProjectSettings,
@@ -32,6 +33,26 @@ import {
   type ProjectSettings,
   type ProjectSettingsAssistField,
 } from "../api/projectSettings";
+import {
+  listProductionEpisodes,
+  type ProductionEpisodeRecord,
+} from "../api/projects";
+import {
+  analyzeStoryMaterial,
+  appendAdaptationEpisode,
+  appendProjectSourceChapters,
+  confirmAdaptationScript,
+  createProjectSource,
+  generateAdaptationScript,
+  getAdaptationScript,
+  getProductionScriptPackage,
+  getStoryMaterialAnalysis,
+  listProjectSources,
+  type AdaptationScript,
+  type ProductionScriptPackage,
+  type ProjectSource,
+  type StoryMaterialAnalysis,
+} from "../api/projectSources";
 
 const episodes = [
   { id: "production-e01", code: "E01", title: "失控的早晨", state: "review" },
@@ -138,6 +159,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   const [activeSection, setActiveSection] = useState(settingSections[0].id);
   const [status, setStatus] = useState<"loading" | "idle" | "dirty" | "saving" | "saved" | "error">("loading");
   const [generatingCover, setGeneratingCover] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [coverConfirmation, setCoverConfirmation] = useState(false);
   const [coverInstruction, setCoverInstruction] = useState("");
   const [assistingField, setAssistingField] = useState<ProjectSettingsAssistField | null>(null);
@@ -205,6 +227,21 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "项目设定保存失败。");
       setStatus("error");
+    }
+  }
+
+  async function approveSettings() {
+    if (!settings || settings.version === 0 || status === "dirty" || approving) return;
+    setApproving(true);
+    setError(null);
+    try {
+      setSettings(await approveProjectSettings(projectId));
+      setStatus("saved");
+    } catch (approveError) {
+      setError(approveError instanceof Error ? approveError.message : "项目设定批准失败。");
+      setStatus("error");
+    } finally {
+      setApproving(false);
     }
   }
 
@@ -310,12 +347,17 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
 
   return (
     <div className="page settings-page">
+      <PageTitle
+        eyebrow="项目设定 / 创作基线"
+        title="项目设定"
+        description="统一管理项目定位、生产规格与视觉方向"
+      />
       <div className="settings-layout">
         <aside className="subnav">
           <div className="settings-version-card">
             <span>当前版本</span>
             <strong>{settings.version === 0 ? "草稿" : `v${settings.version}`}</strong>
-            <small>{settings.updatedAtUtc ? new Date(settings.updatedAtUtc).toLocaleString("zh-CN") : "首次保存将创建 v1"}</small>
+            <small>{settings.approvalStatus === "approved" ? "已批准" : settings.updatedAtUtc ? "待批准" : "首次保存将创建 v1"}</small>
           </div>
           {settingSections.map((item, index) => (
             <button
@@ -527,13 +569,21 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
           {error && <p className="settings-error">{error}</p>}
           <div className="settings-submit-bar">
             <div>
-              <strong>{status === "dirty" ? "设定有修改" : `当前为 v${settings.version}`}</strong>
-              <span>每次保存都会保留一个可追溯版本。</span>
+              <strong>{status === "dirty" ? "设定有修改" : settings.approvalStatus === "approved" ? `v${settings.version} 已批准` : `当前为 v${settings.version}`}</strong>
+              <span>{status === "dirty" && settings.impactedAssetCount > 0
+                ? `保存将创建新版本；${settings.impactedAssetCount} 个下游资产继续锁定当前版本。`
+                : "每次保存都会保留可追溯版本，批准动作只锁定当前版本。"}</span>
             </div>
-            <button className="primary-button" type="submit" disabled={status === "saving" || status === "idle" || status === "saved"}>
-              <Save size={14} />
-              {status === "saving" ? "正在保存" : `保存为 v${settings.version + 1}`}
-            </button>
+            <div className="settings-submit-actions">
+              <button className="secondary-button" type="button" onClick={() => void approveSettings()} disabled={settings.version === 0 || status === "dirty" || approving || settings.approvalStatus === "approved"}>
+                <Check size={14} />
+                {approving ? "批准中" : settings.approvalStatus === "approved" ? "当前版本已批准" : "批准当前版本"}
+              </button>
+              <button className="primary-button" type="submit" disabled={status === "saving" || status === "idle" || status === "saved"}>
+                <Save size={14} />
+                {status === "saving" ? "正在保存" : `保存为 v${settings.version + 1}`}
+              </button>
+            </div>
           </div>
         </form>
       </div>
@@ -623,131 +673,644 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
 }
 
 export function SourcePage() {
-  const [activeSource, setActiveSource] = useState("source-e01");
-  const [selectedSection, setSelectedSection] = useState("01 初遇");
+  const { projectId = "", sourceEpisodeId } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const workspaceView: "source" | "analysis" | "script" = location.pathname.includes("/story/material")
+    ? "analysis"
+    : location.pathname.includes("/story/adaptation") || location.pathname.includes("/script/draft")
+      ? "script"
+      : "source";
+  const sourceRouteBase = `/projects/${projectId}/story/${workspaceView === "source" ? "source" : workspaceView === "analysis" ? "material" : "adaptation"}`;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [sources, setSources] = useState<ProjectSource[]>([]);
+  const [selectedChapterId, setSelectedChapterId] = useState<string>();
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importTitle, setImportTitle] = useState("");
+  const [importDescription, setImportDescription] = useState("");
+  const [importContent, setImportContent] = useState("");
+  const [importFileName, setImportFileName] = useState("");
+  const [importMode, setImportMode] = useState<"create" | "append">("create");
+  const fileModeRef = useRef<"create" | "append">("create");
+  const [analysis, setAnalysis] = useState<StoryMaterialAnalysis | null>(null);
+  const [script, setScript] = useState<AdaptationScript | null>(null);
+  const [projectSettings, setProjectSettings] = useState<ProjectSettings | null>(null);
+  const [working, setWorking] = useState<"analysis" | "script" | "append" | "confirm" | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listProjectSources(projectId, controller.signal)
+      .then((items) => {
+        setSources(items);
+        setError("");
+        const requested = items.find((item) => item.id === sourceEpisodeId);
+        const first = requested ?? items[0];
+        if (first) {
+          setSelectedChapterId(first.chapters[0]?.id);
+          if (!requested) {
+            navigate(`${sourceRouteBase}/${first.id}`, { replace: true });
+          }
+        } else if (sourceEpisodeId) {
+          navigate(sourceRouteBase, { replace: true });
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(loadError instanceof Error ? loadError.message : "原文资料加载失败。");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [navigate, projectId, sourceEpisodeId, sourceRouteBase]);
+
+  const activeSource = sources.find((item) => item.id === sourceEpisodeId) ?? sources[0];
+  const selectedChapter = activeSource?.chapters.find((item) => item.id === selectedChapterId)
+    ?? activeSource?.chapters[0];
+  const filteredSources = sources.filter((item) =>
+    item.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const activeSourceId = activeSource?.id;
+
+  useEffect(() => {
+    if (!activeSourceId) return;
+    const controller = new AbortController();
+    Promise.all([
+      getStoryMaterialAnalysis(projectId, activeSourceId, controller.signal),
+      getAdaptationScript(projectId, activeSourceId, controller.signal),
+      getProjectSettings(projectId, controller.signal),
+    ]).then(([loadedAnalysis, loadedScript, loadedSettings]) => {
+      setAnalysis(loadedAnalysis);
+      setScript(loadedScript);
+      setProjectSettings(loadedSettings);
+    }).catch((loadError: unknown) => {
+      if (!controller.signal.aborted) {
+        setError(loadError instanceof Error ? loadError.message : "故事开发资料加载失败。");
+      }
+    });
+    return () => controller.abort();
+  }, [activeSourceId, projectId]);
+
+  const selectSource = (source: ProjectSource) => {
+    setSelectedChapterId(source.chapters[0]?.id);
+    navigate(`${sourceRouteBase}/${source.id}`);
+  };
+
+  const openImport = (mode: "create" | "append" = "create") => {
+    setImportMode(mode);
+    setImportTitle("");
+    setImportDescription("");
+    setImportContent("");
+    setImportFileName("");
+    setError("");
+    setImportOpen(true);
+  };
+
+  const chooseFile = async (file: File | undefined) => {
+    if (!file) return;
+    const content = await file.text();
+    setImportMode(fileModeRef.current);
+    setImportTitle(file.name.replace(/\.(txt|md|markdown)$/i, ""));
+    setImportContent(content);
+    setImportFileName(file.name);
+    setError("");
+    setImportOpen(true);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const submitImport = async (event: FormEvent) => {
+    event.preventDefault();
+    setImporting(true);
+    setError("");
+    try {
+      const source = importMode === "append" && activeSource
+        ? await appendProjectSourceChapters(projectId, activeSource.id, {
+            content: importContent,
+            fileName: importFileName || undefined,
+          })
+        : await createProjectSource(projectId, {
+            title: importTitle,
+            description: importDescription,
+            content: importContent,
+            fileName: importFileName || undefined,
+          });
+      setSources((current) => importMode === "append"
+        ? current.map((item) => item.id === source.id ? source : item)
+        : [...current, source]);
+      setSelectedChapterId(source.chapters[0]?.id);
+      if (importMode === "append" && analysis) {
+        setAnalysis({
+          ...analysis,
+          isStale: true,
+          staleReason: `原文资料已更新到 v${source.version}，可按需重新分析。`,
+        });
+      }
+      setImportOpen(false);
+      navigate(`/projects/${projectId}/story/source/${source.id}`);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "原文资料导入失败。");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const requestAnalysis = async () => {
+    if (!activeSource) return;
+    setWorking("analysis");
+    setError("");
+    try {
+      const result = await analyzeStoryMaterial(projectId, activeSource.id);
+      setAnalysis(result);
+      navigate(`/projects/${projectId}/story/material/${activeSource.id}`);
+    } catch (analysisError) {
+      setError(analysisError instanceof Error ? analysisError.message : "素材分析失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const requestScript = async () => {
+    if (!activeSource) return;
+    setWorking("script");
+    setError("");
+    try {
+      const result = await generateAdaptationScript(projectId, activeSource.id, {
+        instruction: "严格参考项目设定规划完整剧集，原文仅作为参考；每集建立清晰冲突、大小爆点和集尾追看动力。",
+      });
+      setScript(result);
+      navigate(`/projects/${projectId}/story/adaptation/${activeSource.id}`);
+    } catch (scriptError) {
+      setError(scriptError instanceof Error ? scriptError.message : "剧本草案生成失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const appendScriptEpisode = async () => {
+    if (!activeSource) return;
+    setWorking("append");
+    setError("");
+    try {
+      setScript(await appendAdaptationEpisode(projectId, activeSource.id));
+    } catch (appendError) {
+      setError(appendError instanceof Error ? appendError.message : "添加剧集失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const confirmScript = async () => {
+    if (!activeSource) return;
+    setWorking("confirm");
+    setError("");
+    try {
+      const confirmed = await confirmAdaptationScript(projectId, activeSource.id);
+      setScript(confirmed);
+      window.dispatchEvent(new Event("alex:production-episodes-updated"));
+      if (confirmed.productionEpisodeIds[0]) {
+        navigate(`/projects/${projectId}/script/episodes/${confirmed.productionEpisodeIds[0]}`);
+      }
+    } catch (confirmError) {
+      setError(confirmError instanceof Error ? confirmError.message : "剧本确认失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
   return (
     <div className="page full-height-page">
       <PageTitle
-        eyebrow="故事结构 / 原文"
-        title="原文分集"
-        description="原文集与生产剧本集独立管理，通过改编映射建立关系"
-        action={
+        eyebrow="故事结构"
+        title={workspaceView === "source" ? "原文资料" : workspaceView === "analysis" ? "素材图谱" : "改编方案"}
+        description={workspaceView === "source"
+          ? "导入并版本化管理改编来源，原文章节不与生产剧集一一对应"
+          : workspaceView === "analysis"
+            ? "从当前原文提取人物、场景、情节节点与必要关系"
+            : "按项目设定形成分集、场次与爆点方案；确认后才创建生产集和正式剧本"}
+        action={workspaceView === "source" ? (
           <div className="button-group">
-            <button className="secondary-button">
+            <input
+              ref={fileInputRef}
+              className="visually-hidden"
+              type="file"
+              accept=".txt,.md,.markdown,text/plain,text/markdown"
+              onChange={(event) => void chooseFile(event.target.files?.[0])}
+            />
+            <button className="secondary-button" type="button" onClick={() => {
+              fileModeRef.current = activeSource ? "append" : "create";
+              fileInputRef.current?.click();
+            }}>
               <Upload size={14} />
-              上传原文
+              {activeSource ? "上传追加" : "上传文本"}
             </button>
-            <button className="primary-button">
-              <Plus size={14} />
-              新建原文集
-            </button>
-          </div>
-        }
-      />
-      <div className="document-workspace">
-        <aside className="document-tree">
-          <div className="tree-search">
-            <Search size={14} />
-            <input placeholder="搜索原文" />
-          </div>
-          {[
-            {
-              id: "source-e01",
-              name: "原文 E01",
-              sections: ["01 初遇", "02 文件"],
-            },
-            {
-              id: "source-e02",
-              name: "原文 E02",
-              sections: ["01 追查", "02 误导", "03 转折"],
-            },
-            {
-              id: "source-e03",
-              name: "原文 E03",
-              sections: ["01 真相", "02 回收"],
-            },
-          ].map((episode) => (
-            <div className="tree-group" key={episode.id}>
-              <button
-                className={
-                  activeSource === episode.id
-                    ? "tree-episode active"
-                    : "tree-episode"
-                }
-                onClick={() => setActiveSource(episode.id)}
-              >
-                <ChevronDown size={13} />
-                <strong>{episode.name}</strong>
-                <span>{episode.sections.length}</span>
+            {activeSource && (
+              <button className="secondary-button" type="button" onClick={() => openImport("create")}>
+                <Plus size={14} />新建资料
               </button>
-              {activeSource === episode.id &&
-                episode.sections.map((section) => (
+            )}
+            <button className="primary-button" type="button" onClick={() => openImport(activeSource ? "append" : "create")}>
+              <Plus size={14} />
+              {activeSource ? "追加章节" : "粘贴原文"}
+            </button>
+          </div>
+        ) : undefined}
+      />
+      {sources.length > 0 && (
+        <div className="story-stage-tabs" role="tablist" aria-label="原文开发视图">
+          <button className={workspaceView === "source" ? "active" : ""} type="button" onClick={() => navigate(`/projects/${projectId}/story/source/${activeSource?.id ?? ""}`)}>
+            <span>01</span><strong>原文章节</strong><small>版本化参考源</small>
+          </button>
+          <button className={workspaceView === "analysis" ? "active" : ""} type="button" onClick={() => navigate(`/projects/${projectId}/story/material/${activeSource?.id ?? ""}`)}>
+            <span>02</span><strong>素材图谱</strong><small>人物 · 场景 · 情节</small>
+          </button>
+          <button className={workspaceView === "script" ? "active" : ""} type="button" onClick={() => navigate(`/projects/${projectId}/story/adaptation/${activeSource?.id ?? ""}`)}>
+            <span>03</span><strong>改编方案</strong><small>分集 · 场次 · 爆点</small>
+          </button>
+        </div>
+      )}
+      {error && !importOpen && <div className="settings-error">{error}</div>}
+      {loading ? (
+        <div className="source-empty-state"><strong>正在读取原文资料…</strong></div>
+      ) : sources.length === 0 ? (
+        <div className="source-empty-state">
+          <div className="source-empty-mark"><Upload size={24} /></div>
+          <span className="eyebrow">从来源开始</span>
+          <h2>这个项目还没有原文资料</h2>
+          <p>上传 TXT / Markdown，或直接粘贴原文。系统会识别章节，稍后可从任意章节取材、重排或原创，不会自动创建生产剧集。</p>
+          <div className="button-group">
+            <button className="secondary-button" type="button" onClick={() => {
+              fileModeRef.current = "create";
+              fileInputRef.current?.click();
+            }}>
+              <Upload size={14} />上传文本
+            </button>
+            <button className="primary-button" type="button" onClick={() => openImport("create")}>
+              <Plus size={14} />粘贴原文
+            </button>
+          </div>
+        </div>
+      ) : workspaceView === "source" ? (
+        <div className="document-workspace">
+          <aside className="document-tree">
+            <div className="tree-search">
+              <Search size={14} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索原文资料" />
+            </div>
+            {filteredSources.map((source) => (
+              <div className="tree-group" key={source.id}>
+                <button
+                  type="button"
+                  className={activeSource?.id === source.id ? "tree-episode active" : "tree-episode"}
+                  onClick={() => selectSource(source)}
+                >
+                  <ChevronDown size={13} />
+                  <span className="tree-source-copy">
+                    <strong title={source.title}>{source.title}</strong>
+                    <small>原文 v{source.version} · {source.chapterCount} 章</small>
+                  </span>
+                </button>
+                {activeSource?.id === source.id && source.chapters.map((chapter) => (
                   <button
-                    className={
-                      selectedSection === section
-                        ? "tree-section active"
-                        : "tree-section"
-                    }
-                    onClick={() => setSelectedSection(section)}
-                    key={section}
+                    type="button"
+                    className={selectedChapter?.id === chapter.id ? "tree-section active" : "tree-section"}
+                    onClick={() => setSelectedChapterId(chapter.id)}
+                    key={chapter.id}
                   >
-                    {section}
+                    <span>{String(chapter.number).padStart(2, "0")}</span>
+                    <strong title={chapter.title}>{chapter.title}</strong>
                   </button>
                 ))}
+              </div>
+            ))}
+          </aside>
+          <article className="reader">
+            <header>
+              <div className="reader-chapter-title">
+                <span>{String(selectedChapter?.number ?? 0).padStart(2, "0")}</span>
+                <h2>{selectedChapter?.title}</h2>
+              </div>
+            </header>
+            <div className="source-copy">
+              {selectedChapter?.content.split(/\n\s*\n/).map((paragraph, index) => (
+                <p key={`${selectedChapter.id}-${index}`}>{paragraph}</p>
+              ))}
             </div>
-          ))}
-        </aside>
-        <article className="reader">
-          <header>
+          </article>
+        </div>
+      ) : workspaceView === "analysis" ? (
+        <StoryMaterialWorkspace
+          source={activeSource}
+          analysis={analysis}
+          working={working === "analysis"}
+          onAnalyze={() => void requestAnalysis()}
+        />
+      ) : (
+        <AdaptationScriptWorkspace
+          analysis={analysis}
+          script={script}
+          plannedEpisodeCount={projectSettings?.plannedEpisodeCount}
+          working={working}
+          onGenerate={() => void requestScript()}
+          onAppend={() => void appendScriptEpisode()}
+          onConfirm={() => void confirmScript()}
+        />
+      )}
+      {importOpen && (
+        <div className="modal-backdrop">
+          <form className="dialog source-import-dialog" onSubmit={submitImport}>
+            <span className="eyebrow">{importMode === "append" ? `更新 ${activeSource?.title}` : "导入参考源"}</span>
+            <h2>{importMode === "append" ? "追加原文章节" : importFileName ? "确认文本资料" : "粘贴原文资料"}</h2>
+            <p>{importMode === "append" ? `保存后生成原文 v${(activeSource?.version ?? 0) + 1}；既有剧本不会自动变化。` : "导入只创建原文资料和章节，不会创建生产剧集。"}</p>
+            {importMode === "create" && (
+              <>
+                <label>
+                  <span>资料名称</span>
+                  <input autoFocus required maxLength={200} value={importTitle} onChange={(event) => setImportTitle(event.target.value)} placeholder="例如：三个火枪手原著" />
+                </label>
+                <label>
+                  <span>用途说明（可选）</span>
+                  <input maxLength={2000} value={importDescription} onChange={(event) => setImportDescription(event.target.value)} placeholder="例如：角色关系与关键事件参考" />
+                </label>
+              </>
+            )}
+            <label>
+              <span>{importMode === "append" ? "新增章节内容" : "原文内容"}</span>
+              <textarea required value={importContent} onChange={(event) => setImportContent(event.target.value)} placeholder="使用 Markdown 标题或“第一章”一类标题可自动拆分章节" />
+            </label>
+            {error && <div className="settings-error">{error}</div>}
             <div>
-              <span className="eyebrow">原文 E01 / {selectedSection}</span>
-              <h2>第一章：雨夜的天桥</h2>
-            </div>
-            <div>
-              <button className="icon-button">
-                <Edit3 size={15} />
-              </button>
-              <button className="icon-button">
-                <MoreHorizontal size={16} />
+              <button className="secondary-button" type="button" onClick={() => setImportOpen(false)} disabled={importing}>取消</button>
+              <button className="primary-button" type="submit" disabled={importing}>
+                <Upload size={13} />{importing ? "保存中" : importMode === "append" ? "保存新版本" : "导入资料"}
               </button>
             </div>
-          </header>
-          <div className="source-copy">
-            <p>
-              凌晨五点，天桥下的路灯还没有熄。林墨提着红色文件袋，穿过刚刚开始冒热气的早点摊。
-            </p>
-            <p className="evidence-highlight">
-              他停在食堂门口。玻璃门上贴着一张褪色的招聘启事，落款日期是三年前。
-            </p>
-            <p>电话在口袋里震动。屏幕上没有名字，只有一串本地号码。</p>
-            <blockquote>“文件不要交给任何人。尤其是周岚。”</blockquote>
-            <p>通话戛然而止。林墨抬头时，发现食堂二楼的灯亮了。</p>
-          </div>
-        </article>
-        <aside className="evidence-panel">
-          <span className="eyebrow">结构提取</span>
-          <h3>当前证据</h3>
-          <div className="evidence-card">
-            <span>人物</span>
-            <strong>林墨</strong>
-            <p>持有红色文件袋，收到匿名警告。</p>
-          </div>
-          <div className="evidence-card">
-            <span>场景</span>
-            <strong>天桥食堂 · 外部</strong>
-            <p>凌晨、路灯、早点摊，二楼亮灯。</p>
-          </div>
-          <div className="evidence-card">
-            <span>道具</span>
-            <strong>红色文件袋</strong>
-            <p>关键叙事道具，内容未知。</p>
-          </div>
-          <button className="secondary-button wide">
-            <Link2 size={14} />
-            加入改编证据
-          </button>
-        </aside>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StoryMaterialWorkspace({
+  source,
+  analysis,
+  working,
+  onAnalyze,
+}: {
+  source?: ProjectSource;
+  analysis: StoryMaterialAnalysis | null;
+  working: boolean;
+  onAnalyze: () => void;
+}) {
+  if (!analysis) {
+    return (
+      <div className="source-empty-state development-empty-state">
+        <span className="eyebrow">编剧素材准备</span>
+        <h2>从 {source?.chapterCount ?? 0} 个章节提取轻量图谱</h2>
+        <p>只整理主要人物、关键场景、情节节点和必要关系，不生成正式人物造型或场景设定。</p>
+        <button className="primary-button" type="button" disabled={working} onClick={onAnalyze}>
+          <Sparkles size={14} />{working ? "分析中" : "分析当前原文"}
+        </button>
       </div>
+    );
+  }
+
+  return (
+    <div className="development-workspace">
+      <header>
+        <div>
+          <span className="eyebrow">素材图谱 / 来源 v{analysis.sourceVersion}</span>
+          <h2>{source?.title}</h2>
+          <p>{analysis.summary}</p>
+        </div>
+        <div className="button-group">
+          <span className={analysis.isStale ? "status-chip warning" : "status-chip"}>
+            {analysis.isStale ? "原文已有新版本" : "与当前原文同步"}
+          </span>
+          <button className="secondary-button" type="button" disabled={working} onClick={onAnalyze}>
+            <Sparkles size={13} />{working ? "分析中" : analysis.isStale ? "重新分析" : "再次分析"}
+          </button>
+        </div>
+      </header>
+      {analysis.isStale && <div className="development-warning">{analysis.staleReason} 既有剧本不会自动变化。</div>}
+      <div className="material-graph-grid">
+        <section>
+          <div className="material-column-heading"><span>人物</span><b>{analysis.characters.length}</b></div>
+          {analysis.characters.map((character) => (
+            <article className="material-node" key={character.name}>
+              <strong>{character.name}</strong><small>{character.role}</small>
+              <p>{character.goal}</p>
+              <div>{character.traits.map((trait) => <span key={trait}>{trait}</span>)}</div>
+              <em>来源章节 {character.chapterNumbers.join(" / ")}</em>
+            </article>
+          ))}
+        </section>
+        <section>
+          <div className="material-column-heading"><span>场景</span><b>{analysis.locations.length}</b></div>
+          {analysis.locations.map((location) => (
+            <article className="material-node location" key={location.name}>
+              <strong>{location.name}</strong><small>{location.function}</small>
+              <p>{location.atmosphere}</p>
+              <em>来源章节 {location.chapterNumbers.join(" / ")}</em>
+            </article>
+          ))}
+        </section>
+        <section className="plot-column">
+          <div className="material-column-heading"><span>情节节点</span><b>{analysis.plotBeats.length}</b></div>
+          {analysis.plotBeats.map((beat) => (
+            <article className="plot-node" key={`${beat.order}-${beat.title}`}>
+              <b>{String(beat.order).padStart(2, "0")}</b>
+              <div><strong>{beat.title}</strong><p>{beat.summary}</p><small>{beat.characterNames.join(" · ")}{beat.locationName ? ` @ ${beat.locationName}` : ""}</small></div>
+            </article>
+          ))}
+        </section>
+      </div>
+      <section className="relation-strip">
+        <div className="material-column-heading"><span>必要关系</span><b>{analysis.relations.length}</b></div>
+        <div>
+          {analysis.relations.map((relation, index) => (
+            <article key={`${relation.source}-${relation.target}-${index}`}>
+              <strong>{relation.source}</strong><span>{relation.type}</span><strong>{relation.target}</strong><small>{relation.evidence}</small>
+            </article>
+          ))}
+        </div>
+      </section>
+      <footer>分析由 {analysis.model} / {analysis.runtime} 生成，仅作为剧本改写素材，不是正式资产设定。</footer>
+    </div>
+  );
+}
+
+function AdaptationScriptWorkspace({
+  analysis,
+  script,
+  plannedEpisodeCount,
+  working,
+  onGenerate,
+  onAppend,
+  onConfirm,
+}: {
+  analysis: StoryMaterialAnalysis | null;
+  script: AdaptationScript | null;
+  plannedEpisodeCount?: number;
+  working: "analysis" | "script" | "append" | "confirm" | null;
+  onGenerate: () => void;
+  onAppend: () => void;
+  onConfirm: () => void;
+}) {
+  const [activeEpisodeNumber, setActiveEpisodeNumber] = useState(1);
+  const [activeDraftTab, setActiveDraftTab] = useState<"script" | "hooks">("script");
+
+  if (!analysis) {
+    return (
+      <div className="source-empty-state development-empty-state">
+        <span className="eyebrow">顺序门槛</span>
+        <h2>先完成素材分析</h2>
+        <p>剧本改写必须锁定一版素材图谱，不能从尚未分析的原文直接生成正式资产。</p>
+      </div>
+    );
+  }
+  if (!script) {
+    return (
+      <div className="source-empty-state development-empty-state">
+        <span className="eyebrow">改编草案 / 来源 v{analysis.sourceVersion}</span>
+        <h2>按项目设定规划{plannedEpisodeCount ? ` ${plannedEpisodeCount} ` : ""}集</h2>
+        <p>模型会读取内容类型、受众、单集时长和创作方向，跨章节生成完整分集与爆点。此操作只保存草案，不创建生产剧集。</p>
+        <button className="primary-button" type="button" disabled={working !== null || analysis.isStale} onClick={onGenerate}>
+          <WandSparkles size={14} />{working === "script" ? "生成中" : analysis.isStale ? "请先重新分析" : `生成${plannedEpisodeCount ? `${plannedEpisodeCount}集` : "完整"}草案`}
+        </button>
+      </div>
+    );
+  }
+
+  const activeEpisode = script.episodes.find((episode) => episode.proposalNumber === activeEpisodeNumber)
+    ?? script.episodes[0];
+
+  return (
+    <div className="development-workspace script-draft-workspace">
+      <header>
+        <div>
+          <span className="eyebrow">剧本草案 / v{script.version} / 原文 v{script.sourceVersion}</span>
+          <h2>{script.title}</h2>
+        </div>
+        <div className="button-group">
+          <span className={script.status === "confirmed" ? "status-chip" : "status-chip warning"}>{script.status === "confirmed" ? "已确认" : "待导演确认"}</span>
+          {script.status === "draft" && (
+            <>
+              <button className="secondary-button" type="button" disabled={working !== null} onClick={onGenerate}>
+                <WandSparkles size={13} />{working === "script" ? "重新生成中" : `按设定重新生成${plannedEpisodeCount ? ` ${plannedEpisodeCount} 集` : "全部"}`}
+              </button>
+              <button className="secondary-button" type="button" disabled={working !== null || script.episodes.length >= 6} onClick={onAppend}>
+                <Plus size={13} />{working === "append" ? "添加中" : "添加剧集"}
+              </button>
+              <button className="primary-button" type="button" disabled={working !== null} onClick={onConfirm}>
+                <Check size={13} />{working === "confirm" ? "确认中" : "确认并创建生产集"}
+              </button>
+            </>
+          )}
+        </div>
+      </header>
+      {script.hasNewerSourceVersion && <div className="development-warning">原文已有新版本，但此草案仍锁定原文 v{script.sourceVersion}，内容未被自动修改。</div>}
+      <div className="script-draft-layout">
+        <aside className="script-episode-directory">
+          <header><strong>剧集目录</strong><span>{script.episodes.length}</span></header>
+          <div>
+            {script.episodes.map((episode) => (
+              <button
+                className={episode.proposalNumber === activeEpisode?.proposalNumber ? "active" : ""}
+                key={episode.proposalNumber}
+                type="button"
+                onClick={() => setActiveEpisodeNumber(episode.proposalNumber)}
+              >
+                <span>E{String(episode.proposalNumber).padStart(2, "0")}</span>
+                <strong>{episode.title}</strong>
+                <small>{episode.scenes.length} 场 · {episode.targetSeconds}s</small>
+              </button>
+            ))}
+          </div>
+        </aside>
+        <section className="script-draft-main">
+          <div className="script-view-tabs" role="tablist" aria-label="剧本草案视图">
+            <button className={activeDraftTab === "script" ? "active" : ""} type="button" onClick={() => setActiveDraftTab("script")}>
+              <Edit3 size={13} />剧集
+            </button>
+            <button className={activeDraftTab === "hooks" ? "active" : ""} type="button" onClick={() => setActiveDraftTab("hooks")}>
+              <Sparkles size={13} />爆点分析
+            </button>
+          </div>
+          {activeDraftTab === "script" && activeEpisode ? (
+            <div className="script-proposal-list single-episode">
+              <section>
+                <header><span>E{String(activeEpisode.proposalNumber).padStart(2, "0")}</span><div><h3>{activeEpisode.title}</h3><p>{activeEpisode.logline}</p></div><small>{activeEpisode.targetSeconds}s · 来源章节 {activeEpisode.sourceChapterNumbers.join(" / ")}</small></header>
+                <div>
+                  {activeEpisode.scenes.map((scene) => (
+                    <article key={scene.sceneNumber}>
+                      <b>{String(scene.sceneNumber).padStart(2, "0")}</b>
+                      <div><strong>{scene.heading}</strong><p>{scene.summary}</p><small>{scene.storyFunction}</small></div>
+                      <div><span>{scene.characters.join(" · ")}</span><small>{scene.props.length ? `道具线索：${scene.props.join(" · ")}` : "无关键道具"}</small></div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            </div>
+          ) : (
+            <HookTimeline script={script} activeEpisodeNumber={activeEpisode?.proposalNumber ?? 1} />
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function HookTimeline({ script, activeEpisodeNumber }: { script: AdaptationScript; activeEpisodeNumber: number }) {
+  const smallHookCount = script.episodes.reduce((total, episode) => total + (episode.smallHooks?.length ?? 0), 0);
+  const bigHookCount = script.episodes.reduce((total, episode) => total + (episode.bigHooks?.length ?? 0), 0);
+  return (
+    <div className="hook-timeline-workspace">
+      <div className="hook-summary-strip">
+        <div><span>剧集</span><strong>{script.episodes.length}</strong></div>
+        <div><span>总时长</span><strong>{script.episodes.reduce((total, episode) => total + episode.targetSeconds, 0)}s</strong></div>
+        <div><span>小爆点</span><strong>{smallHookCount}</strong></div>
+        <div><span>大爆点</span><strong>{bigHookCount}</strong></div>
+      </div>
+      <div className="hook-timeline-legend"><span className="small">小爆点</span><span className="big">大爆点</span></div>
+      <div className="hook-timeline-list">
+        {script.episodes.map((episode) => (
+          <section className={episode.proposalNumber === activeEpisodeNumber ? "hook-episode-timeline active" : "hook-episode-timeline"} key={episode.proposalNumber}>
+            <header><span>E{String(episode.proposalNumber).padStart(2, "0")}</span><strong>{episode.title}</strong><small>{episode.targetSeconds}s</small></header>
+            <div className="hook-time-axis">
+              <i className="axis-line" />
+              {["开场", "25%", "中点", "75%", "集尾"].map((label, index) => <span className="time-tick" style={{ left: `${index * 25}%` }} key={label}>{label}</span>)}
+              {(episode.smallHooks ?? []).map((hook, index, hooks) => (
+                <div className={index % 2 ? "hook-marker small staggered" : "hook-marker small"} style={{ left: `${((index + 1) / (hooks.length + 1)) * 100}%` }} title={hook} key={`small-${index}`}>
+                  <i /><b>小爆点</b><p>{hook}</p>
+                </div>
+              ))}
+              {(episode.bigHooks ?? []).map((hook, index, hooks) => (
+                <div className="hook-marker big" style={{ left: `${((index + 1) / (hooks.length + 1)) * 100}%` }} title={hook} key={`big-${index}`}>
+                  <i /><b>大爆点</b><p>{hook}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+      <section className="overall-hook-notes">
+        <HookList title="整体小爆点" tone="small" hooks={script.overallSmallHooks ?? []} empty="暂无整体小爆点" />
+        <HookList title="整体大爆点" tone="big" hooks={script.overallBigHooks ?? []} empty="暂无整体大爆点" />
+      </section>
+    </div>
+  );
+}
+
+function HookList({ title, tone, hooks, empty }: { title: string; tone: "small" | "big"; hooks: string[]; empty: string }) {
+  return (
+    <div className={`hook-list ${tone}`}>
+      <strong>{title}</strong>
+      {hooks.length ? hooks.map((hook, index) => <p key={`${title}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span>{hook}</p>) : <small>{empty}</small>}
     </div>
   );
 }
@@ -759,7 +1322,7 @@ export function OutlinePage() {
       <PageTitle
         eyebrow="故事结构 / 改编"
         title="改编大纲"
-        description="明确原文取舍，以及原文集到生产集的多对多映射"
+        description="从原文资料的任意章节取材，建立非一一对应的生产剧集改编关系"
         action={<button className="primary-button">创建新版本</button>}
       />
       <div className="view-tabs">
@@ -779,7 +1342,7 @@ export function OutlinePage() {
       {view === "mapping" ? (
         <div className="mapping-board">
           <header>
-            <span>原文集 / Section</span>
+            <span>原文资料 / 章节</span>
             <span>改编关系</span>
             <span>生产剧本集</span>
           </header>
@@ -819,6 +1382,42 @@ export function OutlinePage() {
           <p>林墨带着关键文件进入天桥食堂，在层层误导中查明匿名警告的来源。</p>
         </div>
       )}
+    </div>
+  );
+}
+
+export function ScriptLandingPage() {
+  const { projectId = "" } = useParams();
+  const [episodes, setEpisodes] = useState<ProductionEpisodeRecord[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listProductionEpisodes(projectId, controller.signal)
+      .then(setEpisodes)
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "生产剧集加载失败。");
+      });
+    return () => controller.abort();
+  }, [projectId]);
+
+  if (episodes?.[0]) {
+    return <Navigate to={`/projects/${projectId}/script/episodes/${episodes[0].id}`} replace />;
+  }
+
+  return (
+    <div className="page full-height-page">
+      <div className="source-empty-state development-empty-state">
+        <span className="eyebrow">剧本 / 正式资产</span>
+        <h1>{error || episodes === null ? "正在读取生产剧集" : "尚未创建正式剧本"}</h1>
+        <p>{error || "先在故事结构中确认改编方案。确认动作会创建独立生产集和对应的正式剧本资产。"}</p>
+        {!error && episodes !== null && (
+          <NavLink className="primary-button" to={`/projects/${projectId}/story/adaptation`}>
+            返回改编方案
+          </NavLink>
+        )}
+      </div>
     </div>
   );
 }
@@ -1045,6 +1644,97 @@ export function AssetsPage() {
 }
 
 export function ScriptPage() {
+  const { projectId = "", productionEpisodeId = "" } = useParams();
+  const [scriptPackage, setScriptPackage] = useState<ProductionScriptPackage | null>(null);
+  const [activeSceneNumber, setActiveSceneNumber] = useState(1);
+  const [loadError, setLoadError] = useState<{ episodeId: string; message: string } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getProductionScriptPackage(projectId, productionEpisodeId, controller.signal)
+      .then((loaded) => {
+        setScriptPackage(loaded);
+        setLoadError(null);
+        setActiveSceneNumber(loaded.episode.scenes[0]?.sceneNumber ?? 1);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setLoadError({
+          episodeId: productionEpisodeId,
+          message: loadError instanceof Error ? loadError.message : "正式剧本加载失败。",
+        });
+      });
+    return () => controller.abort();
+  }, [productionEpisodeId, projectId]);
+
+  const error = loadError?.episodeId === productionEpisodeId ? loadError.message : "";
+  if (!scriptPackage || scriptPackage.productionEpisodeId !== productionEpisodeId) {
+    return (
+      <div className="page full-height-page">
+        <div className="source-empty-state development-empty-state">
+          <span className="eyebrow">剧本 / 正式资产</span>
+          <h1>{error || "正在读取正式剧本"}</h1>
+          <p>{error ? "请返回改编方案检查确认状态。" : "正在按生产集读取锁定的剧本包。"}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const episode = scriptPackage.episode;
+  const activeScene = episode.scenes.find((item) => item.sceneNumber === activeSceneNumber)
+    ?? episode.scenes[0];
+
+  return (
+    <div className="page full-height-page">
+      <PageTitle
+        eyebrow={`剧本 / E${String(scriptPackage.episodeNumber).padStart(2, "0")} / v${scriptPackage.version}`}
+        title={scriptPackage.title}
+        description={`${episode.logline} · 目标 ${scriptPackage.targetSeconds ?? episode.targetSeconds} 秒`}
+        action={<span className="status-chip">正式剧本已创建</span>}
+      />
+      <div className="hook-summary-strip">
+        <div><span>生产集</span><strong>E{String(scriptPackage.episodeNumber).padStart(2, "0")}</strong></div>
+        <div><span>场次</span><strong>{episode.scenes.length}</strong></div>
+        <div><span>来源章节</span><strong>{episode.sourceChapterNumbers.join(" / ") || "原创"}</strong></div>
+        <div><span>状态</span><strong>{scriptPackage.status === "draft" ? "待细化" : scriptPackage.status}</strong></div>
+      </div>
+      <div className="script-workspace">
+        <aside className="scene-list">
+          <header><div><strong>场次目录</strong><small>{episode.scenes.length} 场</small></div></header>
+          <div className="scene-tabs">
+            {episode.scenes.map((scene) => (
+              <button
+                className={scene.sceneNumber === activeScene?.sceneNumber ? "active" : ""}
+                onClick={() => setActiveSceneNumber(scene.sceneNumber)}
+                key={scene.sceneNumber}
+              >
+                <span>S{String(scene.sceneNumber).padStart(2, "0")}</span>
+                <small>{scene.heading}</small>
+              </button>
+            ))}
+          </div>
+        </aside>
+        {activeScene && (
+          <article className="script-editor">
+            <header>
+              <div>
+                <span className="eyebrow">S{String(activeScene.sceneNumber).padStart(2, "0")}</span>
+                <h2>{activeScene.heading}</h2>
+                <p>{activeScene.storyFunction}</p>
+              </div>
+            </header>
+            <div className="script-block action"><span>场景内容</span><p>{activeScene.summary}</p></div>
+            <div className="script-block dialogue"><span>对白说明</span><p>{activeScene.dialogueNotes || "本级剧本未设置对白说明。"}</p></div>
+            <div className="script-block action"><span>人物</span><p>{activeScene.characters.join(" · ") || "无明确人物"}</p></div>
+            <div className="script-block action"><span>道具</span><p>{activeScene.props.join(" · ") || "无关键道具"}</p></div>
+          </article>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ScriptDemoPage() {
   const { productionEpisodeId } = useParams();
   const episode =
     episodes.find((item) => item.id === productionEpisodeId) ?? episodes[0];
