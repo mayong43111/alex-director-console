@@ -83,7 +83,7 @@ public sealed class GenerateComfyUiVideoTool(
             var workflowJson = await remoteComfyUiService.ReadWorkflowAsync(configuration, workflowFileName, cancellationToken);
             await remoteComfyUiService.ExecuteActionAsync(configuration, "start-tunnel", cancellationToken);
             var generatedVideo = await comfyUiVideoGenerator.GenerateAsync(new(
-                configuration.LocalProxyPort,
+                remoteComfyUiService.GetHttpPort(configuration),
                 workflowJson,
                 firstFrame,
                 lastFrame,

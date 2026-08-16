@@ -293,9 +293,11 @@ button { color: inherit; }
 .creative-asset-placeholder > span { position: absolute; top: 10px; left: 11px; color: #e6b34f; font: 8px 'IBM Plex Mono'; }
 .creative-asset-placeholder strong { color: #f1f3f1; font-size: 12px; }
 .creative-asset-placeholder p { max-width: 240px; margin: 0; color: #9da7a1; font-size: 8px; line-height: 1.5; }
-.creative-asset-placeholder img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.creative-cover-preview { position: absolute; inset: 0; }
+.creative-cover-preview .ant-image { width: 100%; height: 100%; }
+.creative-cover-preview .ant-image-img { width: 100%; height: 100%; object-fit: cover; }
 .creative-asset-placeholder button { z-index: 1; display: flex; align-items: center; gap: 4px; margin-top: 3px; padding: 6px 9px; border: 1px solid #8a9690; color: #f3f5f3; background: rgba(24,29,26,.82); cursor: pointer; font-size: 8px; }
-.creative-asset-placeholder img ~ button { position: absolute; right: 9px; top: 8px; margin: 0; }
+.creative-cover-preview ~ button { position: absolute; right: 9px; top: 8px; margin: 0; }
 .creative-asset-placeholder button:disabled { opacity: .55; cursor: wait; }
 .creative-asset-placeholder small { position: absolute; right: 10px; bottom: 8px; color: #7e8982; font: 7px 'IBM Plex Mono'; }
 .creative-brief-copy { align-self: center; padding: 22px 28px; }

@@ -5,6 +5,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { Image } from "antd";
 import {
   Check,
   CheckSquare2,
@@ -332,10 +333,13 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
           <section className="creative-brief" aria-label="当前创作基线">
             <div className="creative-asset-placeholder" style={{ aspectRatio: settings.aspectRatio.replace(":", "/") }}>
               {settings.cover ? (
-                <img
-                  src={`${settings.cover.contentUrl}?v=${settings.cover.version}`}
-                  alt={`${settings.projectName}概念封面`}
-                />
+                <div className="creative-cover-preview">
+                  <Image
+                    src={`${settings.cover.contentUrl}?v=${settings.cover.version}`}
+                    alt={`${settings.projectName}概念封面`}
+                    preview={{ mask: "预览封面" }}
+                  />
+                </div>
               ) : (
                 <><ImagePlus size={28} strokeWidth={1.5} /><strong>尚未生成封面</strong></>
               )}

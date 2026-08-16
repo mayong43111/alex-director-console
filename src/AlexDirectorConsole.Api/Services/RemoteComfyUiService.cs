@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,7 @@ namespace AlexDirectorConsole.Api.Services;
 
 public interface IRemoteComfyUiService : IDisposable
 {
+    int GetHttpPort(ProjectRuntimeConfiguration configuration);
     Task<string> InspectAsync(ProjectRuntimeConfiguration configuration, CancellationToken cancellationToken);
     Task<string> ExecuteActionAsync(ProjectRuntimeConfiguration configuration, string action, CancellationToken cancellationToken);
     Task<string> ReadWorkflowAsync(ProjectRuntimeConfiguration configuration, string fileName, CancellationToken cancellationToken);
@@ -39,12 +41,18 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
     private readonly object remoteOwnershipGate = new();
     private readonly SemaphoreSlim tunnelGate = new(1, 1);
 
+    public int GetHttpPort(ProjectRuntimeConfiguration configuration) =>
+        IsLocalHost(configuration.VmHost) ? configuration.ComfyUiPort : configuration.LocalProxyPort;
+
     public async Task<string> InspectAsync(
         ProjectRuntimeConfiguration configuration,
         CancellationToken cancellationToken)
     {
-        EnsureTunnelOwnership(configuration);
-        EnsureRemoteOwnership(configuration);
+        if (!IsLocalHost(configuration.VmHost))
+        {
+            EnsureTunnelOwnership(configuration);
+            EnsureRemoteOwnership(configuration);
+        }
         var client = httpClientFactory.CreateClient("ComfyUiProxy");
         var baseUri = GetProxyBaseUri(configuration);
         try
@@ -75,7 +83,9 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         catch (HttpRequestException exception)
         {
             throw new InvalidOperationException(
-                $"ComfyUI HTTP 代理不可用（{baseUri}）。请先调用 manage_remote_comfyui(action=start-tunnel)，不要重复建立隧道。",
+                IsLocalHost(configuration.VmHost)
+                    ? $"本机 ComfyUI 不可用（{baseUri}）。请确认本机 ComfyUI 已启动并监听配置端口。"
+                    : $"ComfyUI HTTP 代理不可用（{baseUri}）。请先调用 manage_remote_comfyui(action=start-tunnel)，不要重复建立隧道。",
                 exception);
         }
     }
@@ -246,6 +256,9 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         ProjectRuntimeConfiguration configuration,
         CancellationToken cancellationToken)
     {
+        if (IsLocalHost(configuration.VmHost))
+            return $"connection=local url={GetProxyBaseUri(configuration)}";
+
         await tunnelGate.WaitAsync(cancellationToken);
         try
         {
@@ -382,8 +395,8 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         }
     }
 
-    private static Uri GetProxyBaseUri(ProjectRuntimeConfiguration configuration) =>
-        new($"http://127.0.0.1:{configuration.LocalProxyPort}");
+    private Uri GetProxyBaseUri(ProjectRuntimeConfiguration configuration) =>
+        new($"http://127.0.0.1:{GetHttpPort(configuration)}");
 
     private static async Task WaitForTunnelAsync(
         Process process,
@@ -417,6 +430,8 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
         ProjectRuntimeConfiguration configuration,
         CancellationToken cancellationToken)
     {
+        if (IsLocalHost(configuration.VmHost)) return "connection=local tunnel=not-required";
+
         await tunnelGate.WaitAsync(cancellationToken);
         try
         {
@@ -536,6 +551,13 @@ public sealed class RemoteComfyUiService(IHttpClientFactory httpClientFactory) :
 
     private static void AddDestination(ProcessStartInfo startInfo, ProjectRuntimeConfiguration configuration) =>
         startInfo.ArgumentList.Add($"{configuration.VmUsername}@{configuration.VmHost}");
+
+    private static bool IsLocalHost(string host)
+    {
+        var normalizedHost = host.Trim().Trim('[', ']');
+        return normalizedHost.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || (IPAddress.TryParse(normalizedHost, out var address) && IPAddress.IsLoopback(address));
+    }
 
     private static string Quote(string value) => $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
 
