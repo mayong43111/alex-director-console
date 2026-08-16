@@ -1,4 +1,5 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.AspNetCore.DataProtection;
@@ -13,6 +14,7 @@ public sealed record FoundryConfigurationView(
     bool ApiKeyConfigured,
     string ImageEndpoint,
     string ImageDeployment,
+    string ImageQuality,
     bool ImageApiKeyConfigured,
     bool ImageConfigured,
     DateTimeOffset? UpdatedAtUtc)
@@ -28,6 +30,7 @@ public sealed record FoundryConfigurationView(
         false,
         string.Empty,
         RequiredImageDeployment,
+        GptImageOptions.DefaultQuality,
         false,
         false,
         null);
@@ -39,6 +42,7 @@ public sealed record FoundryConfigurationView(
         !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey),
         configuration.ImageEndpoint,
         RequiredImageDeployment,
+        GptImageOptions.NormalizeQuality(configuration.ImageQuality),
         !string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey),
         Uri.TryCreate(
             string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
@@ -75,7 +79,8 @@ public sealed record UpdateFoundryConfigurationCommand(
     bool ClearApiKey,
     string? ImageEndpoint,
     string? ImageApiKey,
-    bool ClearImageApiKey) : ICommand<UpdateFoundryConfigurationResult>;
+    bool ClearImageApiKey,
+    string? ImageQuality) : ICommand<UpdateFoundryConfigurationResult>;
 
 public sealed record UpdateFoundryConfigurationResult(
     FoundryConfigurationView? Configuration,
@@ -117,6 +122,14 @@ public sealed class UpdateFoundryConfigurationHandler(
                 "imageEndpoint",
                 "请输入有效的图片模型 HTTP(S) Endpoint，或留空复用语言模型 Endpoint。");
             }
+        var imageQuality = command.ImageQuality?.Trim().ToLowerInvariant()
+            ?? GptImageOptions.DefaultQuality;
+        if (!GptImageOptions.SupportedQualities.Contains(imageQuality))
+        {
+            return UpdateFoundryConfigurationResult.Invalid(
+                "imageQuality",
+                "图片默认质量必须是 low、medium 或 high。");
+        }
 
         var configuration = await dbContext.FoundryConfigurations
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
@@ -133,6 +146,7 @@ public sealed class UpdateFoundryConfigurationHandler(
             configuration.ImageEndpoint = imageEndpoint?.TrimEnd('/') ?? string.Empty;
         }
         configuration.ImageDeployment = FoundryConfigurationView.RequiredImageDeployment;
+        configuration.ImageQuality = imageQuality;
         configuration.UpdatedAtUtc = timeProvider.GetUtcNow();
         var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
         if (command.ClearApiKey)

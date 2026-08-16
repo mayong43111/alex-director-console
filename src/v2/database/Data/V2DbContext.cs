@@ -361,6 +361,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.ProtectedApiKey).HasMaxLength(4000).IsRequired();
             entity.Property(item => item.ImageEndpoint).HasMaxLength(1000).IsRequired();
             entity.Property(item => item.ImageDeployment).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.ImageQuality).HasMaxLength(20).IsRequired();
             entity.Property(item => item.ProtectedImageApiKey).HasMaxLength(4000).IsRequired();
         });
 

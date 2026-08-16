@@ -26,7 +26,6 @@ import {
   Clapperboard,
   Film,
   Gauge,
-  Images,
   LayoutDashboard,
   RotateCcw,
   Search,
@@ -52,18 +51,17 @@ import {
 } from "../api/copilot";
 
 const navigation = [
-  { label: "项目设定", icon: SlidersHorizontal, to: "settings" },
-  { label: "故事结构", icon: BookOpenText, to: "story/source" },
+  { label: "设定", icon: SlidersHorizontal, to: "settings" },
+  { label: "故事", icon: BookOpenText, to: "story/source" },
   { label: "剧本", icon: Film, to: "script" },
-  { label: "资产圣经 · DEMO", icon: Boxes, to: "assets/characters" },
-  { label: "视觉参考 · DEMO", icon: Images, to: "references" },
+  { label: "资产", icon: Boxes, to: "assets/characters" },
   {
-    label: "分镜 · DEMO",
+    label: "分镜",
     icon: Clapperboard,
     to: "storyboard",
   },
-  { label: "生产 · DEMO", icon: Gauge, to: "production" },
-  { label: "审阅交付 · DEMO", icon: Sparkles, to: "review" },
+  { label: "生产", icon: Gauge, to: "production" },
+  { label: "审阅", icon: Sparkles, to: "review" },
 ];
 
 type Workflow = {
@@ -109,8 +107,6 @@ function getWorkflow(
         { label: "场景", to: `${projectBase}/assets/scenes` },
         { label: "道具", to: `${projectBase}/assets/props` },
       ],
-      queue: "2 项待确认",
-      next: { label: "检查视觉参考", to: `${projectBase}/references` },
     };
   }
   if (pathname.includes("/script/")) {
@@ -119,27 +115,17 @@ function getWorkflow(
       tabs: episodeId ? [{ label: "分集剧本", to: `${projectBase}/script/episodes/${episodeId}` }] : [],
     };
   }
-  if (pathname.endsWith("/references")) {
-    return {
-      label: "视觉参考",
-      tabs: [],
-      queue: "2 项待审阅",
-      next: { label: "进入分镜工作区", to: `${projectBase}/storyboard/episodes/${episodeId}` },
-    };
-  }
   if (pathname.includes("/storyboard")) {
     return {
       label: "分镜",
       tabs: [],
-      queue: "1 个阻断镜头",
-      next: { label: "创建生产任务", to: `${projectBase}/production/episodes/${episodeId}` },
+      next: { label: "查看生产运行", to: `${projectBase}/production/episodes/${episodeId}` },
     };
   }
   if (pathname.endsWith("/production") || pathname.includes("/production/")) {
     return {
       label: "生产",
       tabs: [],
-      queue: "2 个失败项",
       next: { label: "进入成片审阅", to: `${projectBase}/review/episodes/${episodeId}` },
     };
   }
@@ -189,6 +175,14 @@ export function AppShell() {
       });
     return () => controller.abort();
   }, [projectId]);
+  useEffect(() => {
+    const syncProductionRunEpisode = (event: Event) => {
+      const episodeId = (event as CustomEvent<{ productionEpisodeId: string }>).detail.productionEpisodeId;
+      setSelectedEpisode(episodeId);
+    };
+    window.addEventListener("alex:production-run-episode", syncProductionRunEpisode);
+    return () => window.removeEventListener("alex:production-run-episode", syncProductionRunEpisode);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     const loadEpisodes = () => {
@@ -247,16 +241,27 @@ export function AppShell() {
     localStorage.setItem("alex-director-v2.agentOpen", String(open));
     setAgentOpen(open);
   };
-  const [siderCollapsed, setSiderCollapsed] = useState(
-    () => window.matchMedia("(max-width: 1100px)").matches,
-  );
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 1100px)");
-    const syncCollapsedState = (event: MediaQueryListEvent) => {
-      setSiderCollapsed(event.matches);
+    const mobileQuery = window.matchMedia("(max-width: 767px)");
+    const closeForMobile = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) setAgentOpen(false);
     };
-    mediaQuery.addEventListener("change", syncCollapsedState);
-    return () => mediaQuery.removeEventListener("change", syncCollapsedState);
+    closeForMobile(mobileQuery);
+    mobileQuery.addEventListener("change", closeForMobile);
+    return () => mobileQuery.removeEventListener("change", closeForMobile);
+  }, []);
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia("(max-width: 767px)").matches,
+  );
+  const [mobileMenuCollapsed, setMobileMenuCollapsed] = useState(true);
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const syncMobileState = (event: MediaQueryListEvent) => {
+      setIsMobile(event.matches);
+      setMobileMenuCollapsed(true);
+    };
+    mediaQuery.addEventListener("change", syncMobileState);
+    return () => mediaQuery.removeEventListener("change", syncMobileState);
   }, []);
   const [queueOpen, setQueueOpen] = useState(false);
   const routeEpisode = location.pathname.match(/(?:script|storyboard|production|review)\/episodes\/([^/]+)/)?.[1];
@@ -270,9 +275,8 @@ export function AppShell() {
     ...item,
     to: item.to.replace("production-e01", routingEpisode),
   }));
-  const active = navigation.find((item) =>
-    location.pathname.includes(item.to.split("/")[0]),
-  );
+  const activeRoot = location.pathname.slice(projectBase.length + 1).split("/")[0];
+  const active = navigation.find((item) => item.to.split("/")[0] === activeRoot);
 
   const changeEpisode = (episodeId: string) => {
     setSelectedEpisode(episodeId);
@@ -342,8 +346,11 @@ export function AppShell() {
       fixSiderbar
       siderWidth={208}
       breakpoint={false}
-      collapsed={siderCollapsed}
-      onCollapse={setSiderCollapsed}
+      collapsed={isMobile ? mobileMenuCollapsed : true}
+      onCollapse={(collapsed) => {
+        if (isMobile) setMobileMenuCollapsed(collapsed);
+      }}
+      collapsedButtonRender={isMobile ? undefined : false}
       contentWidth="Fluid"
       route={{ path: projectBase, routes: proRoutes }}
       location={{ pathname: location.pathname }}
@@ -454,7 +461,7 @@ export function AppShell() {
         <div className="activity-bar">
           <Badge status="default" />
           <strong>{productionEpisodes.length === 0 ? "暂无生产任务" : `${productionEpisodes.length} 个生产集`}</strong>
-          <span>{productionEpisodes.length === 0 ? "创建生产剧集后可安排脚本、分镜与生成任务" : "尚未接入实时任务状态"}</span>
+          <span>{productionEpisodes.length === 0 ? "创建生产剧集后可安排脚本、分镜与生成任务" : "生产运行状态请在生产中心查看"}</span>
         </div>
       </div>
     </ProLayout>

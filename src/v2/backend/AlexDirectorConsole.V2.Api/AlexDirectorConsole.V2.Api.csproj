@@ -8,6 +8,8 @@
     <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.17.0" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.17.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.29" />
+    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.151.1" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>
 

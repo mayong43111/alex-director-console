@@ -1032,6 +1032,7 @@ export function ServicesPage() {
   const [apiKey, setApiKey] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
   const [imageEndpoint, setImageEndpoint] = useState("");
+  const [imageQuality, setImageQuality] = useState<"low" | "medium" | "high">("medium");
   const [imageApiKey, setImageApiKey] = useState("");
   const [clearImageApiKey, setClearImageApiKey] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1046,6 +1047,7 @@ export function ServicesPage() {
         setConfiguration(loaded);
         setEndpoint(loaded.endpoint);
         setImageEndpoint(loaded.imageEndpoint);
+        setImageQuality(loaded.imageQuality);
       })
       .catch((loadError: unknown) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
@@ -1070,6 +1072,7 @@ export function ServicesPage() {
         apiKey: apiKey || undefined,
         clearApiKey,
         imageEndpoint,
+        imageQuality,
         imageApiKey: imageApiKey || undefined,
         clearImageApiKey,
       });
@@ -1078,6 +1081,7 @@ export function ServicesPage() {
       setApiKey("");
       setClearApiKey(false);
       setImageEndpoint(saved.imageEndpoint);
+      setImageQuality(saved.imageQuality);
       setImageApiKey("");
       setClearImageApiKey(false);
       setMessage("配置已安全保存。");
@@ -1202,6 +1206,18 @@ export function ServicesPage() {
           <label>
             <span>Image Deployment</span>
             <input value="gpt-image-2" readOnly />
+          </label>
+          <label>
+            <span>默认图片质量</span>
+            <select
+              value={imageQuality}
+              onChange={(event) => setImageQuality(event.target.value as "low" | "medium" | "high")}
+              disabled={loading || Boolean(busy)}
+            >
+              <option value="low">低</option>
+              <option value="medium">中等</option>
+              <option value="high">高</option>
+            </select>
           </label>
           <label>
             <span>Image API Key</span>

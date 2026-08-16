@@ -410,9 +410,14 @@ public static class ProjectSettingsEndpoints
         {
             try
             {
-                return Results.Ok(await coverService.GenerateAsync(
+                if (string.IsNullOrWhiteSpace(request.ConfirmedPrompt))
+                {
+                    return Results.BadRequest(new { error = "请先预览并确认完整提示词和参数。" });
+                }
+                return Results.Ok(await coverService.GenerateConfirmedAsync(
                     projectId,
                     request.Instruction,
+                    request.ConfirmedPrompt,
                     cancellationToken));
             }
             catch (KeyNotFoundException)
@@ -433,6 +438,28 @@ public static class ProjectSettingsEndpoints
                     title: "封面生成失败",
                     detail: error.Message,
                     statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+        group.MapPost("/cover/preview", async (
+            Guid projectId,
+            ProjectCoverPreviewRequest request,
+            IProjectCoverService coverService,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await coverService.PreviewAsync(
+                    projectId,
+                    request.Instruction,
+                    cancellationToken));
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
             }
         });
         group.MapGet("/cover/{assetId:guid}/content", async (

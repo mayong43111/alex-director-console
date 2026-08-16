@@ -292,6 +292,7 @@ public sealed class FoundryConfiguration
     public string ProtectedApiKey { get; set; } = string.Empty;
     public string ImageEndpoint { get; set; } = string.Empty;
     public string ImageDeployment { get; set; } = "gpt-image-2";
+    public string ImageQuality { get; set; } = "medium";
     public string ProtectedImageApiKey { get; set; } = string.Empty;
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

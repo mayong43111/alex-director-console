@@ -1,10 +1,13 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Copilot;
 using AlexDirectorConsole.V2.Api.Features.Projects;
+using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
+using AlexDirectorConsole.V2.Api.Features.Projects.Production;
 using AlexDirectorConsole.V2.Api.Features.Projects.Queries;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
+using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
@@ -40,11 +43,16 @@ builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>(
 builder.Services.AddScoped<IProjectCopilotAgent, MafProjectCopilotAgent>();
 builder.Services.AddHttpClient<IProjectCoverGenerator, AzureFoundryProjectCoverGenerator>(client =>
     client.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerator>(client =>
+    client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddScoped<IProjectCoverService, ProjectCoverService>();
+builder.Services.AddScoped<IVisualReferenceService, VisualReferenceService>();
+builder.Services.AddScoped<IShotFrameService, ShotFrameService>();
 builder.Services.AddScoped<IProjectSettingsAssistant, MafProjectSettingsAssistant>();
 builder.Services.AddScoped<IProjectSettingsToolService, ProjectSettingsToolService>();
 builder.Services.AddScoped<IStoryMaterialAnalyzer, MafStoryMaterialAnalyzer>();
 builder.Services.AddScoped<IAdaptationScriptWriter, MafAdaptationScriptWriter>();
+builder.Services.AddScoped<IStoryboardDesigner, MafStoryboardDesigner>();
 builder.Services.AddScoped<ICommandDispatcher, CommandDispatcher>();
 builder.Services.AddScoped<IQueryDispatcher, QueryDispatcher>();
 builder.Services.AddScoped<ICommandHandler<CreateProjectCommand, CreateProjectResult>, CreateProjectCommandHandler>();
@@ -65,6 +73,13 @@ builder.Services.AddScoped<IQueryHandler<GetProductionScriptPackageQuery, Produc
 builder.Services.AddScoped<ICommandHandler<GenerateAdaptationScriptCommand, AdaptationScriptView?>, GenerateAdaptationScriptCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<AppendAdaptationEpisodeCommand, AdaptationScriptView?>, AppendAdaptationEpisodeCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ConfirmAdaptationScriptCommand, AdaptationScriptView?>, ConfirmAdaptationScriptCommandHandler>();
+builder.Services.AddScoped<IQueryHandler<ListVisualAssetsQuery, IReadOnlyList<VisualAssetView>>, ListVisualAssetsQueryHandler>();
+builder.Services.AddScoped<ICommandHandler<SaveVisualAssetCommand, SaveVisualAssetResult>, SaveVisualAssetCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<ImportStoryMaterialAssetsCommand, IReadOnlyList<VisualAssetView>?>, ImportStoryMaterialAssetsCommandHandler>();
+builder.Services.AddScoped<IQueryHandler<GetStoryboardQuery, StoryboardView?>, GetStoryboardQueryHandler>();
+builder.Services.AddScoped<ICommandHandler<GenerateStoryboardCommand, StoryboardView?>, GenerateStoryboardCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateStoryboardShotAssetsCommand, StoryboardView?>, UpdateStoryboardShotAssetsCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<StartShotProductionCommand, ShotProductionView?>, StartShotProductionCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<GetFoundryConfigurationQuery, FoundryConfigurationView>, GetFoundryConfigurationHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateFoundryConfigurationCommand, UpdateFoundryConfigurationResult>, UpdateFoundryConfigurationHandler>();
 builder.Services.AddScoped<ICommandHandler<TestFoundryConnectionCommand, TestFoundryConnectionResult>, TestFoundryConnectionHandler>();
@@ -92,6 +107,10 @@ app.MapProjectSettings();
 app.MapProjectSources();
 app.MapStoryMaterialAnalysis();
 app.MapAdaptationScripts();
+app.MapVisualAssets();
+app.MapStoryboards();
+app.MapShotFrameContent();
+app.MapProduction();
 app.MapFoundryConfiguration();
 app.MapSkills();
 app.MapCopilot();

@@ -27,6 +27,7 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.Equal("Azure AI Foundry", configuration.Provider);
         Assert.Equal("gpt-5.4", configuration.Deployment);
         Assert.Equal("gpt-image-2", configuration.ImageDeployment);
+        Assert.Equal("medium", configuration.ImageQuality);
         Assert.False(configuration.ApiKeyConfigured);
         Assert.False(configuration.ImageConfigured);
     }
@@ -46,6 +47,7 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
                 apiKey,
                 clearApiKey = false,
                 imageEndpoint = "",
+                imageQuality = "high",
                 imageApiKey,
                 clearImageApiKey = false
             });
@@ -63,6 +65,7 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.Equal("https://example.openai.azure.com", configuration.Endpoint);
         Assert.Equal("gpt-5.4", configuration.Deployment);
         Assert.Equal("gpt-image-2", configuration.ImageDeployment);
+        Assert.Equal("high", configuration.ImageQuality);
         Assert.True(configuration.ImageApiKeyConfigured);
         Assert.True(configuration.ImageConfigured);
 
@@ -114,6 +117,7 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         bool ApiKeyConfigured,
         string ImageEndpoint,
         string ImageDeployment,
+        string ImageQuality,
         bool ImageApiKeyConfigured,
         bool ImageConfigured,
         DateTimeOffset? UpdatedAtUtc);

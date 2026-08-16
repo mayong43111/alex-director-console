@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
@@ -127,12 +128,31 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
             ValidSettings("法式彩色冒险漫画"));
         saveResponse.EnsureSuccessStatusCode();
 
-        var firstResponse = await client.PostAsJsonAsync(
+        var rejectedResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
             new { instruction = (string?)null });
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
+
+        var firstPreviewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = (string?)null });
+        firstPreviewResponse.EnsureSuccessStatusCode();
+        var firstPreview = await firstPreviewResponse.Content.ReadFromJsonAsync<ImageGenerationPreviewView>();
+        Assert.NotNull(firstPreview);
+        var firstResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover",
+            new { instruction = (string?)null, confirmedPrompt = firstPreview.Prompt });
+
+        const string revision = "强化三位犬类火枪手的动作姿态，减少背景人物";
+        var secondPreviewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = revision });
+        secondPreviewResponse.EnsureSuccessStatusCode();
+        var secondPreview = await secondPreviewResponse.Content.ReadFromJsonAsync<ImageGenerationPreviewView>();
+        Assert.NotNull(secondPreview);
         var secondResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
-            new { instruction = "强化三位犬类火枪手的动作姿态，减少背景人物" });
+            new { instruction = revision, confirmedPrompt = secondPreview.Prompt });
 
         Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
         Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
@@ -163,9 +183,14 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Single(covers.Select(item => item.ResourceId).Distinct());
         Assert.All(covers, item => Assert.NotNull(item.BlobContent));
         using var metadata = JsonDocument.Parse(covers[1].GenerationMetadataJson!);
-        Assert.Equal(
-            "强化三位犬类火枪手的动作姿态，减少背景人物",
-            metadata.RootElement.GetProperty("instruction").GetString());
+        Assert.Equal(revision, metadata.RootElement.GetProperty("instruction").GetString());
+        Assert.Equal(secondPreview.Prompt, metadata.RootElement.GetProperty("prompt").GetString());
+        Assert.Equal("medium", metadata.RootElement.GetProperty("parameters").GetProperty("quality").GetString());
+        var savedReference = Assert.Single(metadata.RootElement.GetProperty("references").EnumerateArray());
+        Assert.Equal(1, savedReference.GetProperty("version").GetInt32());
+        Assert.Equal("uses-settings", savedReference.GetProperty("role").GetString());
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == second.AssetId && item.Role == "uses-settings"));
 
         var resaveResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings",

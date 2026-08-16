@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -67,8 +68,6 @@ public sealed class AzureFoundryProjectCoverGenerator(
     IDataProtectionProvider dataProtectionProvider) : IProjectCoverGenerator
 {
     private const string ApiVersion = "2025-04-01-preview";
-    private const string Quality = "medium";
-
     public async Task<GeneratedProjectCover> GenerateAsync(
         string prompt,
         string size,
@@ -102,6 +101,7 @@ public sealed class AzureFoundryProjectCoverGenerator(
             baseEndpoint = baseEndpoint[..^"/openai/v1".Length];
         }
         var deployment = FoundryConfigurationView.RequiredImageDeployment;
+        var quality = GptImageOptions.NormalizeQuality(configuration.ImageQuality);
         var requestUri = $"{baseEndpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/images/generations?api-version={Uri.EscapeDataString(ApiVersion)}";
         using var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
         request.Headers.Add("api-key", apiKey);
@@ -110,7 +110,7 @@ public sealed class AzureFoundryProjectCoverGenerator(
             prompt,
             n = 1,
             size,
-            quality = Quality,
+            quality,
             output_format = "png"
         });
 
@@ -135,7 +135,7 @@ public sealed class AzureFoundryProjectCoverGenerator(
                 "image/png",
                 ".png",
                 deployment,
-                Quality,
+                quality,
                 revisedPrompt);
         }
 
@@ -149,7 +149,7 @@ public sealed class AzureFoundryProjectCoverGenerator(
                 imageResponse.Content.Headers.ContentType?.MediaType ?? "image/png",
                 ".png",
                 deployment,
-                Quality,
+                quality,
                 revisedPrompt);
         }
 
@@ -175,58 +175,102 @@ public sealed class AzureFoundryProjectCoverGenerator(
 
 public interface IProjectCoverService
 {
+    Task<ImageGenerationPreviewView> PreviewAsync(
+        Guid projectId,
+        string? instruction,
+        CancellationToken cancellationToken);
+
     Task<ProjectCoverView> GenerateAsync(
         Guid projectId,
         string? instruction,
         CancellationToken cancellationToken);
+
+    Task<ProjectCoverView> GenerateConfirmedAsync(
+        Guid projectId,
+        string? instruction,
+        string confirmedPrompt,
+        CancellationToken cancellationToken);
 }
 
-public sealed record ProjectCoverGenerateRequest(string? Instruction);
+public sealed record ProjectCoverPreviewRequest(string? Instruction);
+
+public sealed record ProjectCoverGenerateRequest(string? Instruction, string? ConfirmedPrompt);
 
 public sealed class ProjectCoverService(
     V2DbContext dbContext,
     IProjectCoverGenerator generator,
     TimeProvider timeProvider) : IProjectCoverService
 {
-    public async Task<ProjectCoverView> GenerateAsync(
+    public async Task<ImageGenerationPreviewView> PreviewAsync(
         Guid projectId,
         string? instruction,
         CancellationToken cancellationToken)
     {
-        instruction = string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim();
-        if (instruction?.Length > 1000)
-        {
-            throw new InvalidOperationException("封面生成意见不能超过 1000 个字符。");
-        }
-        var project = await dbContext.Projects
-            .SingleOrDefaultAsync(item => item.Id == projectId, cancellationToken)
-            ?? throw new KeyNotFoundException("项目不存在。");
-        if (project.CurrentCreativeSettingsId is null)
-        {
-            throw new InvalidOperationException("请先保存项目设定，再生成概念封面。");
-        }
+        var (_, settingsAsset, settings, prompt, modelSize) = await PrepareAsync(
+            projectId,
+            instruction,
+            cancellationToken);
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        return new(
+            "generate-project-cover",
+            prompt,
+            new(
+                FoundryConfigurationView.RequiredImageDeployment,
+                GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
+                modelSize,
+                "png",
+                settings.OutputWidth,
+                settings.OutputHeight),
+            [GenerationProvenance.Reference(settingsAsset, "uses-settings")]);
+    }
 
-        var settingsAsset = await dbContext.Assets
-            .AsNoTracking()
-            .SingleOrDefaultAsync(
-                item => item.Id == project.CurrentCreativeSettingsId
-                    && item.ProjectId == projectId
-                    && item.Type == ProjectSettingsDefaults.AssetType,
-                cancellationToken)
-            ?? throw new InvalidOperationException("当前项目设定资产不存在。");
-        var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
-            settingsAsset.DocumentJson ?? "{}",
-            ProjectSettingsDefaults.JsonOptions)
-            ?? throw new InvalidOperationException("当前项目设定无法读取。");
+    public Task<ProjectCoverView> GenerateAsync(
+        Guid projectId,
+        string? instruction,
+        CancellationToken cancellationToken) => GenerateCoreAsync(
+            projectId,
+            instruction,
+            null,
+            cancellationToken);
 
+    public Task<ProjectCoverView> GenerateConfirmedAsync(
+        Guid projectId,
+        string? instruction,
+        string confirmedPrompt,
+        CancellationToken cancellationToken) => GenerateCoreAsync(
+            projectId,
+            instruction,
+            confirmedPrompt,
+            cancellationToken);
+
+    private async Task<ProjectCoverView> GenerateCoreAsync(
+        Guid projectId,
+        string? instruction,
+        string? confirmedPrompt,
+        CancellationToken cancellationToken)
+    {
+        var (project, settingsAsset, settings, prompt, modelSize) = await PrepareAsync(
+            projectId,
+            instruction,
+            cancellationToken);
+        if (confirmedPrompt is not null
+            && !string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("项目设定或生成意见已变化，请重新预览并确认提示词。");
+        }
         var generated = await generator.GenerateAsync(
-            BuildPrompt(settings, instruction),
-            settings.AspectRatio == "9:16" ? "1024x1536" : "1536x1024",
+            prompt,
+            modelSize,
             cancellationToken);
         if (generated.Bytes.Length == 0)
         {
             throw new InvalidOperationException("图片模型返回了空文件。");
         }
+        var output = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
+            generated.Bytes,
+            settings.OutputWidth,
+            settings.OutputHeight);
 
         var previous = await dbContext.Assets
             .Where(item => item.ProjectId == projectId && item.Type == ProjectCoverQueries.AssetType)
@@ -249,10 +293,10 @@ public sealed class ProjectCoverService(
             Type = ProjectCoverQueries.AssetType,
             Name = "项目概念封面",
             BlobKey = $"project-covers/{projectId:N}/{resourceId:N}/v{version}{generated.Extension}",
-            BlobContent = generated.Bytes,
+            BlobContent = output.Bytes,
             FileName = $"{project.Name}-概念封面-v{version}{generated.Extension}",
-            ContentType = generated.ContentType,
-            SizeBytes = generated.Bytes.LongLength,
+            ContentType = "image/png",
+            SizeBytes = output.Bytes.LongLength,
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
                 operation = "generate-project-cover",
@@ -260,14 +304,86 @@ public sealed class ProjectCoverService(
                 deployment = generated.Deployment,
                 quality = generated.Quality,
                 instruction,
+                prompt,
+                parameters = new
+                {
+                    deployment = generated.Deployment,
+                    quality = generated.Quality,
+                    size = modelSize,
+                    outputFormat = "png",
+                    outputWidth = settings.OutputWidth,
+                    outputHeight = settings.OutputHeight
+                },
+                references = new[]
+                {
+                    GenerationProvenance.Reference(settingsAsset, "uses-settings")
+                },
+                projectStyle = new
+                {
+                    settings.VisualStyle,
+                    settings.ArtDirection,
+                    settings.CharacterDesign,
+                    settings.ColorPalette,
+                    settings.CameraLanguage,
+                    settings.ImagePromptPrefix
+                },
+                modelSize,
+                sourceWidth = output.SourceWidth,
+                sourceHeight = output.SourceHeight,
+                outputWidth = output.Width,
+                outputHeight = output.Height,
                 revisedPrompt = generated.RevisedPrompt
             }, ProjectSettingsDefaults.JsonOptions),
             CreatedAtUtc = now,
             UpdatedAtUtc = now
         };
         dbContext.Assets.Add(asset);
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = projectId,
+            ConsumerAssetId = asset.Id,
+            SourceAssetId = settingsAsset.Id,
+            Role = "uses-settings",
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         return ProjectCoverQueries.ToView(asset);
+    }
+
+    private async Task<(Project Project, Asset SettingsAsset, ProjectSettingsDocument Settings, string Prompt, string ModelSize)> PrepareAsync(
+        Guid projectId,
+        string? instruction,
+        CancellationToken cancellationToken)
+    {
+        instruction = string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim();
+        if (instruction?.Length > 1000)
+        {
+            throw new InvalidOperationException("封面生成意见不能超过 1000 个字符。");
+        }
+        var project = await dbContext.Projects
+            .SingleOrDefaultAsync(item => item.Id == projectId, cancellationToken)
+            ?? throw new KeyNotFoundException("项目不存在。");
+        if (project.CurrentCreativeSettingsId is null)
+        {
+            throw new InvalidOperationException("请先保存项目设定，再生成概念封面。");
+        }
+        var settingsAsset = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == project.CurrentCreativeSettingsId
+                && item.ProjectId == projectId
+                && item.Type == ProjectSettingsDefaults.AssetType,
+            cancellationToken)
+            ?? throw new InvalidOperationException("当前项目设定资产不存在。");
+        var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
+            settingsAsset.DocumentJson ?? "{}",
+            ProjectSettingsDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前项目设定无法读取。");
+        var prompt = BuildPrompt(settings, instruction);
+        var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
+            settings.OutputWidth,
+            settings.OutputHeight,
+            settings.AspectRatio);
+        return (project, settingsAsset, settings, prompt, modelSize);
     }
 
     private static string BuildPrompt(ProjectSettingsDocument settings, string? instruction) => $$"""

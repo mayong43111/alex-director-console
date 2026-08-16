@@ -1,3 +1,5 @@
+import type { ImageGenerationPreview } from './generation'
+
 export interface ProjectSettings {
   projectId: string
   version: number
@@ -98,11 +100,12 @@ export async function approveProjectSettings(projectId: string): Promise<Project
 export async function generateProjectCover(
   projectId: string,
   instruction?: string,
+  confirmedPrompt?: string,
 ): Promise<ProjectCover> {
   const response = await fetch(`/api/v2/projects/${projectId}/settings/cover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction }),
+    body: JSON.stringify({ instruction, confirmedPrompt }),
   })
   if (!response.ok) throw await readError(response, '概念封面生成失败。')
   return response.json() as Promise<ProjectCover>
@@ -122,4 +125,17 @@ export async function assistProjectSettingsField(
   })
   if (!response.ok) throw await readError(response, 'AI 帮写失败。')
   return response.json() as Promise<ProjectSettingsAssistResult>
+}
+
+export async function previewProjectCover(
+  projectId: string,
+  instruction?: string,
+): Promise<ImageGenerationPreview> {
+  const response = await fetch(`/api/v2/projects/${projectId}/settings/cover/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction }),
+  })
+  if (!response.ok) throw await readError(response, '概念封面生成规格加载失败。')
+  return response.json() as Promise<ImageGenerationPreview>
 }

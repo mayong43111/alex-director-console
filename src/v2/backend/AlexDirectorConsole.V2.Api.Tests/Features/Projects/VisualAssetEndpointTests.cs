@@ -1,0 +1,241 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Projects;
+using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
+using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
+using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
+using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
+using AlexDirectorConsole.V2.Database.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using SkiaSharp;
+
+namespace AlexDirectorConsole.V2.Api.Tests.Features.Projects;
+
+public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
+    : IClassFixture<V2ApiFactory>, IAsyncLifetime
+{
+    public Task InitializeAsync() => factory.ResetDatabaseAsync();
+
+    public Task DisposeAsync() => Task.CompletedTask;
+
+    [Fact]
+    public async Task New_project_has_no_visual_assets()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+
+        var assets = await client.GetFromJsonAsync<VisualAssetView[]>(
+            $"/api/v2/projects/{projectId}/visual-assets");
+
+        Assert.NotNull(assets);
+        Assert.Empty(assets);
+    }
+
+    [Fact]
+    public async Task Updating_visual_asset_creates_a_new_version()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人牛，身形灵敏",
+                mustKeep = new[] { "短角", "旧佩剑" },
+                avoid = new[] { "人类头部" },
+                storyReferences = new[] { "第一章" }
+            });
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var created = await createResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(created);
+
+        var updateResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{created.ResourceId}",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人牛，短角，蓝色旧披风",
+                mustKeep = new[] { "短角", "旧佩剑", "蓝色披风" },
+                avoid = new[] { "人类头部" },
+                storyReferences = new[] { "第一章", "第二章" }
+            });
+        updateResponse.EnsureSuccessStatusCode();
+        var updated = await updateResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(updated);
+        Assert.Equal(created.ResourceId, updated.ResourceId);
+        Assert.Equal(2, updated.Version);
+        Assert.Equal(3, updated.MustKeep.Count);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var versions = await dbContext.Assets
+            .Where(item => item.ProjectId == projectId && item.Type == "visual-asset")
+            .OrderBy(item => item.Version)
+            .ToListAsync();
+        Assert.Equal([1, 2], versions.Select(item => item.Version));
+        Assert.Single(versions.Select(item => item.ResourceId).Distinct());
+        Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
+    }
+
+    [Fact]
+    public async Task Character_reference_generation_saves_and_binds_a_real_image_asset()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        (await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            new
+            {
+                projectName = "三个火枪手",
+                description = "经典文学动画改编",
+                contentType = "动画短剧",
+                targetAudience = "全年龄观众",
+                plannedEpisodeCount = 3,
+                targetEpisodeSeconds = 100,
+                aspectRatio = "16:9",
+                outputWidth = 854,
+                outputHeight = 480,
+                visualStyle = "法式彩色冒险漫画",
+                artDirection = "17 世纪法国质感与清晰墨线",
+                protagonistSpecies = "犬类",
+                characterDesign = "保持角色身份和服装一致",
+                colorPalette = "宝石红、法国蓝、羊皮纸金",
+                cameraLanguage = "动态漫画构图",
+                soundStrategy = "管弦乐冒险主题",
+                imagePromptPrefix = "清晰墨线，制作级细节"
+            })).EnsureSuccessStatusCode();
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人犬，身形灵敏",
+                mustKeep = new[] { "短耳", "旧佩剑" },
+                avoid = new[] { "人类头部" },
+                storyReferences = new[] { "第一章" }
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var character = await createResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(character);
+
+        var generateResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
+            null);
+
+        generateResponse.EnsureSuccessStatusCode();
+        var reference = await generateResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        Assert.NotNull(reference);
+        Assert.Equal(character.ResourceId, reference.SubjectResourceId);
+        Assert.Equal("character", reference.SubjectType);
+        var content = await client.GetByteArrayAsync(reference.ContentUrl);
+        Assert.True(content.Length > 8);
+        Assert.Equal([0x89, 0x50, 0x4e, 0x47], content[..4]);
+        using var bitmap = SKBitmap.Decode(content);
+        Assert.NotNull(bitmap);
+        Assert.Equal(854, bitmap.Width);
+        Assert.Equal(480, bitmap.Height);
+
+        var listedAssets = await client.GetFromJsonAsync<VisualAssetView[]>(
+            $"/api/v2/projects/{projectId}/visual-assets");
+        var listedCharacter = Assert.Single(listedAssets!);
+        Assert.Equal(reference.AssetId, listedCharacter.ReferenceImage?.AssetId);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var binding = await dbContext.VisualReferences.SingleAsync();
+        Assert.Equal(reference.AssetId, binding.ImageAssetId);
+        Assert.Equal(character.ResourceId, binding.SubjectResourceId);
+        Assert.Equal("generation-reference", binding.Purpose);
+        var imageAsset = await dbContext.Assets.SingleAsync(item => item.Id == reference.AssetId);
+        using var metadata = JsonDocument.Parse(imageAsset.GenerationMetadataJson!);
+        Assert.Equal(
+            "法式彩色冒险漫画",
+            metadata.RootElement.GetProperty("projectStyle").GetProperty("visualStyle").GetString());
+        Assert.Equal(854, metadata.RootElement.GetProperty("outputWidth").GetInt32());
+        Assert.Equal(480, metadata.RootElement.GetProperty("outputHeight").GetInt32());
+        Assert.Equal("medium", metadata.RootElement.GetProperty("parameters").GetProperty("quality").GetString());
+        Assert.Equal(2, metadata.RootElement.GetProperty("references").GetArrayLength());
+        Assert.All(
+            metadata.RootElement.GetProperty("references").EnumerateArray(),
+            item => Assert.True(item.GetProperty("version").GetInt32() > 0));
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == reference.AssetId && item.SourceAssetId == character.AssetId));
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == reference.AssetId && item.Role == "uses-settings"));
+    }
+
+    [Fact]
+    public async Task Import_story_materials_creates_character_and_scene_once()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var sourceResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources",
+            new
+            {
+                title = "三个火枪手原著",
+                content = "# 第一章\n达达尼昂离开故乡。\n\n# 第二章\n达达尼昂抵达巴黎。"
+            });
+        sourceResponse.EnsureSuccessStatusCode();
+        var source = await sourceResponse.Content.ReadFromJsonAsync<ProjectSourceView>();
+        Assert.NotNull(source);
+        var analysisResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis",
+            null);
+        analysisResponse.EnsureSuccessStatusCode();
+        var draftResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft",
+            new { desiredEpisodeCount = 1 });
+        draftResponse.EnsureSuccessStatusCode();
+
+        var firstImport = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/import-story-materials",
+            null);
+        firstImport.EnsureSuccessStatusCode();
+        var firstAssets = await firstImport.Content.ReadFromJsonAsync<VisualAssetView[]>();
+        Assert.NotNull(firstAssets);
+        Assert.Equal(3, firstAssets.Length);
+        Assert.Contains(firstAssets, item => item.Kind == "character" && item.Name == "达达尼昂");
+        Assert.Contains(firstAssets, item => item.Kind == "scene" && item.Name == "巴黎");
+        Assert.Contains(firstAssets, item => item.Kind == "prop" && item.Name == "推荐信");
+        Assert.DoesNotContain(firstAssets, item => item.Kind == "prop" && item.Name == "椅子");
+
+        var secondImport = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/import-story-materials",
+            null);
+        secondImport.EnsureSuccessStatusCode();
+        var secondAssets = await secondImport.Content.ReadFromJsonAsync<VisualAssetView[]>();
+        Assert.NotNull(secondAssets);
+        Assert.Equal(3, secondAssets.Length);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var visualAssetIds = await dbContext.Assets
+            .Where(item => item.ProjectId == projectId && item.Type == "visual-asset")
+            .Select(item => item.Id)
+            .ToArrayAsync();
+        Assert.Equal(3, await dbContext.AssetDependencies
+            .CountAsync(item => visualAssetIds.Contains(item.ConsumerAssetId)));
+        Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
+    }
+
+    private static async Task<Guid> CreateProjectAsync(HttpClient client)
+    {
+        var response = await client.PostAsJsonAsync(
+            "/api/v2/projects",
+            new { name = "三个火枪手", description = "经典文学动画改编" });
+        response.EnsureSuccessStatusCode();
+        var project = await response.Content.ReadFromJsonAsync<ProjectView>();
+        Assert.NotNull(project);
+        return project.Id;
+    }
+}

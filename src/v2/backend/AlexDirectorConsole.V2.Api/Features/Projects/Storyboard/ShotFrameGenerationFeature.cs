@@ -1,0 +1,561 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
+using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
+using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
+using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.EntityFrameworkCore;
+
+namespace AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
+
+public sealed record ShotFrameReference(
+    byte[] Bytes,
+    string ContentType,
+    string FileName,
+    string SubjectType,
+    string SubjectName,
+    Guid AssetId,
+    Guid ResourceId,
+    int Version);
+
+public sealed record GeneratedShotFrame(
+    byte[] Bytes,
+    string ContentType,
+    string Extension,
+    string Deployment,
+    string Quality,
+    string? RevisedPrompt);
+
+public interface IShotFrameGenerator
+{
+    Task<GeneratedShotFrame> GenerateAsync(
+        string prompt,
+        string size,
+        IReadOnlyList<ShotFrameReference> references,
+        CancellationToken cancellationToken);
+}
+
+public sealed class AzureFoundryShotFrameGenerator(
+    HttpClient httpClient,
+    V2DbContext dbContext,
+    IDataProtectionProvider dataProtectionProvider) : IShotFrameGenerator
+{
+    private const string ApiVersion = "2025-04-01-preview";
+    public async Task<GeneratedShotFrame> GenerateAsync(
+        string prompt,
+        string size,
+        IReadOnlyList<ShotFrameReference> references,
+        CancellationToken cancellationToken)
+    {
+        if (references.Count == 0)
+        {
+            throw new InvalidOperationException("首帧生成必须提供人物和场景参考图。");
+        }
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        if (configuration is null)
+        {
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 Azure AI Foundry。");
+        }
+        var endpoint = string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
+            ? configuration.Endpoint
+            : configuration.ImageEndpoint;
+        var protectedApiKey = string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey)
+            ? configuration.ProtectedApiKey
+            : configuration.ProtectedImageApiKey;
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out _)
+            || string.IsNullOrWhiteSpace(protectedApiKey))
+        {
+            throw new ProjectGenerationConfigurationException("请先配置 gpt-image-2 的 Endpoint 和 API Key。");
+        }
+
+        var apiKey = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1")
+            .Unprotect(protectedApiKey);
+        var baseEndpoint = endpoint.TrimEnd('/');
+        if (baseEndpoint.EndsWith("/openai/v1", StringComparison.OrdinalIgnoreCase))
+        {
+            baseEndpoint = baseEndpoint[..^"/openai/v1".Length];
+        }
+        var deployment = FoundryConfigurationView.RequiredImageDeployment;
+        var quality = GptImageOptions.NormalizeQuality(configuration.ImageQuality);
+        var requestUri = $"{baseEndpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/images/edits?api-version={Uri.EscapeDataString(ApiVersion)}";
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(prompt, Encoding.UTF8), "prompt");
+        content.Add(new StringContent("1"), "n");
+        content.Add(new StringContent(size), "size");
+        content.Add(new StringContent(quality), "quality");
+        content.Add(new StringContent("png"), "output_format");
+        foreach (var reference in references)
+        {
+            var imageContent = new ByteArrayContent(reference.Bytes);
+            imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse(reference.ContentType);
+            content.Add(imageContent, "image[]", reference.FileName);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
+        request.Headers.Add("api-key", apiKey);
+        request.Content = content;
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"gpt-image-2 首帧生成失败（{(int)response.StatusCode}）：{ReadError(responseBody)}");
+        }
+
+        using var document = JsonDocument.Parse(responseBody);
+        var image = document.RootElement.GetProperty("data")[0];
+        var revisedPrompt = image.TryGetProperty("revised_prompt", out var revisedPromptElement)
+            ? revisedPromptElement.GetString()
+            : null;
+        if (image.TryGetProperty("b64_json", out var base64Element)
+            && !string.IsNullOrWhiteSpace(base64Element.GetString()))
+        {
+            return new(
+                Convert.FromBase64String(base64Element.GetString()!),
+                "image/png",
+                ".png",
+                deployment,
+                quality,
+                revisedPrompt);
+        }
+        if (image.TryGetProperty("url", out var urlElement)
+            && Uri.TryCreate(urlElement.GetString(), UriKind.Absolute, out var imageUri))
+        {
+            using var imageResponse = await httpClient.GetAsync(imageUri, cancellationToken);
+            imageResponse.EnsureSuccessStatusCode();
+            return new(
+                await imageResponse.Content.ReadAsByteArrayAsync(cancellationToken),
+                imageResponse.Content.Headers.ContentType?.MediaType ?? "image/png",
+                ".png",
+                deployment,
+                quality,
+                revisedPrompt);
+        }
+        throw new InvalidOperationException("gpt-image-2 未返回首帧图片内容。");
+    }
+
+    private static string ReadError(string responseBody)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody);
+            return document.RootElement.TryGetProperty("error", out var error)
+                && error.TryGetProperty("message", out var message)
+                ? message.GetString() ?? "未知错误"
+                : responseBody;
+        }
+        catch (JsonException)
+        {
+            return responseBody;
+        }
+    }
+}
+
+public interface IShotFrameService
+{
+    Task<ImageGenerationPreviewView?> PreviewFirstFrameAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken);
+
+    Task GenerateFirstFrameAsync(
+        Guid runId,
+        string confirmedPrompt,
+        CancellationToken cancellationToken);
+}
+
+public sealed class ShotFrameService(
+    V2DbContext dbContext,
+    IShotFrameGenerator generator,
+    TimeProvider timeProvider) : IShotFrameService
+{
+    public const string AssetType = "storyboard-first-frame";
+
+    public async Task<ImageGenerationPreviewView?> PreviewFirstFrameAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken)
+    {
+        var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleOrDefaultAsync(
+            candidate => candidate.ProjectId == projectId
+                && candidate.ProductionEpisodeId == productionEpisodeId
+                && candidate.ShotResourceId == shotResourceId,
+            cancellationToken);
+        if (definition is null) return null;
+        var project = await dbContext.Projects.AsNoTracking().SingleAsync(
+            candidate => candidate.Id == projectId,
+            cancellationToken);
+        if (project.CurrentCreativeSettingsId is not Guid settingsAssetId)
+        {
+            throw new InvalidOperationException("开始制作前必须先保存项目设定。");
+        }
+        var inputs = await ShotProductionPreflight.ResolveAsync(dbContext, definition, cancellationToken);
+        var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+            candidate => candidate.Id == definition.ShotAssetId,
+            cancellationToken);
+        var settingsAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+            candidate => candidate.Id == settingsAssetId,
+            cancellationToken);
+        var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
+            settingsAsset.DocumentJson ?? "{}",
+            ProjectSettingsDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前项目设定无法读取。");
+        var shot = JsonSerializer.Deserialize<StoryboardShotDocument>(
+            shotAsset.DocumentJson ?? "{}",
+            StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+        var references = await LoadReferencesAsync(projectId, inputs.ReferenceImageAssetIds, cancellationToken);
+        var props = await dbContext.Assets.AsNoTracking()
+            .Where(candidate => inputs.PropAssetIds.Contains(candidate.Id))
+            .ToListAsync(cancellationToken);
+        var prompt = BuildPrompt(settings, shot, references, props);
+        var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
+            settings.OutputWidth,
+            settings.OutputHeight,
+            settings.AspectRatio);
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
+        var mode = ShotProductionModes.ForDuration(definition.DurationSeconds);
+        return new(
+            "generate-storyboard-first-frame",
+            prompt,
+            new(
+                FoundryConfigurationView.RequiredImageDeployment,
+                GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
+                modelSize,
+                "png",
+                settings.OutputWidth,
+                settings.OutputHeight,
+                mode,
+                definition.DurationSeconds,
+                ShotProductionModes.Stages(mode)),
+            BuildProvenance(projectId, shotAsset, settingsAsset, references, props));
+    }
+
+    public async Task GenerateFirstFrameAsync(
+        Guid runId,
+        string confirmedPrompt,
+        CancellationToken cancellationToken)
+    {
+        var run = await dbContext.ProductionRuns.SingleAsync(item => item.Id == runId, cancellationToken);
+        var item = await dbContext.ProductionRunItems.SingleAsync(
+            candidate => candidate.RunId == runId && candidate.Stage == "first-frame",
+            cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        run.Status = "running";
+        run.CurrentStage = "first-frame";
+        run.StartedAtUtc ??= now;
+        run.UpdatedAtUtc = now;
+        item.Status = "running";
+        item.Attempt += 1;
+        item.StartedAtUtc = now;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleAsync(
+                candidate => candidate.ProjectId == run.ProjectId
+                    && candidate.ProductionEpisodeId == run.ProductionEpisodeId
+                    && candidate.ShotResourceId == item.ShotResourceId,
+                cancellationToken);
+            var inputs = await ShotProductionPreflight.ResolveAsync(dbContext, definition, cancellationToken);
+            var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+                candidate => candidate.Id == item.ShotAssetId,
+                cancellationToken);
+            var settingsAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+                candidate => candidate.Id == run.CreativeSettingsAssetId,
+                cancellationToken);
+            var settings = JsonSerializer.Deserialize<ProjectSettingsDocument>(
+                settingsAsset.DocumentJson ?? "{}",
+                ProjectSettingsDefaults.JsonOptions)
+                ?? throw new InvalidOperationException("当前项目设定无法读取。");
+            var shot = JsonSerializer.Deserialize<StoryboardShotDocument>(
+                shotAsset.DocumentJson ?? "{}",
+                StoryboardDefaults.JsonOptions)
+                ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+            var references = await LoadReferencesAsync(
+                run.ProjectId,
+                inputs.ReferenceImageAssetIds,
+                cancellationToken);
+            var props = await dbContext.Assets.AsNoTracking()
+                .Where(candidate => inputs.PropAssetIds.Contains(candidate.Id))
+                .ToListAsync(cancellationToken);
+            var prompt = BuildPrompt(settings, shot, references, props);
+            if (!string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
+            }
+            var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
+                settings.OutputWidth,
+                settings.OutputHeight,
+                settings.AspectRatio);
+            var generated = await generator.GenerateAsync(
+                prompt,
+                modelSize,
+                references,
+                cancellationToken);
+            if (generated.Bytes.Length == 0)
+            {
+                throw new InvalidOperationException("图片模型返回了空首帧文件。");
+            }
+            var projectOutput = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
+                generated.Bytes,
+                settings.OutputWidth,
+                settings.OutputHeight);
+
+            var previousFrames = await (
+                from dependency in dbContext.AssetDependencies.AsNoTracking()
+                join asset in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals asset.Id
+                where dependency.ProjectId == run.ProjectId
+                    && dependency.SourceAssetId == shotAsset.Id
+                    && dependency.Role == "frame-for-shot"
+                    && asset.Type == AssetType
+                select asset)
+                .ToListAsync(cancellationToken);
+            var previous = previousFrames.OrderByDescending(candidate => candidate.Version).FirstOrDefault();
+            var resourceId = previous?.ResourceId ?? Guid.NewGuid();
+            var version = (previous?.Version ?? 0) + 1;
+            var number = previous?.Number
+                ?? (await dbContext.Assets
+                    .Where(candidate => candidate.ProjectId == run.ProjectId)
+                    .Select(candidate => (int?)candidate.Number)
+                    .MaxAsync(cancellationToken) ?? 0) + 1;
+            now = timeProvider.GetUtcNow();
+            var output = new Asset
+            {
+                ProjectId = run.ProjectId,
+                ProductionEpisodeId = run.ProductionEpisodeId,
+                ResourceId = resourceId,
+                Version = version,
+                Number = number,
+                Type = AssetType,
+                Name = $"{shotAsset.Name}首帧",
+                BlobKey = $"storyboard-frames/{run.ProjectId:N}/{item.ShotResourceId:N}/first/v{version}{generated.Extension}",
+                BlobContent = projectOutput.Bytes,
+                FileName = $"{shotAsset.Name}-首帧-v{version}{generated.Extension}",
+                ContentType = "image/png",
+                SizeBytes = projectOutput.Bytes.LongLength,
+                GenerationMetadataJson = JsonSerializer.Serialize(new
+                {
+                    operation = "generate-storyboard-first-frame",
+                    runId,
+                    itemId = item.Id,
+                    item.ShotResourceId,
+                    shotAssetId = shotAsset.Id,
+                    settingsAssetId = settingsAsset.Id,
+                    referenceImageAssetIds = inputs.ReferenceImageAssetIds,
+                    specialPropAssetIds = inputs.PropAssetIds,
+                    deployment = generated.Deployment,
+                    quality = generated.Quality,
+                    prompt,
+                    parameters = new
+                    {
+                        deployment = generated.Deployment,
+                        quality = generated.Quality,
+                        size = modelSize,
+                        outputFormat = "png",
+                        outputWidth = settings.OutputWidth,
+                        outputHeight = settings.OutputHeight,
+                        productionMode = ShotProductionModes.ForDuration(shot.DurationSeconds),
+                        durationSeconds = shot.DurationSeconds,
+                        stages = ShotProductionModes.Stages(ShotProductionModes.ForDuration(shot.DurationSeconds))
+                    },
+                    references = BuildProvenance(run.ProjectId, shotAsset, settingsAsset, references, props),
+                    projectStyle = new
+                    {
+                        settings.VisualStyle,
+                        settings.ArtDirection,
+                        settings.CharacterDesign,
+                        settings.ColorPalette,
+                        settings.CameraLanguage,
+                        settings.ImagePromptPrefix
+                    },
+                    modelSize,
+                    sourceWidth = projectOutput.SourceWidth,
+                    sourceHeight = projectOutput.SourceHeight,
+                    outputWidth = projectOutput.Width,
+                    outputHeight = projectOutput.Height,
+                    revisedPrompt = generated.RevisedPrompt
+                }, StoryboardDefaults.JsonOptions),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            dbContext.Assets.Add(output);
+            AddDependency(run.ProjectId, output.Id, shotAsset.Id, "frame-for-shot", now);
+            AddDependency(run.ProjectId, output.Id, settingsAsset.Id, "uses-settings", now);
+            foreach (var referenceId in inputs.ReferenceImageAssetIds)
+                AddDependency(run.ProjectId, output.Id, referenceId, "uses-reference", now);
+            foreach (var propId in inputs.PropAssetIds)
+                AddDependency(run.ProjectId, output.Id, propId, "uses-special-prop", now);
+            item.OutputAssetId = output.Id;
+            item.Status = "completed";
+            item.CompletedAtUtc = now;
+            item.ErrorCode = null;
+            item.ErrorDetail = null;
+            var waitingItem = await dbContext.ProductionRunItems.FirstOrDefaultAsync(
+                candidate => candidate.RunId == runId && candidate.Status == "waiting",
+                cancellationToken);
+            if (waitingItem is null)
+            {
+                run.Status = "completed";
+                run.FinalAssetId = output.Id;
+                run.CompletedAtUtc = now;
+            }
+            else
+            {
+                run.Status = "running";
+                run.CurrentStage = waitingItem.Stage;
+            }
+            run.UpdatedAtUtc = now;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception error)
+        {
+            now = timeProvider.GetUtcNow();
+            item.Status = "failed";
+            item.ErrorCode = error.GetType().Name;
+            item.ErrorDetail = error.Message;
+            item.CompletedAtUtc = now;
+            run.Status = "failed";
+            run.LastError = error.Message;
+            run.CompletedAtUtc = now;
+            run.UpdatedAtUtc = now;
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    private async Task<ShotFrameReference[]> LoadReferencesAsync(
+        Guid projectId,
+        IReadOnlyList<Guid> imageAssetIds,
+        CancellationToken cancellationToken)
+    {
+        var rows = await (
+            from reference in dbContext.VisualReferences.AsNoTracking()
+            join image in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals image.Id
+            join state in dbContext.ResourceStates.AsNoTracking()
+                on new { reference.ProjectId, ResourceId = reference.SubjectResourceId }
+                equals new { state.ProjectId, state.ResourceId }
+            join subject in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals subject.Id
+            where reference.ProjectId == projectId
+                && imageAssetIds.Contains(image.Id)
+            select new { Reference = reference, Image = image, Subject = subject })
+            .ToListAsync(cancellationToken);
+        return rows.Select(row =>
+        {
+            var document = VisualAssetMapper.ReadDocument(row.Subject);
+            return new ShotFrameReference(
+                row.Image.BlobContent ?? throw new InvalidOperationException($"参考图文件为空：{document.Name}"),
+                row.Image.ContentType ?? "image/png",
+                row.Image.FileName ?? $"{document.Name}.png",
+                document.Kind,
+                document.Name,
+                row.Image.Id,
+                row.Image.ResourceId,
+                row.Image.Version);
+        }).ToArray();
+    }
+
+    private static GenerationAssetReferenceView[] BuildProvenance(
+        Guid projectId,
+        Asset shotAsset,
+        Asset settingsAsset,
+        IReadOnlyList<ShotFrameReference> references,
+        IReadOnlyList<Asset> props) =>
+        [
+            GenerationProvenance.Reference(shotAsset, "frame-for-shot"),
+            GenerationProvenance.Reference(settingsAsset, "uses-settings"),
+            .. references.Select(reference => new GenerationAssetReferenceView(
+                reference.AssetId,
+                reference.ResourceId,
+                reference.Version,
+                reference.SubjectName,
+                VisualReferenceService.AssetType,
+                "uses-reference",
+                $"/api/v2/projects/{projectId}/visual-assets/references/{reference.AssetId}/content")),
+            .. props.Select(prop => GenerationProvenance.Reference(prop, "uses-special-prop"))
+        ];
+
+    private void AddDependency(
+        Guid projectId,
+        Guid consumerAssetId,
+        Guid sourceAssetId,
+        string role,
+        DateTimeOffset now) =>
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = projectId,
+            ConsumerAssetId = consumerAssetId,
+            SourceAssetId = sourceAssetId,
+            Role = role,
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
+
+    private static string BuildPrompt(
+        ProjectSettingsDocument settings,
+        StoryboardShotDocument shot,
+        IReadOnlyList<ShotFrameReference> references,
+        IReadOnlyList<Asset> propAssets)
+    {
+        var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
+        return $$"""
+            Create the exact first frame of one cinematic storyboard shot using every supplied character and scene image as a strict visual reference.
+            Project: {{settings.ProjectName}}
+            Visual style: {{settings.VisualStyle}}
+            Art direction: {{settings.ArtDirection}}
+            Character consistency rules: {{settings.CharacterDesign}}
+            Color strategy: {{settings.ColorPalette}}
+            Camera language: {{settings.CameraLanguage}}
+            Project image constraints: {{settings.ImagePromptPrefix}}
+            Shot: scene {{shot.SceneNumber}}, shot {{shot.ShotNumber}}, {{shot.DurationSeconds}} seconds
+            Shot size: {{shot.ShotSize}}
+            Camera angle: {{shot.CameraAngle}}
+            Camera movement intent: {{shot.CameraMovement}}
+            Composition: {{shot.Composition}}
+            First-frame visual: {{shot.VisualDescription}}
+            Action starting pose: {{shot.Action}}
+            Narrative hooks realized by this shot: {{string.Join("; ", (shot.Hooks ?? []).Select(item => $"{item.Type}: {item.Description}"))}}
+            Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
+            Required scene references: {{string.Join("; ", references.Where(item => item.SubjectType == "scene").Select(item => item.SubjectName))}}
+            Important recurring complex props only: {{string.Join("; ", props.Select(item => $"{item.Name}: {item.VisualDescription}"))}}
+            Match each referenced character's identity, species, face, body, costume, and colors. Match the referenced scene's architecture, layout, materials, lighting logic, and scale.
+            Do not add ordinary handheld objects, furniture, set dressing, or any prop not listed as an important recurring complex prop.
+            Render one coherent frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
+            """;
+    }
+}
+
+public static class ShotFrameEndpoints
+{
+    public static IEndpointRouteBuilder MapShotFrameContent(this IEndpointRouteBuilder app)
+    {
+        app.MapGet("/api/v2/projects/{projectId:guid}/storyboard/frames/{assetId:guid}/content", async (
+            Guid projectId,
+            Guid assetId,
+            V2DbContext dbContext,
+            CancellationToken cancellationToken) =>
+        {
+            var image = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+                item => item.Id == assetId
+                    && item.ProjectId == projectId
+                    && item.Type == ShotFrameService.AssetType,
+                cancellationToken);
+            return image?.BlobContent is null
+                ? Results.NotFound()
+                : Results.File(
+                    image.BlobContent,
+                    image.ContentType ?? "image/png",
+                    image.FileName,
+                    enableRangeProcessing: false);
+        });
+        return app;
+    }
+}

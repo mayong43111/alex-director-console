@@ -1,7 +1,17 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { AppShell } from './app/AppShell'
 import { DemoPage, ProjectCenterPage, ServicesPage, SkillsPage } from './pages/SupplementaryPages'
-import { ScriptLandingPage, ScriptPage, SettingsPage, SourcePage } from './pages/WorkspacePages'
+import {
+  AssetsPage,
+  ProductionPage,
+  ProductionRunPage,
+  ScriptLandingPage,
+  ScriptPage,
+  SettingsPage,
+  SourcePage,
+  StoryboardPage,
+  StoryboardShotPage,
+} from './pages/WorkspacePages'
 
 function LegacyDraftRedirect() {
   const { projectId = '', sourceEpisodeId } = useParams()
@@ -20,18 +30,19 @@ export default function App() {
         <Route path="story/adaptation/:sourceEpisodeId?" element={<SourcePage />} />
         <Route path="story/outline" element={<Navigate to="../source" replace />} />
         <Route path="story/chapters" element={<Navigate to="../source" replace />} />
-        <Route path="assets/:assetType" element={<DemoPage title="资产圣经" />} />
+        <Route path="assets/:assetType" element={<AssetsPage />} />
         <Route path="script/draft/:sourceEpisodeId?" element={<LegacyDraftRedirect />} />
         <Route path="script" element={<ScriptLandingPage />} />
         <Route path="script/duration" element={<DemoPage title="时长仪表" />} />
         <Route path="script/episodes/:productionEpisodeId" element={<ScriptPage />} />
         <Route path="script/dialogue" element={<DemoPage title="台词本" />} />
-        <Route path="references" element={<DemoPage title="视觉参考" />} />
-        <Route path="storyboard" element={<DemoPage title="分镜" />} />
-        <Route path="storyboard/episodes/:productionEpisodeId?" element={<DemoPage title="分镜" />} />
-        <Route path="production" element={<DemoPage title="生产" />} />
-        <Route path="production/episodes/:productionEpisodeId?" element={<DemoPage title="生产" />} />
-        <Route path="production/runs/:runId" element={<DemoPage title="生产运行" />} />
+        <Route path="references" element={<Navigate to="../assets/characters" replace />} />
+        <Route path="storyboard" element={<StoryboardPage />} />
+        <Route path="storyboard/episodes/:productionEpisodeId?" element={<StoryboardPage />} />
+        <Route path="storyboard/episodes/:productionEpisodeId/shots/:shotResourceId" element={<StoryboardShotPage />} />
+        <Route path="production" element={<ProductionPage />} />
+        <Route path="production/episodes/:productionEpisodeId?" element={<ProductionPage />} />
+        <Route path="production/runs/:runId" element={<ProductionRunPage />} />
         <Route path="review" element={<DemoPage title="审阅交付" />} />
         <Route path="review/episodes/:productionEpisodeId?" element={<DemoPage title="审阅交付" />} />
       </Route>

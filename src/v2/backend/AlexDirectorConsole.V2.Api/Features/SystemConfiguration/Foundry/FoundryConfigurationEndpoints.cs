@@ -8,7 +8,8 @@ public sealed record UpdateFoundryConfigurationRequest(
     bool ClearApiKey,
     string? ImageEndpoint,
     string? ImageApiKey,
-    bool ClearImageApiKey);
+    bool ClearImageApiKey,
+    string? ImageQuality);
 
 public static class FoundryConfigurationEndpoints
 {
@@ -38,7 +39,8 @@ public static class FoundryConfigurationEndpoints
                     request.ClearApiKey,
                     request.ImageEndpoint,
                     request.ImageApiKey,
-                    request.ClearImageApiKey),
+                    request.ClearImageApiKey,
+                    request.ImageQuality),
                 cancellationToken);
             return result.IsSuccess
                 ? Results.Ok(result.Configuration)

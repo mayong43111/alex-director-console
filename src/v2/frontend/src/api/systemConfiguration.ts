@@ -5,6 +5,7 @@ export interface FoundryConfiguration {
   apiKeyConfigured: boolean
   imageEndpoint: string
   imageDeployment: string
+  imageQuality: 'low' | 'medium' | 'high'
   imageApiKeyConfigured: boolean
   imageConfigured: boolean
   updatedAtUtc: string | null
@@ -43,6 +44,7 @@ export async function updateFoundryConfiguration(input: {
   apiKey?: string
   clearApiKey: boolean
   imageEndpoint: string
+  imageQuality: 'low' | 'medium' | 'high'
   imageApiKey?: string
   clearImageApiKey: boolean
 }): Promise<FoundryConfiguration> {
