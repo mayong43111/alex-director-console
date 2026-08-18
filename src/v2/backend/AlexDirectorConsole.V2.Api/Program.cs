@@ -9,7 +9,9 @@ using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Versions;
+using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Features.Skills;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using Microsoft.AspNetCore.DataProtection;
@@ -39,6 +41,20 @@ if (!builder.Environment.IsEnvironment("Testing"))
 builder.Services.AddDbContext<V2DbContext>(options => options.UseSqlite(connectionString));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IFoundryConnectionTester, AzureFoundryConnectionTester>();
+builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient("ComfyUiVideo", client => client.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddHttpClient<ILocalVoiceDesigner, LocalQwenVoiceDesigner>((provider, client) =>
+{
+    var baseUrl = provider.GetRequiredService<IConfiguration>()["LocalTts:BaseUrl"]
+        ?? "http://127.0.0.1:8010";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromMinutes(30);
+});
+builder.Services.AddSingleton<IComfyUiConnectionTester, ComfyUiConnectionTester>();
+builder.Services.AddSingleton<IComfyUiVideoClient, ComfyUiVideoClient>();
+builder.Services.AddSingleton<IComfyUiWorkflowProvider, PackagedComfyUiWorkflowProvider>();
+builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
+builder.Services.AddHostedService<ShotVideoWorker>();
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();
 builder.Services.AddScoped<IProjectCopilotAgent, MafProjectCopilotAgent>();
@@ -48,6 +64,7 @@ builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerat
     client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddScoped<IProjectCoverService, ProjectCoverService>();
 builder.Services.AddScoped<IVisualReferenceService, VisualReferenceService>();
+builder.Services.AddScoped<IVoiceProfileService, VoiceProfileService>();
 builder.Services.AddScoped<IShotFrameService, ShotFrameService>();
 builder.Services.AddScoped<IProjectSettingsAssistant, MafProjectSettingsAssistant>();
 builder.Services.AddScoped<IProjectSettingsToolService, ProjectSettingsToolService>();
@@ -74,6 +91,7 @@ builder.Services.AddScoped<ICommandHandler<GenerateAdaptationScriptCommand, Adap
 builder.Services.AddScoped<ICommandHandler<AppendAdaptationEpisodeCommand, AdaptationScriptView?>, AppendAdaptationEpisodeCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<RegenerateAdaptationEpisodeCommand, AdaptationScriptView?>, RegenerateAdaptationEpisodeCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ConfirmAdaptationScriptCommand, AdaptationScriptView?>, ConfirmAdaptationScriptCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<RegenerateProductionScriptCommand, ProductionScriptPackageView?>, RegenerateProductionScriptCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<ListVisualAssetsQuery, IReadOnlyList<VisualAssetView>>, ListVisualAssetsQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<SaveVisualAssetCommand, SaveVisualAssetResult>, SaveVisualAssetCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ImportStoryMaterialAssetsCommand, IReadOnlyList<VisualAssetView>?>, ImportStoryMaterialAssetsCommandHandler>();
@@ -84,6 +102,9 @@ builder.Services.AddScoped<ICommandHandler<StartShotProductionCommand, ShotProdu
 builder.Services.AddScoped<IQueryHandler<GetFoundryConfigurationQuery, FoundryConfigurationView>, GetFoundryConfigurationHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateFoundryConfigurationCommand, UpdateFoundryConfigurationResult>, UpdateFoundryConfigurationHandler>();
 builder.Services.AddScoped<ICommandHandler<TestFoundryConnectionCommand, TestFoundryConnectionResult>, TestFoundryConnectionHandler>();
+builder.Services.AddScoped<IQueryHandler<GetComfyUiConfigurationQuery, ComfyUiConfigurationView>, GetComfyUiConfigurationHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateComfyUiConfigurationCommand, UpdateComfyUiConfigurationResult>, UpdateComfyUiConfigurationHandler>();
+builder.Services.AddScoped<ICommandHandler<TestComfyUiConnectionCommand, ComfyUiCapabilities>, TestComfyUiConnectionHandler>();
 builder.Services.AddScoped<IQueryHandler<ListSkillsQuery, IReadOnlyList<SkillView>>, ListSkillsQueryHandler>();
 builder.Services.AddScoped<IQueryHandler<GetSkillQuery, SkillView?>, GetSkillQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateSkillCommand, SkillView?>, UpdateSkillCommandHandler>();
@@ -112,8 +133,10 @@ app.MapAdaptationScripts();
 app.MapVisualAssets();
 app.MapStoryboards();
 app.MapShotFrameContent();
+app.MapShotVideos();
 app.MapProduction();
 app.MapFoundryConfiguration();
+app.MapComfyUiConfiguration();
 app.MapSkills();
 app.MapCopilot();
 app.Run();

@@ -18,6 +18,27 @@ export interface FoundryConnectionResult {
   isConfigured: boolean
 }
 
+export interface ComfyUiConfiguration {
+  provider: string
+  connectionMode: 'local-http'
+  baseUrl: string
+  workflowProfile: string
+  maxConcurrentJobs: number
+  isEnabled: boolean
+  isConfigured: boolean
+  updatedAtUtc: string | null
+}
+
+export interface ComfyUiCapabilities {
+  isSuccess: boolean
+  message: string
+  workflowProfile: string
+  requiredNodes: string[]
+  missingNodes: string[]
+  requiredModels: string[]
+  missingModels: string[]
+}
+
 interface ValidationProblem {
   title?: string
   detail?: string
@@ -62,5 +83,32 @@ export async function testFoundryConnection(): Promise<FoundryConnectionResult> 
   const result = await response.json().catch(() => null) as FoundryConnectionResult | null
   if (!response.ok) throw new Error(result?.message || 'Foundry 连接测试失败。')
   if (!result) throw new Error('Foundry 连接测试未返回结果。')
+  return result
+}
+
+export async function getComfyUiConfiguration(signal?: AbortSignal): Promise<ComfyUiConfiguration> {
+  const response = await fetch('/api/v2/system/comfyui-configuration', { signal })
+  if (!response.ok) throw await readError(response, 'ComfyUI 配置加载失败。')
+  return response.json() as Promise<ComfyUiConfiguration>
+}
+
+export async function updateComfyUiConfiguration(input: {
+  baseUrl: string
+  isEnabled: boolean
+}): Promise<ComfyUiConfiguration> {
+  const response = await fetch('/api/v2/system/comfyui-configuration', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await readError(response, 'ComfyUI 配置保存失败。')
+  return response.json() as Promise<ComfyUiConfiguration>
+}
+
+export async function testComfyUiConnection(): Promise<ComfyUiCapabilities> {
+  const response = await fetch('/api/v2/system/comfyui-configuration/test', { method: 'POST' })
+  const result = await response.json().catch(() => null) as ComfyUiCapabilities | null
+  if (!response.ok) throw new Error(result?.message || 'ComfyUI 连接测试失败。')
+  if (!result) throw new Error('ComfyUI 连接测试未返回结果。')
   return result
 }

@@ -117,7 +117,9 @@ internal static class ProductionQueries
                 item.OutputAssetId,
                 item.OutputAssetId is null
                     ? null
-                    : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{item.OutputAssetId}/content",
+                    : item.Stage == "shot-video"
+                        ? $"/api/v2/projects/{run.ProjectId}/storyboard/videos/{item.OutputAssetId}/content"
+                        : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{item.OutputAssetId}/content",
                 item.ErrorCode,
                 item.ErrorDetail,
                 item.CreatedAtUtc,

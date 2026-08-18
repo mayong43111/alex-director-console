@@ -247,6 +247,7 @@ public sealed class ProductionRun
     public Guid? ReferenceBoardAssetId { get; set; }
     public Guid? PreflightValidationRunId { get; set; }
     public Guid? RequestedByTaskId { get; set; }
+    public string RunType { get; set; } = "shot-frames";
     public string Status { get; set; } = string.Empty;
     public string CurrentStage { get; set; } = string.Empty;
     public string SpecJson { get; set; } = "{}";
@@ -275,6 +276,7 @@ public sealed class ProductionRunItem
     public int Attempt { get; set; }
     public string InputAssetIdsJson { get; set; } = "[]";
     public string? InputFingerprint { get; set; }
+    public string? ExternalJobId { get; set; }
     public Guid? OutputAssetId { get; set; }
     public string? CostJson { get; set; }
     public string? ErrorCode { get; set; }
@@ -294,6 +296,17 @@ public sealed class FoundryConfiguration
     public string ImageDeployment { get; set; } = "gpt-image-2";
     public string ImageQuality { get; set; } = "medium";
     public string ProtectedImageApiKey { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class ComfyUiConfiguration
+{
+    public int Id { get; set; } = 1;
+    public string ConnectionMode { get; set; } = "local-http";
+    public string BaseUrl { get; set; } = "http://127.0.0.1:8188";
+    public string WorkflowProfile { get; set; } = "minimax-h3-fl2va-turbo-4step";
+    public int MaxConcurrentJobs { get; set; } = 1;
+    public bool IsEnabled { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }
 

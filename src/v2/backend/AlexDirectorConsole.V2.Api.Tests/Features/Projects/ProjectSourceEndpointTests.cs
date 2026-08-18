@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Queries;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
@@ -269,12 +270,16 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
             Assert.False(await dbContext.Assets.AnyAsync(item => item.Type == "script-package"));
         }
 
-        var confirmResponse = await client.PostAsync(
-            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/confirm",
-            null);
-        confirmResponse.EnsureSuccessStatusCode();
-        var confirmed = await confirmResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
+        var confirmRoute = $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/confirm";
+        var confirmResponses = await Task.WhenAll(
+            client.PostAsync(confirmRoute, null),
+            client.PostAsync(confirmRoute, null));
+        Assert.All(confirmResponses, response => response.EnsureSuccessStatusCode());
+        var confirmations = await Task.WhenAll(confirmResponses.Select(
+            response => response.Content.ReadFromJsonAsync<AdaptationScriptView>()));
+        var confirmed = confirmations[0];
         Assert.NotNull(confirmed);
+        Assert.All(confirmations, confirmation => Assert.Equal(confirmed.AssetId, confirmation?.AssetId));
         Assert.Equal("confirmed", confirmed.Status);
         Assert.Single(confirmed.ProductionEpisodeIds);
 
@@ -285,6 +290,57 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         Assert.Equal(confirmed.AssetId, package.AdaptationScriptAssetId);
         Assert.Equal(draft.Episodes[0].Title, package.Episode.Title);
         Assert.NotEmpty(package.Episode.Scenes);
+        Assert.All(package.Episode.Scenes, scene =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(scene.Action));
+            Assert.NotEmpty(scene.Dialogues);
+            Assert.NotEmpty(scene.ShotPlan);
+            var dialogueLines = scene.Dialogues.SelectMany(dialogue => dialogue.Lines).ToArray();
+            Assert.All(dialogueLines, line => Assert.True(
+                line.Count(character => !char.IsWhiteSpace(character)) <= 32));
+            Assert.True(
+                dialogueLines.Sum(line => line.Count(character => !char.IsWhiteSpace(character)))
+                    <= Math.Floor(scene.TargetSeconds * 3.2));
+        });
+        Assert.Equal(
+            package.Episode.TargetSeconds,
+            package.Episode.Scenes.SelectMany(scene => scene.ShotPlan).Sum(shot => shot.DurationSeconds));
+
+        await using (var legacyScope = factory.Services.CreateAsyncScope())
+        {
+            var legacyDbContext = legacyScope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var legacyAsset = await legacyDbContext.Assets.SingleAsync(item => item.Id == package.AssetId);
+            legacyAsset.DocumentJson = JsonSerializer.Serialize(new
+            {
+                AdaptationScriptAssetId = confirmed.AssetId,
+                ProductionEpisodeId = confirmed.ProductionEpisodeIds[0],
+                Episode = draft.Episodes[0]
+            });
+            await legacyDbContext.SaveChangesAsync();
+        }
+        var legacyPackage = await client.GetFromJsonAsync<ProductionScriptPackageView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{confirmed.ProductionEpisodeIds[0]}/script-package");
+        Assert.NotNull(legacyPackage);
+        Assert.True(legacyPackage.IsLegacyOutline);
+        Assert.All(legacyPackage.Episode.Scenes, scene => Assert.Empty(scene.Dialogues));
+        Assert.Equal(draft.Episodes[0].Scenes[0].DialogueNotes, legacyPackage.Episode.Scenes[0].DialogueIntent);
+
+        var regenerateScriptResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{confirmed.ProductionEpisodeIds[0]}/script-package/regenerate",
+            null);
+        Assert.True(
+            regenerateScriptResponse.IsSuccessStatusCode,
+            await regenerateScriptResponse.Content.ReadAsStringAsync());
+        var regeneratedPackage = await regenerateScriptResponse.Content
+            .ReadFromJsonAsync<ProductionScriptPackageView>();
+        Assert.NotNull(regeneratedPackage);
+        Assert.Equal(package.ResourceId, regeneratedPackage.ResourceId);
+        Assert.Equal(package.Version + 1, regeneratedPackage.Version);
+        Assert.Equal(package.AdaptationScriptAssetId, regeneratedPackage.AdaptationScriptAssetId);
+        Assert.False(regeneratedPackage.IsLegacyOutline);
+        var currentPackage = await client.GetFromJsonAsync<ProductionScriptPackageView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{confirmed.ProductionEpisodeIds[0]}/script-package");
+        Assert.Equal(regeneratedPackage.AssetId, currentPackage?.AssetId);
 
         var regenerateResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/1/regenerate",
@@ -313,7 +369,7 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         await using var finalScope = factory.Services.CreateAsyncScope();
         var finalDbContext = finalScope.ServiceProvider.GetRequiredService<V2DbContext>();
         Assert.Equal(1, await finalDbContext.ProductionEpisodes.CountAsync());
-        Assert.Equal(1, await finalDbContext.Assets.CountAsync(item => item.Type == "script-package"));
+        Assert.Equal(2, await finalDbContext.Assets.CountAsync(item => item.Type == "script-package"));
     }
 
     [Fact]
@@ -351,12 +407,10 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
             Assert.NotEmpty(episode.SmallHooks!);
             Assert.NotEmpty(episode.BigHooks!);
             var scene = Assert.Single(episode.Scenes);
-            Assert.Equal(episode.TargetSeconds, scene.TargetSeconds);
-            Assert.False(string.IsNullOrWhiteSpace(scene.Rhythm));
-            Assert.False(string.IsNullOrWhiteSpace(scene.VisualContrast));
-            var shotPlan = Assert.IsAssignableFrom<IReadOnlyList<AdaptationShotPlanDraft>>(scene.ShotPlan);
-            Assert.Equal([1, 2], shotPlan.Select(item => item.ShotNumber));
-            Assert.Equal(episode.TargetSeconds, shotPlan.Sum(item => item.DurationSeconds));
+            Assert.Null(scene.TargetSeconds);
+            Assert.Null(scene.Rhythm);
+            Assert.Null(scene.VisualContrast);
+            Assert.Null(scene.ShotPlan);
         });
         var originalTitles = draft.Episodes.Select(item => item.Title).ToArray();
 

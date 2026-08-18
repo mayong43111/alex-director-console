@@ -177,6 +177,10 @@ public interface IShotFrameService
         Guid runId,
         string confirmedPrompt,
         CancellationToken cancellationToken);
+
+    Task GenerateLastFrameAsync(
+        Guid runId,
+        CancellationToken cancellationToken);
 }
 
 public sealed class ShotFrameService(
@@ -273,7 +277,7 @@ public sealed class ShotFrameService(
             settings.AspectRatio);
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
             .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
-        var mode = ShotProductionModes.ForDuration(definition.DurationSeconds);
+        var mode = ShotProductionModes.ForShot(shot);
         return new(
             "generate-storyboard-first-frame",
             prompt,
@@ -290,18 +294,30 @@ public sealed class ShotFrameService(
             BuildProvenance(projectId, shotAsset, settingsAsset, references, props));
     }
 
-    public async Task GenerateFirstFrameAsync(
+    public Task GenerateFirstFrameAsync(
         Guid runId,
         string confirmedPrompt,
+        CancellationToken cancellationToken) =>
+        GenerateFrameAsync(runId, "first-frame", confirmedPrompt, cancellationToken);
+
+    public Task GenerateLastFrameAsync(
+        Guid runId,
+        CancellationToken cancellationToken) =>
+        GenerateFrameAsync(runId, "last-frame", null, cancellationToken);
+
+    private async Task GenerateFrameAsync(
+        Guid runId,
+        string stage,
+        string? confirmedPrompt,
         CancellationToken cancellationToken)
     {
         var run = await dbContext.ProductionRuns.SingleAsync(item => item.Id == runId, cancellationToken);
         var item = await dbContext.ProductionRunItems.SingleAsync(
-            candidate => candidate.RunId == runId && candidate.Stage == "first-frame",
+            candidate => candidate.RunId == runId && candidate.Stage == stage,
             cancellationToken);
         var now = timeProvider.GetUtcNow();
         run.Status = "running";
-        run.CurrentStage = "first-frame";
+        run.CurrentStage = stage;
         run.StartedAtUtc ??= now;
         run.UpdatedAtUtc = now;
         item.Status = "running";
@@ -351,8 +367,36 @@ public sealed class ShotFrameService(
                 run.ProjectId,
                 referenceImageAssetIds,
                 cancellationToken);
-            var prompt = BuildPrompt(settings, shot, references, props);
-            if (!string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
+            Asset? firstFrame = null;
+            IReadOnlyList<ShotFrameReference> generationReferences = references;
+            if (stage == "last-frame")
+            {
+                var firstFrameAssetId = await dbContext.ProductionRunItems.AsNoTracking()
+                    .Where(candidate => candidate.RunId == runId && candidate.Stage == "first-frame")
+                    .Select(candidate => candidate.OutputAssetId)
+                    .SingleAsync(cancellationToken)
+                    ?? throw new InvalidOperationException("生成尾帧前必须先完成首帧。");
+                firstFrame = await dbContext.Assets.AsNoTracking().SingleAsync(
+                    candidate => candidate.Id == firstFrameAssetId,
+                    cancellationToken);
+                generationReferences =
+                [
+                    .. references,
+                    new ShotFrameReference(
+                        firstFrame.BlobContent ?? throw new InvalidOperationException("首帧文件为空。"),
+                        firstFrame.ContentType ?? "image/png",
+                        firstFrame.FileName ?? "first-frame.png",
+                        "first-frame",
+                        "已生成首帧",
+                        firstFrame.Id,
+                        firstFrame.ResourceId,
+                        firstFrame.Version)
+                ];
+            }
+            var prompt = stage == "last-frame"
+                ? BuildLastFramePrompt(settings, shot, references, props)
+                : BuildPrompt(settings, shot, references, props);
+            if (stage == "first-frame" && !string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
             }
@@ -363,11 +407,11 @@ public sealed class ShotFrameService(
             var generated = await generator.GenerateAsync(
                 prompt,
                 modelSize,
-                references,
+                generationReferences,
                 cancellationToken);
             if (generated.Bytes.Length == 0)
             {
-                throw new InvalidOperationException("图片模型返回了空首帧文件。");
+                throw new InvalidOperationException(stage == "last-frame" ? "图片模型返回了空尾帧文件。" : "图片模型返回了空首帧文件。");
             }
             var projectOutput = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
                 generated.Bytes,
@@ -379,7 +423,7 @@ public sealed class ShotFrameService(
                 join asset in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals asset.Id
                 where dependency.ProjectId == run.ProjectId
                     && dependency.SourceAssetId == shotAsset.Id
-                    && dependency.Role == "frame-for-shot"
+                    && dependency.Role == (stage == "last-frame" ? "last-frame-for-shot" : "frame-for-shot")
                     && asset.Type == AssetType
                 select asset)
                 .ToListAsync(cancellationToken);
@@ -400,15 +444,16 @@ public sealed class ShotFrameService(
                 Version = version,
                 Number = number,
                 Type = AssetType,
-                Name = $"{shotAsset.Name}首帧",
-                BlobKey = $"storyboard-frames/{run.ProjectId:N}/{item.ShotResourceId:N}/first/v{version}{generated.Extension}",
+                Name = $"{shotAsset.Name}{(stage == "last-frame" ? "尾帧" : "首帧")}",
+                BlobKey = $"storyboard-frames/{run.ProjectId:N}/{item.ShotResourceId:N}/{(stage == "last-frame" ? "last" : "first")}/v{version}{generated.Extension}",
                 BlobContent = projectOutput.Bytes,
-                FileName = $"{shotAsset.Name}-首帧-v{version}{generated.Extension}",
+                FileName = $"{shotAsset.Name}-{(stage == "last-frame" ? "尾帧" : "首帧")}-v{version}{generated.Extension}",
                 ContentType = "image/png",
                 SizeBytes = projectOutput.Bytes.LongLength,
                 GenerationMetadataJson = JsonSerializer.Serialize(new
                 {
-                    operation = "generate-storyboard-first-frame",
+                    operation = stage == "last-frame" ? "generate-storyboard-last-frame" : "generate-storyboard-first-frame",
+                    frameStage = stage,
                     runId,
                     itemId = item.Id,
                     item.ShotResourceId,
@@ -427,11 +472,15 @@ public sealed class ShotFrameService(
                         outputFormat = "png",
                         outputWidth = settings.OutputWidth,
                         outputHeight = settings.OutputHeight,
-                        productionMode = ShotProductionModes.ForDuration(shot.DurationSeconds),
+                        productionMode = ShotProductionModes.ForShot(shot),
+                        shot.FrameStrategyReason,
                         durationSeconds = shot.DurationSeconds,
-                        stages = ShotProductionModes.Stages(ShotProductionModes.ForDuration(shot.DurationSeconds))
+                        stages = ShotProductionModes.Stages(ShotProductionModes.ForShot(shot))
                     },
-                    references = BuildProvenance(run.ProjectId, shotAsset, settingsAsset, references, props),
+                    references = BuildProvenance(run.ProjectId, shotAsset, settingsAsset, references, props)
+                        .Concat(firstFrame is null
+                            ? []
+                            : [GenerationProvenance.Reference(firstFrame, "continues-from-first-frame")]),
                     projectStyle = new
                     {
                         settings.VisualStyle,
@@ -467,12 +516,19 @@ public sealed class ShotFrameService(
             state.CurrentAssetId = output.Id;
             state.LifecycleStatus = "active";
             state.UpdatedAtUtc = now;
-            AddDependency(run.ProjectId, output.Id, shotAsset.Id, "frame-for-shot", now);
+            AddDependency(
+                run.ProjectId,
+                output.Id,
+                shotAsset.Id,
+                stage == "last-frame" ? "last-frame-for-shot" : "frame-for-shot",
+                now);
             AddDependency(run.ProjectId, output.Id, settingsAsset.Id, "uses-settings", now);
             foreach (var referenceId in referenceImageAssetIds)
                 AddDependency(run.ProjectId, output.Id, referenceId, "uses-reference", now);
             foreach (var prop in props)
                 AddDependency(run.ProjectId, output.Id, prop.Id, "uses-special-prop", now);
+            if (firstFrame is not null)
+                AddDependency(run.ProjectId, output.Id, firstFrame.Id, "continues-from-first-frame", now);
             item.OutputAssetId = output.Id;
             item.Status = "completed";
             item.CompletedAtUtc = now;
@@ -604,7 +660,7 @@ public sealed class ShotFrameService(
             Camera angle: {{shot.CameraAngle}}
             Camera movement intent: {{shot.CameraMovement}}
             Composition: {{shot.Composition}}
-            First-frame visual: {{shot.VisualDescription}}
+            First-frame visual: {{(string.IsNullOrWhiteSpace(shot.FirstFrameDescription) ? shot.VisualDescription : shot.FirstFrameDescription)}}
             Action starting pose: {{shot.Action}}
             Narrative hooks realized by this shot: {{string.Join("; ", (shot.Hooks ?? []).Select(item => $"{item.Type}: {item.Description}"))}}
             Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
@@ -613,6 +669,37 @@ public sealed class ShotFrameService(
             Match each referenced character's identity, species, face, body, costume, and colors. Match the referenced scene's architecture, layout, materials, lighting logic, and scale.
             Do not add ordinary handheld objects, furniture, set dressing, or any prop not listed as an important recurring complex prop.
             Render one coherent frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
+            """;
+    }
+
+    private static string BuildLastFramePrompt(
+        ProjectSettingsDocument settings,
+        StoryboardShotDocument shot,
+        IReadOnlyList<ShotFrameReference> references,
+        IReadOnlyList<Asset> propAssets)
+    {
+        var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
+        return $$"""
+            Create the exact final frame of one cinematic storyboard shot. The supplied first-frame image is the strict continuity anchor; the supplied character and scene sheets are strict identity and environment references.
+            Project: {{settings.ProjectName}}
+            Visual style: {{settings.VisualStyle}}
+            Art direction: {{settings.ArtDirection}}
+            Character consistency rules: {{settings.CharacterDesign}}
+            Color strategy: {{settings.ColorPalette}}
+            Camera language: {{settings.CameraLanguage}}
+            Project image constraints: {{settings.ImagePromptPrefix}}
+            Shot: scene {{shot.SceneNumber}}, shot {{shot.ShotNumber}}, {{shot.DurationSeconds}} seconds
+            Shot size: {{shot.ShotSize}}
+            Camera angle: {{shot.CameraAngle}}
+            Camera movement intent: {{shot.CameraMovement}}
+            First-frame continuity anchor: {{shot.FirstFrameDescription}}
+            Required final-frame state: {{shot.LastFrameDescription}}
+            Full cut execution: {{shot.CutDescription}}
+            Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
+            Required scene references: {{string.Join("; ", references.Where(item => item.SubjectType == "scene").Select(item => item.SubjectName))}}
+            Important recurring complex props only: {{string.Join("; ", props.Select(item => $"{item.Name}: {item.VisualDescription}"))}}
+            Preserve every identity, costume, material, color, light direction, camera axis, and environment detail from the supplied first frame. Change only the positions, poses, expressions, occlusions, prop states, framing, and focus explicitly required by the final-frame state and cut execution.
+            Render one coherent final frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
             """;
     }
 }

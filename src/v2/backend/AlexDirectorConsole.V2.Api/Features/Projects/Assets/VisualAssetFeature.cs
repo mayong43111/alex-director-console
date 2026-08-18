@@ -3,6 +3,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
+using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -375,7 +376,8 @@ internal static class SpecialPropPolicy
     {
         "窗户", "窗框", "门", "木门", "门帘", "门把手", "扶手", "楼梯扶手",
         "桌子", "办公桌", "椅子", "长凳", "酒杯", "钱币", "墨水瓶", "羽毛笔",
-        "手帕", "手套", "披风", "绷带", "木棍", "铁铲", "火钳"
+        "手帕", "手套", "披风", "绷带", "木棍", "铁铲", "火钳",
+        "老马", "马车", "钱袋", "空钱袋", "疗伤膏"
     };
 
     public static bool RequiresAsset(string name, int sceneCount)
@@ -501,6 +503,7 @@ public static class VisualAssetEndpoints
         });
 
         group.MapVisualReferenceEndpoints();
+        group.MapVoiceProfileEndpoints();
         return app;
     }
 

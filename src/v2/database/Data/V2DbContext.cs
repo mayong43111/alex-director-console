@@ -24,6 +24,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<ProductionRun> ProductionRuns => Set<ProductionRun>();
     public DbSet<ProductionRunItem> ProductionRunItems => Set<ProductionRunItem>();
     public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
+    public DbSet<ComfyUiConfiguration> ComfyUiConfigurations => Set<ComfyUiConfiguration>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<CopilotConversation> CopilotConversations => Set<CopilotConversation>();
     public DbSet<CopilotMessage> CopilotMessages => Set<CopilotMessage>();
@@ -313,7 +314,9 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.HasKey(item => item.Id);
             entity.HasIndex(item => new { item.ProjectId, item.CreatedAtUtc });
             entity.HasIndex(item => new { item.ProjectId, item.ProductionEpisodeId, item.CreatedAtUtc });
+            entity.HasIndex(item => new { item.RunType, item.Status, item.CreatedAtUtc });
             entity.HasIndex(item => new { item.Status, item.CreatedAtUtc });
+            entity.Property(item => item.RunType).HasMaxLength(30).HasDefaultValue("shot-frames").IsRequired();
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.CurrentStage).HasMaxLength(30).IsRequired();
             entity.Property(item => item.OriginalInstruction).HasMaxLength(20000).IsRequired();
@@ -339,6 +342,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Stage).HasMaxLength(30).IsRequired();
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.InputFingerprint).HasMaxLength(128);
+            entity.Property(item => item.ExternalJobId).HasMaxLength(200);
             entity.Property(item => item.ErrorCode).HasMaxLength(100);
             entity.Property(item => item.ErrorDetail).HasMaxLength(4000);
             entity.HasOne<ProductionRun>().WithMany().HasForeignKey(item => item.RunId).OnDelete(DeleteBehavior.Cascade);
@@ -363,6 +367,19 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.ImageDeployment).HasMaxLength(100).IsRequired();
             entity.Property(item => item.ImageQuality).HasMaxLength(20).IsRequired();
             entity.Property(item => item.ProtectedImageApiKey).HasMaxLength(4000).IsRequired();
+        });
+
+        modelBuilder.Entity<ComfyUiConfiguration>(entity =>
+        {
+            entity.ToTable("ComfyUiConfigurations", table =>
+            {
+                table.HasCheckConstraint("CK_ComfyUiConfigurations_Singleton", "Id = 1");
+                table.HasCheckConstraint("CK_ComfyUiConfigurations_MaxConcurrentJobs", "MaxConcurrentJobs > 0");
+            });
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ConnectionMode).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.BaseUrl).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.WorkflowProfile).HasMaxLength(100).IsRequired();
         });
 
         modelBuilder.Entity<SkillDefinition>(entity =>

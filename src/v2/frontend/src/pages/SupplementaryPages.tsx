@@ -11,9 +11,13 @@ import {
   type ProjectRecord,
 } from "../api/projects";
 import {
+  getComfyUiConfiguration,
   getFoundryConfiguration,
+  testComfyUiConnection,
   testFoundryConnection,
+  updateComfyUiConfiguration,
   updateFoundryConfiguration,
+  type ComfyUiConfiguration,
   type FoundryConfiguration,
 } from "../api/systemConfiguration";
 import {
@@ -1261,7 +1265,133 @@ export function ServicesPage() {
           </button>
         </footer>
       </form>
+      <ComfyUiConfigurationPanel />
     </GlobalSettingsShell>
+  );
+}
+
+function ComfyUiConfigurationPanel() {
+  const [configuration, setConfiguration] = useState<ComfyUiConfiguration | null>(null);
+  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8188");
+  const [isEnabled, setIsEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<"saving" | "testing" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getComfyUiConfiguration(controller.signal)
+      .then((loaded) => {
+        setConfiguration(loaded);
+        setBaseUrl(loaded.baseUrl);
+        setIsEnabled(loaded.isEnabled);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "ComfyUI 配置加载失败。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy("saving");
+    setError(null);
+    setMessage(null);
+    try {
+      const saved = await updateComfyUiConfiguration({ baseUrl, isEnabled });
+      setConfiguration(saved);
+      setBaseUrl(saved.baseUrl);
+      setIsEnabled(saved.isEnabled);
+      setMessage("本地 ComfyUI 配置已保存。");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "ComfyUI 配置保存失败。");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function testConnection() {
+    if (busy) return;
+    setBusy("testing");
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await testComfyUiConnection();
+      setMessage(result.message);
+    } catch (testError) {
+      setError(testError instanceof Error ? testError.message : "ComfyUI 连接测试失败。");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <section className="service-list panel comfyui-service-summary">
+        <div className="service-row">
+          <span className="service-icon"><Server size={18} /></span>
+          <span><strong>本地 ComfyUI</strong><small>MiniMax H3 · Turbo 4-step LoRA</small></span>
+          <span className={`connection-state ${configuration?.isEnabled ? "online" : "offline"}`}>
+            <i />
+            {loading ? "loading" : configuration?.isEnabled ? "enabled" : "disabled"}
+          </span>
+          <button className="secondary-button" onClick={() => document.getElementById("comfyui-base-url")?.focus()}>
+            配置
+          </button>
+        </div>
+      </section>
+      <form className="connection-form panel" onSubmit={save}>
+        <header className="panel-header">
+          <h2>本地 ComfyUI</h2>
+          <span>由 V2 后端直接访问本机服务</span>
+        </header>
+        <div className="form-grid">
+          <label>
+            <span>Base URL</span>
+            <input
+              id="comfyui-base-url"
+              type="url"
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              disabled={loading || Boolean(busy)}
+              required
+            />
+          </label>
+          <label><span>连接模式</span><input value="local-http" readOnly /></label>
+          <label><span>Workflow</span><input value="minimax-h3-fl2va-turbo-4step" readOnly /></label>
+          <label><span>最大并发</span><input value="1" readOnly /></label>
+          <label className="check-field span-2">
+            <input
+              type="checkbox"
+              checked={isEnabled}
+              onChange={(event) => setIsEnabled(event.target.checked)}
+              disabled={loading || Boolean(busy)}
+            />
+            <span>启用本地 ComfyUI 视频生成</span>
+          </label>
+        </div>
+        {(message || error) && <p className={`settings-feedback ${error ? "error" : "success"}`}>{error || message}</p>}
+        <footer>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={testConnection}
+            disabled={!configuration?.isEnabled || Boolean(busy)}
+          >
+            {busy === "testing" ? "检测中..." : "检测节点与模型"}
+          </button>
+          <button className="primary-button" type="submit" disabled={loading || Boolean(busy)}>
+            {busy === "saving" ? "保存中..." : "保存配置"}
+          </button>
+        </footer>
+      </form>
+    </>
   );
 }
 

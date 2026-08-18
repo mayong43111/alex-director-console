@@ -31,7 +31,12 @@ public sealed record StoryboardShotDraft(
     string Sound,
     IReadOnlyList<string> Characters,
     IReadOnlyList<string> Props,
-    IReadOnlyList<StoryboardHookDraft>? Hooks = null);
+    IReadOnlyList<StoryboardHookDraft>? Hooks = null,
+    string ProductionMode = "",
+    string FrameStrategyReason = "",
+    string FirstFrameDescription = "",
+    string LastFrameDescription = "",
+    string CutDescription = "");
 
 public sealed record StoryboardDesignResult(
     IReadOnlyList<StoryboardShotDraft> Shots,
@@ -52,7 +57,11 @@ public sealed record ShotProductionView(
     IReadOnlyList<string> Stages,
     DateTimeOffset CreatedAtUtc,
     Guid? OutputAssetId = null,
-    string? OutputUrl = null);
+    string? OutputUrl = null,
+    string? OutputPrompt = null,
+    Guid? LastFrameAssetId = null,
+    string? LastFrameUrl = null,
+    string? LastFramePrompt = null);
 
 public sealed record StoryboardShotView(
     Guid AssetId,
@@ -72,6 +81,11 @@ public sealed record StoryboardShotView(
     IReadOnlyList<string> Characters,
     IReadOnlyList<string> Props,
     IReadOnlyList<StoryboardHookDraft> Hooks,
+    string ProductionMode,
+    string FrameStrategyReason,
+    string FirstFrameDescription,
+    string LastFrameDescription,
+    string CutDescription,
     IReadOnlyList<StoryboardLinkedAssetView> LinkedAssets,
     ShotProductionView? Production,
     string Status,
@@ -107,7 +121,12 @@ internal sealed record StoryboardShotDocument(
     IReadOnlyList<string> Props,
     string Model,
     string Runtime,
-    IReadOnlyList<StoryboardHookDraft>? Hooks = null);
+    IReadOnlyList<StoryboardHookDraft>? Hooks = null,
+    string ProductionMode = "",
+    string FrameStrategyReason = "",
+    string FirstFrameDescription = "",
+    string LastFrameDescription = "",
+    string CutDescription = "");
 
 public interface IStoryboardDesigner
 {
@@ -169,7 +188,7 @@ public sealed class GenerateStoryboardCommandHandler(
             cancellationToken);
         if (scriptPackage is null) return null;
         if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
-            throw new InvalidOperationException("正式剧本缺少上游拍摄计划，请重新生成并确认改编方案后再生成分镜。");
+            throw new InvalidOperationException("正式剧本缺少拍摄计划，请从改编大纲重新生成正式剧本后再生成分镜。");
 
         var settings = await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
             new GetProjectSettingsQuery(command.ProjectId),
@@ -179,7 +198,7 @@ public sealed class GenerateStoryboardCommandHandler(
             new ListVisualAssetsQuery(command.ProjectId, null),
             cancellationToken);
         var result = await designer.DesignAsync(settings, scriptPackage, visualAssets, cancellationToken);
-        var shots = Normalize(result.Shots, scriptPackage);
+        var shots = Normalize(result.Shots, scriptPackage, visualAssets);
         var beatIds = BuildBeatIdQueues(scriptPackage);
         var previousClaims = await dbContext.ShotBeatClaims
             .Where(item => item.ScriptPackageAssetId == scriptPackage.AssetId)
@@ -245,7 +264,12 @@ public sealed class GenerateStoryboardCommandHandler(
                 NormalizeNames(shot.Props),
                 result.Model,
                 result.Runtime,
-                NormalizeHooks(shot.Hooks));
+                NormalizeHooks(shot.Hooks),
+                ShotProductionModes.Normalize(shot.ProductionMode),
+                shot.FrameStrategyReason.Trim(),
+                shot.FirstFrameDescription.Trim(),
+                shot.LastFrameDescription.Trim(),
+                shot.CutDescription.Trim());
             var documentJson = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
             var shotAsset = new Asset
             {
@@ -351,7 +375,8 @@ public sealed class GenerateStoryboardCommandHandler(
 
     private static StoryboardShotDraft[] Normalize(
         IReadOnlyList<StoryboardShotDraft> proposed,
-        ProductionScriptPackageView scriptPackage)
+        ProductionScriptPackageView scriptPackage,
+        IReadOnlyList<VisualAssetView> visualAssets)
     {
         if (proposed.Count is < 1 or > 100)
             throw new InvalidOperationException("分镜必须包含 1 至 100 个镜头。");
@@ -362,11 +387,20 @@ public sealed class GenerateStoryboardCommandHandler(
             throw new InvalidOperationException("镜号和镜头时长必须大于零。");
         if (proposed.GroupBy(item => (item.SceneNumber, item.ShotNumber)).Any(group => group.Count() > 1))
             throw new InvalidOperationException("同一场次内不能出现重复镜号。");
+        if (proposed.Any(item => !ShotProductionModes.IsSupported(item.ProductionMode)))
+            throw new InvalidOperationException("每个镜头必须分析并指定仅首帧或首尾帧模式。");
+        if (proposed.Any(item => string.IsNullOrWhiteSpace(item.FrameStrategyReason)
+            || string.IsNullOrWhiteSpace(item.FirstFrameDescription)
+            || string.IsNullOrWhiteSpace(item.CutDescription)))
+            throw new InvalidOperationException("每个镜头必须包含帧策略理由、首帧描述和 cut 级执行描述。");
+        if (proposed.Any(item => item.ProductionMode == ShotProductionModes.FirstLastContinuous
+            && string.IsNullOrWhiteSpace(item.LastFrameDescription)))
+            throw new InvalidOperationException("首尾帧镜头必须包含明确的尾帧描述。");
 
         ValidateHooks(proposed, scriptPackage);
 
         if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
-            throw new InvalidOperationException("正式剧本缺少上游拍摄计划，请重新生成并确认改编方案后再生成分镜。");
+            throw new InvalidOperationException("正式剧本缺少拍摄计划，请从改编大纲重新生成正式剧本后再生成分镜。");
 
         var plannedShots = scriptPackage.Episode.Scenes
             .SelectMany(scene => scene.ShotPlan!.Select(shot => (scene.SceneNumber, Shot: shot)))
@@ -374,6 +408,8 @@ public sealed class GenerateStoryboardCommandHandler(
         var proposedKeys = proposed.Select(item => (item.SceneNumber, item.ShotNumber)).ToHashSet();
         if (!proposedKeys.SetEquals(plannedShots.Keys))
             throw new InvalidOperationException("分镜镜号必须与正式剧本中的镜头计划完全一致。");
+
+        ValidateScriptCoverage(proposed, scriptPackage);
 
         return proposed
             .OrderBy(item => item.SceneNumber)
@@ -386,16 +422,47 @@ public sealed class GenerateStoryboardCommandHandler(
                     DurationSeconds = plan.DurationSeconds,
                     ShotSize = plan.ShotSize,
                     CameraAngle = plan.CameraAngle,
-                    CameraMovement = plan.CameraMovement
+                    CameraMovement = plan.CameraMovement,
+                    Props = NormalizePropNames(item.Props, visualAssets)
                 };
             })
             .ToArray();
+    }
+
+    private static void ValidateScriptCoverage(
+        IReadOnlyList<StoryboardShotDraft> shots,
+        ProductionScriptPackageView scriptPackage)
+    {
+        foreach (var scene in scriptPackage.Episode.Scenes)
+        {
+            var sceneShots = shots.Where(shot => shot.SceneNumber == scene.SceneNumber).ToArray();
+            if (sceneShots.All(shot => string.IsNullOrWhiteSpace(shot.Action)))
+                throw new InvalidOperationException($"分镜未呈现正式剧本第 {scene.SceneNumber} 场的动作。");
+
+            var storyboardDialogue = string.Join("\n", sceneShots.Select(shot => shot.Dialogue));
+            var missingLine = (scene.Dialogues ?? [])
+                .SelectMany(dialogue => dialogue.Lines ?? [])
+                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line)
+                    && !storyboardDialogue.Contains(line.Trim(), StringComparison.Ordinal));
+            if (missingLine is not null)
+                throw new InvalidOperationException($"分镜遗漏正式剧本第 {scene.SceneNumber} 场对白：{missingLine}");
+        }
     }
 
     private static string[] NormalizeNames(IReadOnlyList<string> values) => values
         .Select(item => item.Trim())
         .Where(item => item.Length > 0)
         .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private static string[] NormalizePropNames(
+        IReadOnlyList<string> values,
+        IReadOnlyList<VisualAssetView> visualAssets) => values
+        .SelectMany(name => visualAssets
+            .Where(asset => asset.Kind == "prop" && NamesMatch(asset.Name, name))
+            .Select(asset => asset.Name))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(2)
         .ToArray();
 
     private static StoryboardHookDraft[] NormalizeHooks(IReadOnlyList<StoryboardHookDraft>? hooks) =>
@@ -549,6 +616,15 @@ internal static class StoryboardQueries
                 document.Characters,
                 document.Props,
                 document.Hooks ?? [],
+                ShotProductionModes.ForShot(document),
+                document.FrameStrategyReason,
+                string.IsNullOrWhiteSpace(document.FirstFrameDescription)
+                    ? document.VisualDescription
+                    : document.FirstFrameDescription,
+                document.LastFrameDescription,
+                string.IsNullOrWhiteSpace(document.CutDescription)
+                    ? document.Action
+                    : document.CutDescription,
                 linkedAssets,
                 production,
                 state.LifecycleStatus,
@@ -692,34 +768,40 @@ internal static class StoryboardQueries
         if (items.Count == 0) return null;
         var runIds = items.Select(item => item.RunId).Distinct().ToArray();
         var runs = await dbContext.ProductionRuns.AsNoTracking()
-            .Where(item => runIds.Contains(item.Id))
+            .Where(item => runIds.Contains(item.Id) && item.RunType == "shot-frames")
             .ToListAsync(cancellationToken);
+        if (runs.Count == 0) return null;
         var run = runs.OrderByDescending(item => item.CreatedAtUtc).First();
-        var view = ShotProductionModes.ToView(
-            run,
-            items.Where(item => item.RunId == run.Id).ToArray(),
-            definition.DurationSeconds);
-        if (view.OutputAssetId is not Guid outputAssetId) return view;
-
-        var output = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
-            item => item.Id == outputAssetId
+        var runItems = items.Where(item => item.RunId == run.Id).ToArray();
+        var outputAssetIds = runItems
+            .Where(item => item.OutputAssetId is not null)
+            .Select(item => item.OutputAssetId!.Value)
+            .ToArray();
+        var sourceOutputs = await dbContext.Assets.AsNoTracking()
+            .Where(item => outputAssetIds.Contains(item.Id)
                 && item.ProjectId == definition.ProjectId
-                && item.Type == ShotFrameService.AssetType,
-            cancellationToken);
-        if (output is null) return view;
-        var currentFrameId = await dbContext.ResourceStates.AsNoTracking()
+                && item.Type == ShotFrameService.AssetType)
+            .ToListAsync(cancellationToken);
+        var outputResourceIds = sourceOutputs.Select(item => item.ResourceId).ToArray();
+        var currentOutputIds = await dbContext.ResourceStates.AsNoTracking()
             .Where(item => item.ProjectId == definition.ProjectId
-                && item.ResourceId == output.ResourceId
-                && item.ResourceType == ShotFrameService.AssetType)
-            .Select(item => (Guid?)item.CurrentAssetId)
-            .SingleOrDefaultAsync(cancellationToken);
-        return currentFrameId is null || currentFrameId == outputAssetId
-            ? view
-            : view with
-            {
-                OutputAssetId = currentFrameId,
-                OutputUrl = $"/api/v2/projects/{definition.ProjectId}/storyboard/frames/{currentFrameId}/content"
-            };
+                && item.ResourceType == ShotFrameService.AssetType
+                && outputResourceIds.Contains(item.ResourceId))
+            .ToDictionaryAsync(item => item.ResourceId, item => item.CurrentAssetId, cancellationToken);
+        var currentOutputs = await dbContext.Assets.AsNoTracking()
+            .Where(item => currentOutputIds.Values.Contains(item.Id))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+        var resolvedOutputs = sourceOutputs.ToDictionary(
+            item => item.Id,
+            item => currentOutputIds.TryGetValue(item.ResourceId, out var currentId)
+                && currentOutputs.TryGetValue(currentId, out var current)
+                    ? current
+                    : item);
+        return ShotProductionModes.ToView(
+            run,
+            runItems,
+            definition.DurationSeconds,
+            resolvedOutputs);
     }
 }
 
@@ -763,12 +845,16 @@ public sealed class MafStoryboardDesigner(
                     {
                         Instructions = """
                             你是动画导演和分镜师。将当前正式剧本中的上游拍摄计划细化为可生产的结构化镜头。
-                            不得改写事件顺序、人物身份和对白含义。每个镜头必须属于输入中的真实场次，sceneNumber 必须原样使用；shotNumber 在每场从 1 连续编号。
+                            不得改写事件顺序、人物身份和对白。每个镜头必须属于输入中的真实场次，sceneNumber 必须原样使用；shotNumber 在每场从 1 连续编号。
                             episode.scenes[].shotPlan 是正式剧本已确定的摄影骨架。必须逐镜保留其中的 sceneNumber、shotNumber、durationSeconds、shotSize、cameraAngle 和 cameraMovement，不得新增、删除、合并、拆分或重新定时；只负责细化构图、画面、动作、对白与声音。
-                            characters 和 props 只能使用输入剧本或资产中的名称。
+                            必须把 episode.scenes[].action 分解落实到本场镜头动作中；episode.scenes[].dialogues 中每一句 lines 台词都必须逐字出现在本场某个镜头的 dialogue 中，不得遗漏、改写或新增剧情信息。
+                            characters 只能使用输入剧本或资产中的名称。props 不是画面物件清单，只用于声明生成时必须加载设定图以保持外观连续的特殊道具；props 只能逐字使用 input.specialPropNames 中的名称，不得从剧本 props 自行抄录其他物件。通常每镜最多 1 个；只有两个特殊道具在同一动作中同时被操作且都需要外观连续时才可写 2 个。普通武器、家具、交通工具、钱袋、衣物、食物、工具、布景，以及仅出现但未推动本镜动作的物件一律不写。若没有必须加载设定图的特殊道具，返回空数组。
+                            必须逐镜分析帧生成策略。productionMode 只能是 direct-first-frame 或 first-last-continuous。若主体方向、位置、姿态、表情、遮挡关系或关键道具状态在镜头结尾发生必须被明确控制的可见变化（例如背对转为正面、开门前后、交接前后、起身或倒下），使用 first-last-continuous；若主体保持同一朝向和主要状态，动作可由单一首帧自然延展，则使用 direct-first-frame。不得按时长机械判断。
+                            frameStrategyReason 用一句具体中文说明为什么只需首帧或必须首尾帧。firstFrameDescription 必须写清镜头开始瞬间每个主体的位置、朝向、姿态、视线、手部/道具状态、前中后景关系和光线。first-last-continuous 时 lastFrameDescription 必须写清结束瞬间相对于首帧的可见变化；direct-first-frame 时返回空字符串。
+                            cutDescription 必须达到实际拍摄 cut 的执行粒度：按时间顺序描述起始画面、演员调度、动作节拍、视线与轴线、摄影机运动的起止和速度、焦点转移、画面结束点；不得只复述剧情，不得使用“展现冲突”“营造氛围”等不可执行措辞。
                             episode.smallHooks 和 episode.bigHooks 是当前剧本中的爆点。必须根据事件内容把每条爆点落实到最能体现它的一个具体镜头：在该镜头 hooks 中写入 type（small 或 big）和 description。description 必须逐字复制输入爆点，不得改写、遗漏、新增或重复；允许一个镜头承载多条爆点，无爆点镜头返回空数组。
                             只返回 JSON，不要 Markdown。结构：
-                            {"shots":[{"sceneNumber":1,"shotNumber":1,"durationSeconds":3.5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","composition":"...","visualDescription":"...","action":"...","dialogue":"...","sound":"...","characters":["..."],"props":["..."],"hooks":[{"type":"small","description":"逐字复制的既有爆点"}]}]}
+                            {"shots":[{"sceneNumber":1,"shotNumber":1,"durationSeconds":3.5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","composition":"...","visualDescription":"...","action":"...","dialogue":"...","sound":"...","characters":["..."],"props":[],"hooks":[{"type":"small","description":"逐字复制的既有爆点"}],"productionMode":"direct-first-frame","frameStrategyReason":"主体始终朝向门口，姿态与空间关系无必须锁定的终态变化。","firstFrameDescription":"...","lastFrameDescription":"","cutDescription":"0.0-1.0 秒……；1.0-3.5 秒……；切在……"}]}
                             """,
                         MaxOutputTokens = 16_384
                     }
@@ -789,6 +875,7 @@ public sealed class MafStoryboardDesigner(
             },
             targetSeconds = scriptPackage.TargetSeconds ?? scriptPackage.Episode.TargetSeconds,
             episode = scriptPackage.Episode,
+            specialPropNames = assets.Where(item => item.Kind == "prop").Select(item => item.Name),
             assets = assets.Select(item => new
             {
                 item.Kind,
@@ -1040,6 +1127,10 @@ public sealed class StartShotProductionCommandHandler(
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
             item => item.Id == definition.ShotAssetId,
             cancellationToken);
+        var shotDocument = JsonSerializer.Deserialize<StoryboardShotDocument>(
+            shotAsset.DocumentJson ?? "{}",
+            StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前镜头内容无法读取。");
         var preflight = await ShotProductionPreflight.EvaluateAsync(
             dbContext,
             definition,
@@ -1081,7 +1172,7 @@ public sealed class StartShotProductionCommandHandler(
             .Append(creativeSettingsAssetId)
             .Distinct()
             .ToArray();
-        var mode = ShotProductionModes.ForDuration(definition.DurationSeconds);
+        var mode = ShotProductionModes.ForShot(shotDocument);
         var stages = ShotProductionModes.Stages(mode);
         var now = timeProvider.GetUtcNow();
         var run = new ProductionRun
@@ -1096,8 +1187,8 @@ public sealed class StartShotProductionCommandHandler(
             SpecJson = JsonSerializer.Serialize(new
             {
                 mode,
-                thresholdSeconds = ShotProductionModes.ThresholdSeconds,
                 durationSeconds = definition.DurationSeconds,
+                shotDocument.FrameStrategyReason,
                 command.ShotResourceId,
                 execution = mode == ShotProductionModes.FirstLastContinuous ? "sequential" : "direct"
             }, StoryboardDefaults.JsonOptions),
@@ -1127,21 +1218,21 @@ public sealed class StartShotProductionCommandHandler(
         }
         await dbContext.SaveChangesAsync(cancellationToken);
         await frameService.GenerateFirstFrameAsync(run.Id, command.ConfirmedPrompt, cancellationToken);
-        var outputAssetId = await dbContext.ProductionRunItems
-            .Where(item => item.RunId == run.Id && item.Stage == "first-frame")
-            .Select(item => item.OutputAssetId)
-            .SingleAsync(cancellationToken);
-        return new(
-            run.Id,
-            mode,
-            run.Status,
-            run.CurrentStage,
-            stages,
-            run.CreatedAtUtc,
-            outputAssetId,
-            outputAssetId is null
-                ? null
-                : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{outputAssetId}/content");
+        if (mode == ShotProductionModes.FirstLastContinuous)
+        {
+            await frameService.GenerateLastFrameAsync(run.Id, cancellationToken);
+        }
+        var completedItems = await dbContext.ProductionRunItems.AsNoTracking()
+            .Where(item => item.RunId == run.Id)
+            .ToListAsync(cancellationToken);
+        var outputAssetIds = completedItems
+            .Where(item => item.OutputAssetId is not null)
+            .Select(item => item.OutputAssetId!.Value)
+            .ToArray();
+        var outputAssets = await dbContext.Assets.AsNoTracking()
+            .Where(item => outputAssetIds.Contains(item.Id))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+        return ShotProductionModes.ToView(run, completedItems, definition.DurationSeconds, outputAssets);
     }
 
     private ValidationRun CreateValidationRun(
@@ -1361,6 +1452,16 @@ public static class ShotProductionModes
     public static string ForDuration(double durationSeconds) =>
         durationSeconds <= ThresholdSeconds ? DirectFirstFrame : FirstLastContinuous;
 
+    public static bool IsSupported(string? mode) => mode is DirectFirstFrame or FirstLastContinuous;
+
+    public static string Normalize(string? mode) => IsSupported(mode)
+        ? mode!
+        : throw new InvalidOperationException("镜头生产模式只能是 direct-first-frame 或 first-last-continuous。");
+
+    internal static string ForShot(StoryboardShotDocument shot) => IsSupported(shot.ProductionMode)
+        ? shot.ProductionMode
+        : ForDuration(shot.DurationSeconds);
+
     public static IReadOnlyList<string> Stages(string mode) => mode == FirstLastContinuous
         ? ["first-frame", "last-frame"]
         : ["first-frame"];
@@ -1368,19 +1469,50 @@ public static class ShotProductionModes
     internal static ShotProductionView ToView(
         ProductionRun run,
         IReadOnlyList<ProductionRunItem> items,
-        double durationSeconds)
+        double durationSeconds,
+        IReadOnlyDictionary<Guid, Asset>? outputAssets = null)
     {
         var outputAssetId = items.FirstOrDefault(item => item.Stage == "first-frame")?.OutputAssetId;
+        var lastFrameAssetId = items.FirstOrDefault(item => item.Stage == "last-frame")?.OutputAssetId;
+        Asset? Output(Guid? assetId) => assetId is Guid id
+            && outputAssets is not null
+            && outputAssets.TryGetValue(id, out var asset)
+                ? asset
+                : null;
+        var firstFrame = Output(outputAssetId);
+        var lastFrame = Output(lastFrameAssetId);
         return new(
             run.Id,
-            ForDuration(durationSeconds),
+            items.Any(item => item.Stage == "last-frame") ? FirstLastContinuous : DirectFirstFrame,
             run.Status,
             run.CurrentStage,
             items.OrderBy(item => item.CreatedAtUtc).Select(item => item.Stage).Distinct().ToArray(),
             run.CreatedAtUtc,
-            outputAssetId,
+            firstFrame?.Id ?? outputAssetId,
             outputAssetId is null
                 ? null
-                : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{outputAssetId}/content");
+                : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{firstFrame?.Id ?? outputAssetId}/content",
+            ReadPrompt(firstFrame),
+            lastFrame?.Id ?? lastFrameAssetId,
+            lastFrameAssetId is null
+                ? null
+                : $"/api/v2/projects/{run.ProjectId}/storyboard/frames/{lastFrame?.Id ?? lastFrameAssetId}/content",
+            ReadPrompt(lastFrame));
+    }
+
+    private static string? ReadPrompt(Asset? asset)
+    {
+        if (string.IsNullOrWhiteSpace(asset?.GenerationMetadataJson)) return null;
+        try
+        {
+            using var metadata = JsonDocument.Parse(asset.GenerationMetadataJson);
+            return metadata.RootElement.TryGetProperty("prompt", out var prompt)
+                ? prompt.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 }

@@ -4,7 +4,6 @@ import {
   Badge,
   Button,
   Dropdown,
-  Select,
   Tag,
   Tooltip,
   type MenuProps,
@@ -86,15 +85,12 @@ function getWorkflow(
   if (pathname.includes("/story/")) {
     const next = pathname.includes("/story/source")
       ? { label: "分析素材图谱", to: `${projectBase}/story/material` }
-      : pathname.includes("/story/material")
-        ? { label: "建立改编方案", to: `${projectBase}/story/adaptation` }
-        : { label: "进入正式剧本", to: `${projectBase}/script` };
+      : { label: "建立改编方案", to: `${projectBase}/script/adaptation` };
     return {
-      label: "原文资料",
+      label: "故事",
       tabs: [
         { label: "原文资料", to: `${projectBase}/story/source` },
         { label: "素材图谱", to: `${projectBase}/story/material` },
-        { label: "改编方案", to: `${projectBase}/story/adaptation` },
       ],
       next,
     };
@@ -109,10 +105,13 @@ function getWorkflow(
       ],
     };
   }
-  if (pathname.includes("/script/")) {
+  if (pathname.endsWith("/script") || pathname.includes("/script/")) {
     return {
       label: "剧本",
-      tabs: episodeId ? [{ label: "分集剧本", to: `${projectBase}/script/episodes/${episodeId}` }] : [],
+      tabs: [
+        { label: "改编方案", to: `${projectBase}/script/adaptation` },
+        ...(episodeId ? [{ label: "正式剧本", to: `${projectBase}/script/episodes/${episodeId}` }] : []),
+      ],
     };
   }
   if (pathname.includes("/storyboard")) {
@@ -281,19 +280,6 @@ export function AppShell() {
   const activeRoot = location.pathname.slice(projectBase.length + 1).split("/")[0];
   const active = navigation.find((item) => item.to.split("/")[0] === activeRoot);
 
-  const changeEpisode = (episodeId: string) => {
-    setSelectedEpisode(episodeId);
-    if (location.pathname.includes("/script/episodes/")) {
-      navigate(`${projectBase}/script/episodes/${episodeId}`);
-    } else if (location.pathname.includes("/storyboard")) {
-      navigate(`${projectBase}/storyboard/episodes/${episodeId}`);
-    } else if (location.pathname.includes("/production")) {
-      navigate(`${projectBase}/production/episodes/${episodeId}`);
-    } else if (location.pathname.includes("/review")) {
-      navigate(`${projectBase}/review/episodes/${episodeId}`);
-    }
-  };
-
   const switchProject = (nextProject: ProjectRecord) => {
     setProjectName(nextProject.name);
     navigate(`/projects/${nextProject.id}/settings`, {
@@ -381,19 +367,6 @@ export function AppShell() {
         </Dropdown>
       )}
       actionsRender={() => [
-        <Select
-          className="header-episode-select"
-          key="episode"
-          aria-label="当前生产集"
-          value={currentEpisode || undefined}
-          placeholder="尚未创建生产集"
-          disabled={productionEpisodes.length === 0}
-          onChange={changeEpisode}
-          options={productionEpisodes.map((episode) => ({
-            value: episode.id,
-            label: `E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.title}`,
-          }))}
-        />,
         <Button className="command-search" icon={<Search size={15} />} key="search">
           搜索或执行命令 <kbd>⌘ K</kbd>
         </Button>,
@@ -482,7 +455,8 @@ function WorkflowToolbar({
   projectBase: string;
   pathname: string;
 }) {
-  const currentTab = workflow.tabs.find((tab) => pathname === tab.to);
+  const currentTab = workflow.tabs.find((tab) =>
+    pathname === tab.to || pathname.startsWith(`${tab.to}/`));
   return (
     <div className="workflow-toolbar">
       <nav className="workflow-breadcrumb" aria-label="面包屑导航">

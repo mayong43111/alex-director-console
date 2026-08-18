@@ -15,6 +15,8 @@ public sealed record VisualReferenceImageView(
     int Version,
     string ContentType,
     string ContentUrl,
+    string Prompt,
+    string? RevisedPrompt,
     DateTimeOffset CreatedAtUtc);
 
 internal static class VisualReferenceQueries
@@ -97,9 +99,9 @@ public sealed class VisualReferenceService(
             .SingleOrDefaultAsync(cancellationToken)
             ?? throw new KeyNotFoundException("视觉资产不存在或已退休。");
         var document = VisualAssetMapper.ReadDocument(subject);
-        if (document.Kind is not ("character" or "scene"))
+        if (document.Kind is not ("character" or "scene" or "prop"))
         {
-            throw new InvalidOperationException("只为人物和场景生成首帧参考图。");
+            throw new InvalidOperationException("不支持该类型的设定图生成。");
         }
 
         var project = await dbContext.Projects.AsNoTracking()
@@ -116,10 +118,8 @@ public sealed class VisualReferenceService(
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
 
         var prompt = BuildPrompt(settings, document);
-        var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
-            settings.OutputWidth,
-            settings.OutputHeight,
-            settings.AspectRatio);
+        const int referenceSize = 1024;
+        const string modelSize = "1024x1024";
         var generated = await generator.GenerateAsync(
             prompt,
             modelSize,
@@ -130,8 +130,8 @@ public sealed class VisualReferenceService(
         }
         var output = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
             generated.Bytes,
-            settings.OutputWidth,
-            settings.OutputHeight);
+            referenceSize,
+            referenceSize);
 
         var previous = await (
             from reference in dbContext.VisualReferences.AsNoTracking()
@@ -180,8 +180,8 @@ public sealed class VisualReferenceService(
                     quality = generated.Quality,
                     size = modelSize,
                     outputFormat = "png",
-                    outputWidth = settings.OutputWidth,
-                    outputHeight = settings.OutputHeight
+                    outputWidth = referenceSize,
+                    outputHeight = referenceSize
                 },
                 references = new[]
                 {
@@ -260,7 +260,10 @@ public sealed class VisualReferenceService(
         Asset image,
         Guid subjectResourceId,
         string subjectType,
-        string subjectName) => new(
+        string subjectName)
+    {
+        var (prompt, revisedPrompt) = ReadPrompts(image.GenerationMetadataJson);
+        return new(
             image.Id,
             subjectResourceId,
             subjectType,
@@ -268,7 +271,31 @@ public sealed class VisualReferenceService(
             image.Version,
             image.ContentType ?? "image/png",
             $"/api/v2/projects/{image.ProjectId}/visual-assets/references/{image.Id}/content",
+            prompt,
+            revisedPrompt,
             image.CreatedAtUtc);
+    }
+
+    private static (string Prompt, string? RevisedPrompt) ReadPrompts(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return (string.Empty, null);
+        try
+        {
+            using var metadata = JsonDocument.Parse(metadataJson);
+            var root = metadata.RootElement;
+            var prompt = root.TryGetProperty("prompt", out var promptElement)
+                ? promptElement.GetString() ?? string.Empty
+                : string.Empty;
+            var revisedPrompt = root.TryGetProperty("revisedPrompt", out var revisedPromptElement)
+                ? revisedPromptElement.GetString()
+                : null;
+            return (prompt, revisedPrompt);
+        }
+        catch (JsonException)
+        {
+            return (string.Empty, null);
+        }
+    }
 
     private static string BuildPrompt(
         ProjectSettingsDocument settings,
@@ -284,11 +311,15 @@ public sealed class VisualReferenceService(
         Visual definition: {{document.VisualDescription}}
         Mandatory details: {{string.Join("; ", document.MustKeep)}}
         Forbidden details: {{string.Join("; ", document.Avoid)}}
-        {{(document.Kind == "character"
-            ? "Show the single character clearly from head to toe in a neutral readable pose, with an uncluttered background and no other character."
-            : "Show the complete environment clearly as a reusable location reference, with no foreground character and no story action.")}}
+        Output a single square 1024x1024 production design sheet. The outer canvas and all gutters must be pure solid white (#FFFFFF), without texture, gradient, floor, horizon, scenery, or cast shadow outside the requested views.
+        {{document.Kind switch
+        {
+            "character" => "Use a precise character turnaround layout: the left 55% is one large front-facing full-body view from head to toe; the upper-right contains two smaller full-body views, one back view and one side profile; the lower-right is one large head-and-shoulders close-up. All four views depict exactly the same character, identity, proportions, costume, colors, and accessories. Keep each view completely visible and separated by clean white space.",
+            "scene" => "Use a precise environment design layout: the upper 58% is one large front eye-level view of the complete location; the lower-left is the exact reverse view; the lower-right is a clear top-down overhead plan view. Preserve identical architecture, geography, materials, objects, scale, and lighting logic across all three views. Separate views with clean white gutters and include no foreground character or story action.",
+            _ => "Show exactly one prop only, centered as one large front-facing orthographic product view. No back view, side view, close-up, inset, duplicate, hand, holder, character, environment, pedestal, or extra object. Leave generous pure white margin around the complete prop."
+        }}}
         Keep identity, costume, architecture, materials, scale, and colors explicit and reusable across shots.
-        Do not render titles, labels, captions, logos, watermarks, UI, borders, model sheets, split panels, or readable text.
+        Do not render titles, labels, captions, arrows, dimension marks, logos, watermarks, UI, panel borders, or readable text.
         """;
 }
 

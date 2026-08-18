@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
@@ -52,6 +53,34 @@ public sealed record AdaptationScriptResult(
     IReadOnlyList<string>? OverallSmallHooks = null,
     IReadOnlyList<string>? OverallBigHooks = null);
 
+public sealed record ScreenplayDialogueDraft(
+    string Character,
+    string? Parenthetical,
+    IReadOnlyList<string> Lines);
+
+public sealed record ProductionScriptSceneDraft(
+    int SceneNumber,
+    string Heading,
+    string Summary,
+    string Action,
+    IReadOnlyList<ScreenplayDialogueDraft> Dialogues,
+    IReadOnlyList<string> Characters,
+    IReadOnlyList<string> Props,
+    string StoryFunction,
+    double TargetSeconds,
+    string Rhythm,
+    string VisualContrast,
+    IReadOnlyList<AdaptationShotPlanDraft> ShotPlan,
+    string? DialogueIntent = null);
+
+public sealed record ProductionScriptEpisodeDraft(
+    string Title,
+    string Logline,
+    int TargetSeconds,
+    IReadOnlyList<ProductionScriptSceneDraft> Scenes,
+    IReadOnlyList<string> SmallHooks,
+    IReadOnlyList<string> BigHooks);
+
 public sealed record AdaptationScriptView(
     Guid AssetId,
     Guid ResourceId,
@@ -90,7 +119,8 @@ internal sealed record AdaptationScriptDocument(
 internal sealed record ProductionScriptPackageDocument(
     Guid AdaptationScriptAssetId,
     Guid ProductionEpisodeId,
-    AdaptationEpisodeDraft Episode);
+    ProductionScriptEpisodeDraft? Script = null,
+    AdaptationEpisodeDraft? Episode = null);
 
 public sealed record ProductionScriptPackageView(
     Guid AssetId,
@@ -102,7 +132,8 @@ public sealed record ProductionScriptPackageView(
     double? TargetSeconds,
     string Status,
     Guid AdaptationScriptAssetId,
-    AdaptationEpisodeDraft Episode,
+    bool IsLegacyOutline,
+    ProductionScriptEpisodeDraft Episode,
     DateTimeOffset UpdatedAtUtc);
 
 public interface IAdaptationScriptWriter
@@ -110,9 +141,16 @@ public interface IAdaptationScriptWriter
     Task<AdaptationScriptResult> WriteAsync(
         ProjectSettingsView projectSettings,
         StoryMaterialAnalysisView analysis,
-        IReadOnlyList<SourceChapterView> chapters,
         int desiredEpisodeCount,
         string? instruction,
+        CancellationToken cancellationToken);
+
+    Task<ProductionScriptEpisodeDraft> WriteProductionScriptAsync(
+        ProjectSettingsView projectSettings,
+        StoryMaterialAnalysisView analysis,
+        AdaptationEpisodeDraft outline,
+        ProductionScriptEpisodeDraft? previousScript,
+        string? correction,
         CancellationToken cancellationToken);
 }
 
@@ -138,6 +176,9 @@ public sealed record RegenerateAdaptationEpisodeCommand(
 
 public sealed record ConfirmAdaptationScriptCommand(Guid ProjectId, Guid SourceResourceId)
     : ICommand<AdaptationScriptView?>;
+
+public sealed record RegenerateProductionScriptCommand(Guid ProjectId, Guid ProductionEpisodeId)
+    : ICommand<ProductionScriptPackageView?>;
 
 public sealed record GetProductionScriptPackageQuery(Guid ProjectId, Guid ProductionEpisodeId)
     : IQuery<ProductionScriptPackageView?>;
@@ -181,7 +222,8 @@ public sealed class GetProductionScriptPackageQueryHandler(V2DbContext dbContext
         var document = JsonSerializer.Deserialize<ProductionScriptPackageDocument>(
             asset.DocumentJson,
             ProjectSourceDefaults.JsonOptions);
-        return document is null
+        var script = document?.Script ?? ConvertLegacyEpisode(document?.Episode);
+        return document is null || script is null
             ? null
             : new(
                 asset.Id,
@@ -193,8 +235,34 @@ public sealed class GetProductionScriptPackageQueryHandler(V2DbContext dbContext
                 episode.TargetSeconds,
                 episode.Status,
                 document.AdaptationScriptAssetId,
-                document.Episode,
+                document.Script is null,
+                script,
                 asset.UpdatedAtUtc);
+    }
+
+    private static ProductionScriptEpisodeDraft? ConvertLegacyEpisode(AdaptationEpisodeDraft? episode)
+    {
+        if (episode is null) return null;
+        return new(
+            episode.Title,
+            episode.Logline,
+            episode.TargetSeconds,
+            (episode.Scenes ?? []).Select(scene => new ProductionScriptSceneDraft(
+                scene.SceneNumber,
+                scene.Heading,
+                scene.Summary,
+                scene.Summary,
+                [],
+                scene.Characters ?? [],
+                scene.Props ?? [],
+                scene.StoryFunction ?? string.Empty,
+                scene.TargetSeconds ?? 0,
+                scene.Rhythm ?? string.Empty,
+                scene.VisualContrast ?? string.Empty,
+                scene.ShotPlan ?? [],
+                string.IsNullOrWhiteSpace(scene.DialogueNotes) ? null : scene.DialogueNotes.Trim())).ToArray(),
+            episode.SmallHooks ?? [],
+            episode.BigHooks ?? []);
     }
 }
 
@@ -226,16 +294,11 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             cancellationToken);
         if (analysis is null) return null;
         if (analysis.IsStale)
-            throw new StoryDevelopmentConflictException("原文已有新版本，请先重新分析素材，再生成新的剧本草案。");
+            throw new StoryDevelopmentConflictException("原文已有新版本，请先重新分析素材，再生成新的改编大纲。");
 
-        var sourceAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-            item => item.Id == analysis.SourceAssetId,
-            cancellationToken);
-        var source = ProjectSourceMapper.ToView(sourceAsset);
         var result = await writer.WriteAsync(
             projectSettings,
             analysis,
-            source.Chapters,
             desiredEpisodeCount,
             command.Instruction,
             cancellationToken);
@@ -275,7 +338,7 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             cancellationToken);
         var normalizedEpisodes = result.Episodes
             .Take(6)
-            .Select(NormalizeProductionPlan)
+            .Select(NormalizeOutline)
             .ToArray();
         var document = new AdaptationScriptDocument(
             sourceResourceId,
@@ -345,51 +408,19 @@ public sealed class GenerateAdaptationScriptCommandHandler(
         return await AdaptationScriptQueries.ToViewAsync(dbContext, asset, document, cancellationToken);
     }
 
-    private static AdaptationEpisodeDraft NormalizeProductionPlan(AdaptationEpisodeDraft episode)
+    private static AdaptationEpisodeDraft NormalizeOutline(AdaptationEpisodeDraft episode)
     {
         if (episode.Scenes.Count == 0)
-            throw new InvalidOperationException($"第 {episode.ProposalNumber} 集没有场次。");
-        if (episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
-            throw new InvalidOperationException($"第 {episode.ProposalNumber} 集存在未规划镜头的场次。");
-        if (episode.Scenes.Any(scene => string.IsNullOrWhiteSpace(scene.Rhythm)
-            || string.IsNullOrWhiteSpace(scene.VisualContrast)))
-            throw new InvalidOperationException($"第 {episode.ProposalNumber} 集存在缺少节奏或视觉对比的场次。");
-
-        var shots = episode.Scenes.SelectMany(scene => scene.ShotPlan!).ToArray();
-        if (shots.Any(shot => shot.DurationSeconds <= 0
-            || string.IsNullOrWhiteSpace(shot.ShotSize)
-            || string.IsNullOrWhiteSpace(shot.CameraAngle)
-            || string.IsNullOrWhiteSpace(shot.CameraMovement)
-            || string.IsNullOrWhiteSpace(shot.Purpose)))
-            throw new InvalidOperationException($"第 {episode.ProposalNumber} 集的镜头计划字段不完整。");
-
-        var total = shots.Sum(shot => shot.DurationSeconds);
-        var scale = episode.TargetSeconds > 0 && total > 0 ? episode.TargetSeconds / total : 1;
-        var normalizedDurations = shots
-            .Select(shot => Math.Max(.5, Math.Round(shot.DurationSeconds * scale, 1)))
-            .ToArray();
-        var difference = Math.Round(episode.TargetSeconds - normalizedDurations.Sum(), 1);
-        normalizedDurations[^1] = Math.Max(.5, Math.Round(normalizedDurations[^1] + difference, 1));
-
-        var durationIndex = 0;
+            throw new InvalidOperationException($"第 {episode.ProposalNumber} 集没有大纲节点。");
         return episode with
         {
-            Scenes = episode.Scenes.Select(scene =>
+            Scenes = episode.Scenes.Select((scene, index) => scene with
             {
-                var normalizedShots = scene.ShotPlan!
-                    .Select((shot, index) => shot with
-                    {
-                        ShotNumber = index + 1,
-                        DurationSeconds = normalizedDurations[durationIndex++]
-                    })
-                    .ToArray();
-                return scene with
-                {
-                    TargetSeconds = Math.Round(normalizedShots.Sum(shot => shot.DurationSeconds), 1),
-                    Rhythm = scene.Rhythm!.Trim(),
-                    VisualContrast = scene.VisualContrast!.Trim(),
-                    ShotPlan = normalizedShots
-                };
+                SceneNumber = index + 1,
+                TargetSeconds = null,
+                Rhythm = null,
+                VisualContrast = null,
+                ShotPlan = null
             }).ToArray()
         };
     }
@@ -446,10 +477,6 @@ public sealed class AppendAdaptationEpisodeCommandHandler(
         if (analysis.IsStale)
             throw new StoryDevelopmentConflictException("原文已有新版本，请先重新分析素材，再添加剧集。");
 
-        var sourceAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-            item => item.Id == analysis.SourceAssetId,
-            cancellationToken);
-        var source = ProjectSourceMapper.ToView(sourceAsset);
         var nextNumber = currentDocument.Episodes.Count + 1;
         var existingOutline = string.Join("；", currentDocument.Episodes.Select(item =>
             $"E{item.ProposalNumber:D2}《{item.Title}》：{item.Logline}"));
@@ -457,7 +484,6 @@ public sealed class AppendAdaptationEpisodeCommandHandler(
         var generated = await writer.WriteAsync(
             projectSettings,
             analysis,
-            source.Chapters,
             1,
             appendInstruction,
             cancellationToken);
@@ -525,10 +551,6 @@ public sealed class RegenerateAdaptationEpisodeCommandHandler(
         if (analysis.IsStale)
             throw new StoryDevelopmentConflictException("原文已有新版本，请先分析新增章节，再重新生成剧集。");
 
-        var sourceAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
-            item => item.Id == analysis.SourceAssetId,
-            cancellationToken);
-        var source = ProjectSourceMapper.ToView(sourceAsset);
         var existingOutline = string.Join("；", currentDocument.Episodes.Select(item =>
             $"E{item.ProposalNumber:D2}《{item.Title}》：{item.Logline}"));
         var rewriteInstruction = $"""
@@ -542,7 +564,6 @@ public sealed class RegenerateAdaptationEpisodeCommandHandler(
         var generated = await writer.WriteAsync(
             projectSettings,
             analysis,
-            source.Chapters,
             1,
             rewriteInstruction,
             cancellationToken);
@@ -576,10 +597,32 @@ public sealed class RegenerateAdaptationEpisodeCommandHandler(
 
 public sealed class ConfirmAdaptationScriptCommandHandler(
     V2DbContext dbContext,
+    IAdaptationScriptWriter writer,
     TimeProvider timeProvider)
     : ICommandHandler<ConfirmAdaptationScriptCommand, AdaptationScriptView?>
 {
+    private static readonly ConcurrentDictionary<(Guid ProjectId, Guid SourceResourceId), SemaphoreSlim>
+        ConfirmationLocks = new();
+
     public async Task<AdaptationScriptView?> HandleAsync(
+        ConfirmAdaptationScriptCommand command,
+        CancellationToken cancellationToken)
+    {
+        var confirmationLock = ConfirmationLocks.GetOrAdd(
+            (command.ProjectId, command.SourceResourceId),
+            _ => new SemaphoreSlim(1, 1));
+        await confirmationLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await ConfirmAsync(command, cancellationToken);
+        }
+        finally
+        {
+            confirmationLock.Release();
+        }
+    }
+
+    private async Task<AdaptationScriptView?> ConfirmAsync(
         ConfirmAdaptationScriptCommand command,
         CancellationToken cancellationToken)
     {
@@ -596,6 +639,27 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 current.Asset,
                 currentDocument,
                 cancellationToken);
+
+        var projectSettings = await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
+            new GetProjectSettingsQuery(command.ProjectId),
+            cancellationToken);
+        if (projectSettings is null) return null;
+        var analysis = await StoryMaterialAnalysisQueries.GetCurrentAsync(
+            dbContext,
+            command.ProjectId,
+            command.SourceResourceId,
+            cancellationToken);
+        if (analysis is null) return null;
+        var productionScripts = new List<ProductionScriptEpisodeDraft>(currentDocument.Episodes.Count);
+        foreach (var outline in currentDocument.Episodes)
+        {
+            productionScripts.Add(await WriteValidatedProductionScriptAsync(
+                writer,
+                projectSettings,
+                analysis,
+                outline,
+                cancellationToken));
+        }
 
         var now = timeProvider.GetUtcNow();
         var nextEpisodeNumber = (await dbContext.ProductionEpisodes
@@ -665,7 +729,7 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 new ProductionScriptPackageDocument(
                     confirmedAsset.Id,
                     episodes[index].Id,
-                    currentDocument.Episodes[index]),
+                    productionScripts[index]),
                 ProjectSourceDefaults.JsonOptions);
             var scriptAsset = new Asset
             {
@@ -707,6 +771,301 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
             confirmedAsset,
             confirmedDocument,
             cancellationToken);
+    }
+
+    internal static async Task<ProductionScriptEpisodeDraft> WriteValidatedProductionScriptAsync(
+        IAdaptationScriptWriter writer,
+        ProjectSettingsView projectSettings,
+        StoryMaterialAnalysisView analysis,
+        AdaptationEpisodeDraft outline,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 5;
+        ProductionScriptEpisodeDraft? script = null;
+        string? correction = null;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            script = await writer.WriteProductionScriptAsync(
+                projectSettings,
+                analysis,
+                outline,
+                script,
+                correction,
+                cancellationToken);
+            try
+            {
+                return NormalizeProductionScript(outline, script);
+            }
+            catch (InvalidOperationException exception) when (attempt < maximumAttempts)
+            {
+                correction = exception.Message;
+            }
+        }
+
+        throw new InvalidOperationException($"第 {outline.ProposalNumber} 集正式剧本生成失败。");
+    }
+
+    private static ProductionScriptEpisodeDraft NormalizeProductionScript(
+        AdaptationEpisodeDraft outline,
+        ProductionScriptEpisodeDraft script)
+    {
+        if (script.Scenes is not { Count: > 0 })
+            throw new InvalidOperationException($"第 {outline.ProposalNumber} 集正式剧本没有场次。");
+        if (script.Scenes.Any(scene => string.IsNullOrWhiteSpace(scene.Heading)
+            || string.IsNullOrWhiteSpace(scene.Action)
+            || scene.TargetSeconds <= 0
+            || string.IsNullOrWhiteSpace(scene.Rhythm)
+            || string.IsNullOrWhiteSpace(scene.VisualContrast)
+            || scene.ShotPlan is not { Count: > 0 }))
+            throw new InvalidOperationException($"第 {outline.ProposalNumber} 集正式剧本字段不完整。");
+
+        var shots = script.Scenes.SelectMany(scene => scene.ShotPlan!).ToArray();
+        if (shots.Any(shot => shot.DurationSeconds <= 0
+            || string.IsNullOrWhiteSpace(shot.ShotSize)
+            || string.IsNullOrWhiteSpace(shot.CameraAngle)
+            || string.IsNullOrWhiteSpace(shot.CameraMovement)
+            || string.IsNullOrWhiteSpace(shot.Purpose)))
+            throw new InvalidOperationException($"第 {outline.ProposalNumber} 集正式剧本的镜头计划字段不完整。");
+
+        var durations = NormalizeShotDurations(shots, outline.TargetSeconds, outline.ProposalNumber);
+        var durationIndex = 0;
+        var normalizedScenes = script.Scenes.Select((scene, sceneIndex) =>
+        {
+            var normalizedShots = scene.ShotPlan!.Select((shot, shotIndex) => shot with
+            {
+                ShotNumber = shotIndex + 1,
+                DurationSeconds = durations[durationIndex++]
+            }).ToArray();
+            var normalizedDialogues = (scene.Dialogues ?? [])
+                .Where(dialogue => !string.IsNullOrWhiteSpace(dialogue.Character))
+                .Select(dialogue => dialogue with
+                {
+                    Character = dialogue.Character.Trim(),
+                    Parenthetical = string.IsNullOrWhiteSpace(dialogue.Parenthetical)
+                        ? null
+                        : dialogue.Parenthetical.Trim(),
+                    Lines = (dialogue.Lines ?? [])
+                        .Select(line => line.Trim())
+                        .Where(line => line.Length > 0)
+                        .ToArray(),
+                })
+                .Where(dialogue => dialogue.Lines.Count > 0)
+                .ToArray();
+            return scene with
+            {
+                SceneNumber = sceneIndex + 1,
+                Summary = scene.Summary?.Trim() ?? string.Empty,
+                Action = scene.Action.Trim(),
+                Dialogues = normalizedDialogues,
+                Characters = (scene.Characters ?? [])
+                    .Select(item => item.Trim())
+                    .Where(item => item.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                Props = (scene.Props ?? [])
+                    .Select(item => item.Trim())
+                    .Where(item => item.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                TargetSeconds = Math.Round(normalizedShots.Sum(shot => shot.DurationSeconds), 1),
+                ShotPlan = normalizedShots
+            };
+        }).ToArray();
+        ValidateDialogueTiming(normalizedScenes, outline.ProposalNumber);
+        return script with
+        {
+            Title = outline.Title,
+            Logline = outline.Logline,
+            TargetSeconds = outline.TargetSeconds,
+            SmallHooks = outline.SmallHooks ?? [],
+            BigHooks = outline.BigHooks ?? [],
+            Scenes = normalizedScenes
+        };
+    }
+
+    private static void ValidateDialogueTiming(
+        IReadOnlyList<ProductionScriptSceneDraft> scenes,
+        int episodeNumber)
+    {
+        const int maximumLineCharacters = 32;
+        const double maximumDialogueCharactersPerSecond = 3.2;
+        var failures = new List<string>();
+        foreach (var scene in scenes)
+        {
+            var lines = scene.Dialogues.SelectMany(dialogue => dialogue.Lines).ToArray();
+            var overlongLineCount = lines.Count(
+                line => CountSpokenCharacters(line) > maximumLineCharacters);
+            if (overlongLineCount > 0)
+                failures.Add($"第 {scene.SceneNumber} 场有 {overlongLineCount} 句超过 {maximumLineCharacters} 字");
+
+            var characterCount = lines.Sum(CountSpokenCharacters);
+            var maximumCharacters = (int)Math.Floor(
+                scene.TargetSeconds * maximumDialogueCharactersPerSecond);
+            if (characterCount > maximumCharacters)
+                failures.Add(
+                    $"第 {scene.SceneNumber} 场对白 {characterCount} 字，{scene.TargetSeconds:0.#} 秒最多 {maximumCharacters} 字");
+        }
+
+        if (failures.Count > 0)
+            throw new InvalidOperationException(
+                $"第 {episodeNumber} 集对白未通过：{string.Join("；", failures)}。请一次修正全部场次。");
+    }
+
+    private static int CountSpokenCharacters(string line) =>
+        line.Count(character => !char.IsWhiteSpace(character));
+
+    private static double[] NormalizeShotDurations(
+        IReadOnlyList<AdaptationShotPlanDraft> shots,
+        int targetSeconds,
+        int episodeNumber)
+    {
+        const int minimumUnits = 5;
+        var targetUnits = targetSeconds * 10;
+        var roundedUnits = shots
+            .Select(shot => (int)Math.Round(shot.DurationSeconds * 10, MidpointRounding.AwayFromZero))
+            .ToArray();
+        if (roundedUnits.All(unit => unit >= minimumUnits) && roundedUnits.Sum() == targetUnits)
+            return roundedUnits.Select(unit => unit / 10d).ToArray();
+
+        if (targetUnits < shots.Count * minimumUnits)
+            throw new InvalidOperationException(
+                $"第 {episodeNumber} 集镜头数量过多，无法在 {targetSeconds} 秒内保证每镜至少 0.5 秒。");
+
+        var remainingUnits = targetUnits - shots.Count * minimumUnits;
+        var totalWeight = shots.Sum(shot => shot.DurationSeconds);
+        var shares = shots.Select(shot => remainingUnits * shot.DurationSeconds / totalWeight).ToArray();
+        var units = shares.Select(share => minimumUnits + (int)Math.Floor(share)).ToArray();
+        var undistributed = targetUnits - units.Sum();
+        foreach (var index in shares
+            .Select((share, index) => new { index, fraction = share - Math.Floor(share) })
+            .OrderByDescending(item => item.fraction)
+            .ThenBy(item => item.index)
+            .Take(undistributed)
+            .Select(item => item.index))
+        {
+            units[index]++;
+        }
+        return units.Select(unit => unit / 10d).ToArray();
+    }
+}
+
+public sealed class RegenerateProductionScriptCommandHandler(
+    V2DbContext dbContext,
+    IAdaptationScriptWriter writer,
+    TimeProvider timeProvider)
+    : ICommandHandler<RegenerateProductionScriptCommand, ProductionScriptPackageView?>
+{
+    public async Task<ProductionScriptPackageView?> HandleAsync(
+        RegenerateProductionScriptCommand command,
+        CancellationToken cancellationToken)
+    {
+        var productionEpisode = await dbContext.ProductionEpisodes.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == command.ProductionEpisodeId && item.ProjectId == command.ProjectId,
+            cancellationToken);
+        if (productionEpisode is null) return null;
+        var current = await (
+            from state in dbContext.ResourceStates
+            join asset in dbContext.Assets on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == command.ProjectId
+                && state.ResourceType == "script-package"
+                && asset.ProductionEpisodeId == command.ProductionEpisodeId
+                && asset.Type == "script-package"
+            select new { Asset = asset, State = state })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (current?.Asset.DocumentJson is null) return null;
+
+        var packageDocument = JsonSerializer.Deserialize<ProductionScriptPackageDocument>(
+            current.Asset.DocumentJson,
+            ProjectSourceDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("正式剧本包内容无效。");
+        var adaptationAsset = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == packageDocument.AdaptationScriptAssetId
+                && item.ProjectId == command.ProjectId
+                && item.Type == AdaptationScriptQueries.AssetType,
+            cancellationToken)
+            ?? throw new InvalidOperationException("正式剧本关联的改编方案不存在。");
+        var adaptation = AdaptationScriptQueries.ReadDocument(adaptationAsset);
+        var episodeIndex = adaptation.ProductionEpisodeIds.ToList().IndexOf(command.ProductionEpisodeId);
+        var outline = packageDocument.Episode
+            ?? (episodeIndex >= 0 && episodeIndex < adaptation.Episodes.Count
+                ? adaptation.Episodes[episodeIndex]
+                : null)
+            ?? throw new InvalidOperationException("无法确定当前生产集对应的改编大纲。");
+
+        var projectSettings = await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
+            new GetProjectSettingsQuery(command.ProjectId),
+            cancellationToken)
+            ?? throw new InvalidOperationException("项目设定不存在。");
+        var analysisAsset = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == adaptation.AnalysisAssetId
+                && item.ProjectId == command.ProjectId
+                && item.Type == StoryMaterialAnalysisQueries.AssetType,
+            cancellationToken)
+            ?? throw new InvalidOperationException("改编方案关联的素材分析不存在。");
+        var analysisState = await dbContext.ResourceStates.AsNoTracking().SingleAsync(
+            item => item.ProjectId == command.ProjectId
+                && item.ResourceId == analysisAsset.ResourceId,
+            cancellationToken);
+        var analysis = StoryMaterialAnalysisQueries.ToView(
+            analysisAsset,
+            analysisState,
+            StoryMaterialAnalysisQueries.ReadDocument(analysisAsset));
+        var script = await ConfirmAdaptationScriptCommandHandler.WriteValidatedProductionScriptAsync(
+            writer,
+            projectSettings,
+            analysis,
+            outline,
+            cancellationToken);
+
+        var now = timeProvider.GetUtcNow();
+        var documentJson = JsonSerializer.Serialize(
+            new ProductionScriptPackageDocument(
+                adaptationAsset.Id,
+                command.ProductionEpisodeId,
+                script),
+            ProjectSourceDefaults.JsonOptions);
+        var regeneratedAsset = new Asset
+        {
+            ProjectId = command.ProjectId,
+            ProductionEpisodeId = command.ProductionEpisodeId,
+            ResourceId = current.Asset.ResourceId,
+            Version = current.Asset.Version + 1,
+            Number = current.Asset.Number,
+            Type = "script-package",
+            Name = current.Asset.Name,
+            DocumentJson = documentJson,
+            ContentType = "application/json",
+            SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
+            GenerationMetadataJson = current.Asset.GenerationMetadataJson,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(regeneratedAsset);
+        GenerateAdaptationScriptCommandHandler.AddDependency(
+            dbContext,
+            command.ProjectId,
+            regeneratedAsset.Id,
+            adaptationAsset.Id,
+            "derived-from",
+            now);
+        current.State.CurrentAssetId = regeneratedAsset.Id;
+        current.State.LifecycleStatus = "active";
+        current.State.UpdatedAtUtc = now;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return new ProductionScriptPackageView(
+            regeneratedAsset.Id,
+            regeneratedAsset.ResourceId,
+            regeneratedAsset.Version,
+            command.ProductionEpisodeId,
+            productionEpisode.EpisodeNumber,
+            productionEpisode.Title,
+            productionEpisode.TargetSeconds,
+            productionEpisode.Status,
+            adaptationAsset.Id,
+            false,
+            script,
+            now);
     }
 }
 
@@ -809,7 +1168,6 @@ public sealed class MafAdaptationScriptWriter(
     public async Task<AdaptationScriptResult> WriteAsync(
         ProjectSettingsView projectSettings,
         StoryMaterialAnalysisView analysis,
-        IReadOnlyList<SourceChapterView> chapters,
         int desiredEpisodeCount,
         string? instruction,
         CancellationToken cancellationToken)
@@ -841,16 +1199,14 @@ public sealed class MafAdaptationScriptWriter(
                     ChatOptions = new ChatOptions
                     {
                         Instructions = """
-                            你是动画短剧改编编剧。根据原文章节和已提取的轻量素材图谱，创作可继续细化的分集剧本草案。
-                            原文只是人物、世界和事件素材，不是待照搬的剧本。不要求一章对应一集；必须根据项目设定和用户要求进行跨章节重排、合并、删减、戏剧化改写和原创连接，但不得改变项目核心人物身份。
-                            当前阶段写剧本草案中的场景结构和拍摄计划，不输出人物美术设定、场景美术设定或正式资产清单。
-                            每个场次必须先确定 targetSeconds、rhythm、visualContrast 和 shotPlan。shotPlan 是分镜的上游摄影骨架：规定连续镜号、镜头时长、景别、机位、运镜和叙事目的；后续分镜只能细化构图、画面、动作、对白和声音，不得推翻这些约束。
-                            每集所有场次 targetSeconds 之和、所有 shotPlan.durationSeconds 之和都必须等于该集 targetSeconds。每场 shotPlan.durationSeconds 之和必须等于该场 targetSeconds。
+                            你是网剧改编策划。根据素材图谱识别原故事主线，再结合网剧的受众、单集时长和追看节奏，整理成新的改编主线与分集大纲。
+                            原文只是人物、世界和事件素材，不是待照搬的剧本。不要求一章对应一集；应跨章节重排、合并和删减不必要的支线，也可以补充维持因果、冲突和人物动机所需的原创连接，但不得改变项目核心人物身份。
+                            当前阶段只输出大纲：每集列出按顺序发生的剧情节点、节点功能、涉及人物与关键道具。不写正式对白、动作剧本、摄影参数或镜头计划。
                             必须遵守项目设定的内容类型、受众、单集时长和创作方向。
                             同时分析节奏爆点：smallHooks 是推动继续观看的局部悬念、反转或情绪点；bigHooks 是改变局势、揭示核心秘密或形成集尾追看动力的大爆点。每个爆点只属于一个剧集，必须是该集内实际发生的具体事件，不得跨剧集复用或概括。
                             全部正文使用简体中文，专有名称使用通行中文译名。
                             只返回 JSON，不要 Markdown 围栏。结构必须为：
-                            {"title":"...","approach":"...","overallSmallHooks":["..."],"overallBigHooks":["..."],"episodes":[{"proposalNumber":1,"title":"...","logline":"...","targetSeconds":100,"sourceChapterNumbers":[1,2],"smallHooks":["..."],"bigHooks":["..."],"scenes":[{"sceneNumber":1,"heading":"内/外景 地点 时间","summary":"...","characters":["..."],"props":["..."],"storyFunction":"...","dialogueNotes":"...","targetSeconds":20,"rhythm":"先舒缓建立空间，再快速推进冲突","visualContrast":"全景中的孤独感对比近景中的压迫感","shotPlan":[{"shotNumber":1,"durationSeconds":5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","purpose":"建立空间与人物位置"}]}]}]}
+                            {"title":"...","approach":"原故事主线、删减/合并/补充原则与新主线说明","overallSmallHooks":[],"overallBigHooks":[],"episodes":[{"proposalNumber":1,"title":"...","logline":"本集大纲主线","targetSeconds":100,"sourceChapterNumbers":[1,2],"smallHooks":["..."],"bigHooks":["..."],"scenes":[{"sceneNumber":1,"heading":"大纲节点标题","summary":"按因果描述本节点发生的剧情","characters":["..."],"props":["..."],"storyFunction":"本节点在新主线中的作用","dialogueNotes":""}]}]}
                             """,
                         MaxOutputTokens = 16_384
                     }
@@ -883,25 +1239,19 @@ public sealed class MafAdaptationScriptWriter(
                     analysis.Locations,
                     analysis.PlotBeats,
                     analysis.Relations
-                },
-                chapters = chapters.Select(item => new
-                {
-                    item.Number,
-                    item.Title,
-                    item.Content
-                })
+                }
             },
             ProjectSourceDefaults.JsonOptions);
         var response = await agent.RunAsync(
-            $"生成恰好 {desiredEpisodeCount} 个剧集草案：\n{input}",
+            $"生成恰好 {desiredEpisodeCount} 集改编大纲：\n{input}",
             cancellationToken: cancellationToken);
         var json = ExtractJson(response.Text);
         var payload = JsonSerializer.Deserialize<AdaptationScriptPayload>(
             json,
             ProjectSourceDefaults.JsonOptions)
-            ?? throw new InvalidOperationException("GPT-5.4 未返回有效的剧本草案。");
+            ?? throw new InvalidOperationException("GPT-5.4 未返回有效的改编大纲。");
         if (payload.Episodes.Count == 0)
-            throw new InvalidOperationException("GPT-5.4 返回的剧本草案没有剧集。");
+            throw new InvalidOperationException("GPT-5.4 返回的改编大纲没有剧集。");
         return new(
             payload.Title,
             payload.Approach,
@@ -912,13 +1262,103 @@ public sealed class MafAdaptationScriptWriter(
             payload.OverallBigHooks);
     }
 
+    public async Task<ProductionScriptEpisodeDraft> WriteProductionScriptAsync(
+        ProjectSettingsView projectSettings,
+        StoryMaterialAnalysisView analysis,
+        AdaptationEpisodeDraft outline,
+        ProductionScriptEpisodeDraft? previousScript,
+        string? correction,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        if (configuration is null
+            || string.IsNullOrWhiteSpace(configuration.Endpoint)
+            || string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 GPT-5.4。");
+
+        var apiKey = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1")
+            .Unprotect(configuration.ProtectedApiKey);
+        var agent = AzureFoundryChatClientFactory
+            .Create(configuration.Endpoint, configuration.Deployment, apiKey)
+            .AsIChatClient()
+            .AsHarnessAgent(
+                new HarnessAgentOptions
+                {
+                    Name = "AlexProductionScriptWriter",
+                    MaxContextWindowTokens = 1_050_000,
+                    MaxOutputTokens = 24_576,
+                    MaximumIterationsPerRequest = 6,
+                    DisableFileMemory = true,
+                    DisableWebSearch = true,
+                    DisableTodoProvider = true,
+                    DisableAgentModeProvider = true,
+                    DisableAgentSkillsProvider = true,
+                    ChatOptions = new ChatOptions
+                    {
+                        Instructions = """
+                            你是专业影视剧编剧。根据已经确定的单集改编大纲，重新编写可交付的正式剧本，不得把大纲摘要原样当作剧本。
+                            使用标准影视剧表达：每场有“内/外景 地点 时间”场景标题、可拍摄的动作描述，以及按角色分组的对白；对白包含角色名、可选表演提示和逐句台词。用动作和对白实际演出大纲中的冲突、转折和人物选择。
+                            dialogues 必须严格按实际说话顺序排列，一个 item 只表示一次连续发言；人物再次开口时必须创建新的 item，不得把同一角色在整场中的台词集中到一起。character 必须是场内真实说话者，禁止使用“对白说明”“台词提示”等占位角色。
+                            台词要短、自然、可说出口，服务人物当下目的和对手反应。不得复述画面、解释观众已经知道的设定、代替作者总结剧情或堆砌空泛金句；语言应符合人物身份、时代和处境，不使用网络梗。parenthetical 只写无法从台词推断的简短表演提示，不写动作段落。
+                            按正常中文对白每秒约 4 个字符估算，每场至少保留 35% 时长给动作、反应和停顿。每场 lines 全部字符数不得超过 scene.targetSeconds * 2.6；每句优选 8 到 20 字，绝对不得超过 32 字，不得靠机械拆句规避限制。
+                            返回前必须逐场统计 lines 的全部字符数并自行删改到预算以内。如果输入包含 correction，表示上一版未通过硬校验；错误消息中每个“最多 N 字”都是硬上限，必须把对应场次压到不超过 N-8 字，不能只删一两字或原样重交。
+                            如果输入包含 previousScript，必须进入定向返修模式：完整保留上一版的 title、logline、场次数量、heading、summary、action、characters、props、storyFunction、targetSeconds、rhythm、visualContrast、shotPlan、smallHooks 和 bigHooks，只按 correction 重写 dialogues。仍须返回完整 JSON，禁止借返修改动剧情、动作、时长或摄影骨架。
+                            严格遵循大纲主线与爆点，不重新引入已删支线；可以补充完成场景连接和人物动机所需的动作与对白，但不能改变核心事件结果。
+                            同时为下游分镜给出最小摄影骨架：每场 targetSeconds、rhythm、visualContrast 和 shotPlan。镜号连续，镜头总时长等于单集目标时长；分镜只在此基础上细化构图、画面、动作、对白和声音。
+                            全部正文使用简体中文。只返回 JSON，不要 Markdown 围栏。结构必须为：
+                            {"title":"...","logline":"...","targetSeconds":100,"smallHooks":["..."],"bigHooks":["..."],"scenes":[{"sceneNumber":1,"heading":"外景 巴黎街道 日","summary":"本场剧情摘要","action":"现在时、可拍摄的连续动作描述","dialogues":[{"character":"达达尼昂","parenthetical":"压低声音","lines":["第一句台词。","第二句台词。"]}],"characters":["达达尼昂"],"props":["推荐信"],"storyFunction":"推进冲突","targetSeconds":20,"rhythm":"...","visualContrast":"...","shotPlan":[{"shotNumber":1,"durationSeconds":5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","purpose":"建立空间"}]}]}
+                            """,
+                        MaxOutputTokens = 24_576
+                    }
+                },
+                loggerFactory);
+        var input = JsonSerializer.Serialize(new
+        {
+            projectSettings = new
+            {
+                projectSettings.ContentType,
+                projectSettings.TargetAudience,
+                projectSettings.TargetEpisodeSeconds,
+                projectSettings.VisualStyle,
+                projectSettings.ArtDirection,
+                projectSettings.CameraLanguage,
+                projectSettings.SoundStrategy
+            },
+            storyGraph = new { analysis.Summary, analysis.Characters, analysis.Relations },
+            deliveryConstraints = new
+            {
+                EstimatedChineseCharactersPerSecond = 4,
+                MaximumDialogueShare = .65,
+                MaximumEpisodeDialogueCharacters = (int)Math.Floor(outline.TargetSeconds * 2.6),
+                PreferredLineCharacters = "8-20",
+                AbsoluteMaximumLineCharacters = 32
+            },
+            correction = string.IsNullOrWhiteSpace(correction)
+                ? null
+                : new
+                {
+                    Failure = correction,
+                    RequiredAction = "只重写上一版的dialogues；错误中每个最多N字的场次都必须压到N-8字以内。"
+                },
+            previousScript = string.IsNullOrWhiteSpace(correction) ? null : previousScript,
+            outline
+        }, ProjectSourceDefaults.JsonOptions);
+        var response = await agent.RunAsync(
+            $"把以下第 {outline.ProposalNumber} 集大纲写成正式影视剧本：\n{input}",
+            cancellationToken: cancellationToken);
+        var json = ExtractJson(response.Text);
+        return JsonSerializer.Deserialize<ProductionScriptEpisodeDraft>(json, ProjectSourceDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("GPT-5.4 未返回有效的正式剧本。");
+    }
+
     private static string ExtractJson(string? response)
     {
         var text = response?.Trim() ?? string.Empty;
         var start = text.IndexOf('{');
         var end = text.LastIndexOf('}');
         if (start < 0 || end <= start)
-            throw new InvalidOperationException("GPT-5.4 未返回 JSON 剧本草案。");
+            throw new InvalidOperationException("GPT-5.4 未返回 JSON 内容。");
         return text[start..(end + 1)];
     }
 
@@ -950,6 +1390,33 @@ public static class AdaptationScriptEndpoints
                     new GetProductionScriptPackageQuery(projectId, productionEpisodeId),
                     cancellationToken);
                 return package is null ? Results.NotFound() : Results.Ok(package);
+            });
+        app.MapPost(
+            "/api/v2/projects/{projectId:guid}/production-episodes/{productionEpisodeId:guid}/script-package/regenerate",
+            async (
+                Guid projectId,
+                Guid productionEpisodeId,
+                ICommandDispatcher dispatcher,
+                CancellationToken cancellationToken) =>
+            {
+                try
+                {
+                    var package = await dispatcher.SendAsync(
+                        new RegenerateProductionScriptCommand(projectId, productionEpisodeId),
+                        cancellationToken);
+                    return package is null ? Results.NotFound() : Results.Ok(package);
+                }
+                catch (ProjectGenerationConfigurationException error)
+                {
+                    return Results.Conflict(new { error = error.Message });
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    return Results.Problem(
+                        title: "正式剧本重新生成失败",
+                        detail: error.Message,
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
             });
         app.MapGet(route, async (
             Guid projectId,
@@ -995,7 +1462,7 @@ public static class AdaptationScriptEndpoints
             catch (Exception error) when (error is not OperationCanceledException)
             {
                 return Results.Problem(
-                    title: "剧本草案生成失败",
+                    title: "改编大纲生成失败",
                     detail: error.Message,
                     statusCode: StatusCodes.Status502BadGateway);
             }
@@ -1006,10 +1473,24 @@ public static class AdaptationScriptEndpoints
             ICommandDispatcher dispatcher,
             CancellationToken cancellationToken) =>
         {
-            var script = await dispatcher.SendAsync(
-                new ConfirmAdaptationScriptCommand(projectId, sourceResourceId),
-                cancellationToken);
-            return script is null ? Results.NotFound() : Results.Ok(script);
+            try
+            {
+                var script = await dispatcher.SendAsync(
+                    new ConfirmAdaptationScriptCommand(projectId, sourceResourceId),
+                    cancellationToken);
+                return script is null ? Results.NotFound() : Results.Ok(script);
+            }
+            catch (ProjectGenerationConfigurationException error)
+            {
+                return Results.Conflict(new { error = error.Message });
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                return Results.Problem(
+                    title: "正式剧本生成失败",
+                    detail: error.Message,
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
         });
         app.MapPost($"{route}/episodes", async (
             Guid projectId,

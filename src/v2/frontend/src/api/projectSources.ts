@@ -132,6 +132,37 @@ export interface AdaptationScript {
   updatedAtUtc: string
 }
 
+export interface ScreenplayDialogueDraft {
+  character: string
+  parenthetical: string | null
+  lines: string[]
+}
+
+export interface ProductionScriptSceneDraft {
+  sceneNumber: number
+  heading: string
+  summary: string
+  action: string
+  dialogues: ScreenplayDialogueDraft[]
+  characters: string[]
+  props: string[]
+  storyFunction: string
+  targetSeconds: number
+  rhythm: string
+  visualContrast: string
+  shotPlan: AdaptationShotPlanDraft[]
+  dialogueIntent?: string | null
+}
+
+export interface ProductionScriptEpisodeDraft {
+  title: string
+  logline: string
+  targetSeconds: number
+  scenes: ProductionScriptSceneDraft[]
+  smallHooks: string[]
+  bigHooks: string[]
+}
+
 export interface ProductionScriptPackage {
   assetId: string
   resourceId: string
@@ -142,7 +173,8 @@ export interface ProductionScriptPackage {
   targetSeconds: number | null
   status: string
   adaptationScriptAssetId: string
-  episode: AdaptationEpisodeDraft
+  isLegacyOutline: boolean
+  episode: ProductionScriptEpisodeDraft
   updatedAtUtc: string
 }
 
@@ -218,9 +250,11 @@ export async function analyzeStoryMaterial(
   projectId: string,
   sourceId: string,
   chapterId: string,
+  signal?: AbortSignal,
 ): Promise<StoryMaterialAnalysis> {
   const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/chapters/${chapterId}/analysis`, {
     method: 'POST',
+    signal,
   })
   if (!response.ok) throw await readError(response, '素材分析失败。')
   return response.json() as Promise<StoryMaterialAnalysis>
@@ -233,7 +267,7 @@ export async function getAdaptationScript(
 ): Promise<AdaptationScript | null> {
   const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/script-draft`, { signal })
   if (response.status === 404) return null
-  if (!response.ok) throw await readError(response, '剧本草案加载失败。')
+  if (!response.ok) throw await readError(response, '改编大纲加载失败。')
   return response.json() as Promise<AdaptationScript>
 }
 
@@ -247,7 +281,7 @@ export async function generateAdaptationScript(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
-  if (!response.ok) throw await readError(response, '剧本草案生成失败。')
+  if (!response.ok) throw await readError(response, '改编大纲生成失败。')
   return response.json() as Promise<AdaptationScript>
 }
 
@@ -290,7 +324,7 @@ export async function confirmAdaptationScript(
   const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/confirm`, {
     method: 'POST',
   })
-  if (!response.ok) throw await readError(response, '剧本确认失败。')
+  if (!response.ok) throw await readError(response, '正式剧本生成失败。')
   return response.json() as Promise<AdaptationScript>
 }
 
@@ -304,5 +338,17 @@ export async function getProductionScriptPackage(
     { signal },
   )
   if (!response.ok) throw await readError(response, '正式剧本加载失败。')
+  return response.json() as Promise<ProductionScriptPackage>
+}
+
+export async function regenerateProductionScript(
+  projectId: string,
+  productionEpisodeId: string,
+): Promise<ProductionScriptPackage> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/script-package/regenerate`,
+    { method: 'POST' },
+  )
+  if (!response.ok) throw await readError(response, '正式剧本重新生成失败。')
   return response.json() as Promise<ProductionScriptPackage>
 }

@@ -5,6 +5,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
+using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -32,6 +33,77 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
 
         Assert.NotNull(assets);
         Assert.Empty(assets);
+    }
+
+    [Fact]
+    public async Task Character_voice_profile_generates_a_versioned_local_wav_reference()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var characterResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets",
+            new
+            {
+                kind = "character",
+                name = "达达尼昂",
+                summary = "年轻的加斯科涅冒险者",
+                visualDescription = "棕色拟人犬，身形灵敏",
+                mustKeep = new[] { "短耳", "旧佩剑" },
+                avoid = Array.Empty<string>(),
+                storyReferences = new[] { "第一章" }
+            });
+        characterResponse.EnsureSuccessStatusCode();
+        var character = await characterResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(character);
+
+        var saveResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile",
+            new
+            {
+                name = "达达尼昂标准音色",
+                designPrompt = "二十岁左右的年轻男性，中音，清亮但略带粗粝，勇敢而冲动。",
+                sampleText = "巴黎，我来了。特雷维尔先生一定会见我。",
+                language = "Chinese",
+                seed = 1701
+            });
+        var saveContent = await saveResponse.Content.ReadAsStringAsync();
+        Assert.True(
+            saveResponse.IsSuccessStatusCode,
+            $"保存音色配置失败：{(int)saveResponse.StatusCode} {saveContent}");
+        var profile = JsonSerializer.Deserialize<VoiceProfileView>(
+            saveContent,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.NotNull(profile);
+        Assert.Equal(character.ResourceId, profile.CharacterResourceId);
+        Assert.Equal(1, profile.Version);
+        Assert.Null(profile.Reference);
+
+        var generateResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile/generate",
+            null);
+        generateResponse.EnsureSuccessStatusCode();
+        var generated = await generateResponse.Content.ReadFromJsonAsync<VoiceProfileView>();
+        Assert.NotNull(generated?.Reference);
+        Assert.Equal("qwen3-tts-1.7b-voice-design-test", generated.Reference.Model);
+        Assert.Equal("cpu", generated.Reference.Device);
+
+        var content = await client.GetByteArrayAsync(generated.Reference.ContentUrl);
+        Assert.True(content.Length >= 44);
+        Assert.Equal("RIFF", System.Text.Encoding.ASCII.GetString(content, 0, 4));
+        Assert.Equal("WAVE", System.Text.Encoding.ASCII.GetString(content, 8, 4));
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var reference = await dbContext.Assets.SingleAsync(item => item.Id == generated.Reference.AssetId);
+        Assert.Equal("voice-reference", reference.Type);
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == reference.Id
+            && item.SourceAssetId == generated.AssetId
+            && item.Role == "uses-voice-profile"));
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == reference.Id
+            && item.SourceAssetId == character.AssetId
+            && item.Role == "voices-character"));
     }
 
     [Fact]
@@ -221,8 +293,10 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.Equal([0x89, 0x50, 0x4e, 0x47], content[..4]);
         using var bitmap = SKBitmap.Decode(content);
         Assert.NotNull(bitmap);
-        Assert.Equal(854, bitmap.Width);
-        Assert.Equal(480, bitmap.Height);
+        Assert.Equal(1024, bitmap.Width);
+        Assert.Equal(1024, bitmap.Height);
+        Assert.Contains("left 55%", reference.Prompt);
+        Assert.Contains("pure solid white", reference.Prompt);
 
         var listedAssets = await client.GetFromJsonAsync<VisualAssetView[]>(
             $"/api/v2/projects/{projectId}/visual-assets");
@@ -240,8 +314,8 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.Equal(
             "法式彩色冒险漫画",
             metadata.RootElement.GetProperty("projectStyle").GetProperty("visualStyle").GetString());
-        Assert.Equal(854, metadata.RootElement.GetProperty("outputWidth").GetInt32());
-        Assert.Equal(480, metadata.RootElement.GetProperty("outputHeight").GetInt32());
+        Assert.Equal(1024, metadata.RootElement.GetProperty("outputWidth").GetInt32());
+        Assert.Equal(1024, metadata.RootElement.GetProperty("outputHeight").GetInt32());
         Assert.Equal("medium", metadata.RootElement.GetProperty("parameters").GetProperty("quality").GetString());
         Assert.Equal(2, metadata.RootElement.GetProperty("references").GetArrayLength());
         Assert.All(
@@ -251,6 +325,86 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             item.ConsumerAssetId == reference.AssetId && item.SourceAssetId == character.AssetId));
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
             item.ConsumerAssetId == reference.AssetId && item.Role == "uses-settings"));
+
+        var retryResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
+            null);
+        retryResponse.EnsureSuccessStatusCode();
+        var retried = await retryResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        Assert.NotNull(retried);
+        Assert.Equal(reference.Version + 1, retried.Version);
+        var imageVersions = await dbContext.Assets
+            .Where(item => item.Type == "visual-reference-image")
+            .OrderBy(item => item.Version)
+            .ToArrayAsync();
+        Assert.Equal([1, 2], imageVersions.Select(item => item.Version));
+        Assert.Single(imageVersions.Select(item => item.ResourceId).Distinct());
+    }
+
+    [Theory]
+    [InlineData("character", "left 55%")]
+    [InlineData("scene", "upper 58%")]
+    [InlineData("prop", "exactly one prop only")]
+    public async Task Reference_generation_uses_the_required_square_layout_for_each_asset_kind(
+        string kind,
+        string expectedPromptRule)
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        (await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            new
+            {
+                projectName = "设定图测试",
+                description = "验证资产设定图",
+                contentType = "动画短剧",
+                targetAudience = "全年龄观众",
+                plannedEpisodeCount = 1,
+                targetEpisodeSeconds = 100,
+                aspectRatio = "16:9",
+                outputWidth = 854,
+                outputHeight = 480,
+                visualStyle = "法式彩色冒险漫画",
+                artDirection = "清晰制作设定稿",
+                protagonistSpecies = "拟人牛",
+                characterDesign = "保持身份一致",
+                colorPalette = "法国蓝与红色",
+                cameraLanguage = "清晰构图",
+                soundStrategy = "管弦乐",
+                imagePromptPrefix = "制作级细节"
+            })).EnsureSuccessStatusCode();
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets",
+            new
+            {
+                kind,
+                name = "测试资产",
+                summary = "用于验证构图",
+                visualDescription = "清晰稳定的视觉定义",
+                mustKeep = new[] { "身份一致" },
+                avoid = Array.Empty<string>(),
+                storyReferences = Array.Empty<string>()
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var asset = await createResponse.Content.ReadFromJsonAsync<VisualAssetView>();
+        Assert.NotNull(asset);
+
+        var generateResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{asset.ResourceId}/reference/generate",
+            null);
+
+        generateResponse.EnsureSuccessStatusCode();
+        var reference = await generateResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        Assert.NotNull(reference);
+        Assert.Equal(kind, reference.SubjectType);
+        Assert.Contains("1024x1024", reference.Prompt);
+        Assert.Contains("pure solid white", reference.Prompt);
+        Assert.Contains(expectedPromptRule, reference.Prompt);
+        var content = await client.GetByteArrayAsync(reference.ContentUrl);
+        using var bitmap = SKBitmap.Decode(content);
+        Assert.NotNull(bitmap);
+        Assert.Equal(1024, bitmap.Width);
+        Assert.Equal(1024, bitmap.Height);
     }
 
     [Fact]

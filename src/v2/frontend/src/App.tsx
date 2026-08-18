@@ -13,9 +13,9 @@ import {
   StoryboardShotPage,
 } from './pages/WorkspacePages'
 
-function LegacyDraftRedirect() {
+function LegacyAdaptationRedirect() {
   const { projectId = '', sourceEpisodeId } = useParams()
-  return <Navigate to={`/projects/${projectId}/story/adaptation${sourceEpisodeId ? `/${sourceEpisodeId}` : ''}`} replace />
+  return <Navigate to={`/projects/${projectId}/script/adaptation${sourceEpisodeId ? `/${sourceEpisodeId}` : ''}`} replace />
 }
 
 export default function App() {
@@ -27,11 +27,12 @@ export default function App() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="story/source/:sourceEpisodeId?" element={<SourcePage />} />
         <Route path="story/material/:sourceEpisodeId?" element={<SourcePage />} />
-        <Route path="story/adaptation/:sourceEpisodeId?" element={<SourcePage />} />
+        <Route path="story/adaptation/:sourceEpisodeId?" element={<LegacyAdaptationRedirect />} />
         <Route path="story/outline" element={<Navigate to="../source" replace />} />
         <Route path="story/chapters" element={<Navigate to="../source" replace />} />
         <Route path="assets/:assetType" element={<AssetsPage />} />
-        <Route path="script/draft/:sourceEpisodeId?" element={<LegacyDraftRedirect />} />
+        <Route path="script/adaptation/:sourceEpisodeId?" element={<SourcePage />} />
+        <Route path="script/draft/:sourceEpisodeId?" element={<LegacyAdaptationRedirect />} />
         <Route path="script" element={<ScriptLandingPage />} />
         <Route path="script/duration" element={<DemoPage title="时长仪表" />} />
         <Route path="script/episodes/:productionEpisodeId" element={<ScriptPage />} />
