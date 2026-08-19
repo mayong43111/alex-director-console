@@ -50,7 +50,7 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
 - Azure AI Foundry 中可用的 Azure OpenAI 部署
 - 可选：用于视频工作流的远端 VM、ComfyUI 和对应模型
 
-版本由 [global.json](global.json) 和 [package.json](src/web/package.json) 约束。
+版本由 [global.json](global.json) 和 [package.json](src/frontend/package.json) 约束。
 
 ### 快速开始
 
@@ -96,16 +96,15 @@ Alex 导演台将项目、剧本、人物、场景、道具、分镜、图片和
 
 5. 打开以下地址：
 
-   - Web：<http://localhost:6173>
-   - API：<http://localhost:5174>
-   - Swagger：<http://localhost:5174/swagger>
+   - Web：<http://127.0.0.1:5273>
+   - API：<http://127.0.0.1:6275>
 
 也可以分别启动：
 
 ```powershell
-dotnet run --project src/AlexDirectorConsole.Api --launch-profile http
-npm install --prefix src/web
-npm run dev --prefix src/web
+dotnet run --project src/backend/AlexDirectorConsole.V2.Api --launch-profile http
+npm install --prefix src/frontend
+npm run dev --prefix src/frontend
 ```
 
 ### 配置
@@ -151,21 +150,10 @@ COMFYUI_OUTPUT_DIRECTORY=/home/azureuser/ComfyUI/output
 ```text
 alex-director-console/
 ├─ src/
-│  ├─ AlexDirectorConsole.Api/
-│  │  ├─ Application/       # 用例、资产边界、维护任务
-│  │  ├─ Contracts/         # HTTP DTO
-│  │  ├─ Data/              # EF Core 与迁移
-│  │  ├─ Endpoints/         # Minimal API 路由
-│  │  ├─ Models/            # 持久化模型
-│  │  ├─ Services/          # Foundry、ComfyUI、Agent Skill
-│  │  ├─ Storage/           # Blob 存储
-│  │  ├─ Tools/             # Agent Tool 适配器
-│  │  └─ Skills/            # Agent Skill 文件
-│  └─ web/
-│     └─ src/
-│        ├─ api/            # HTTP 与 NDJSON 客户端
-│        ├─ features/       # 业务功能与 hooks
-│        └─ models/         # 前端契约
+│  ├─ backend/              # ASP.NET Core API 与自动化测试
+│  ├─ database/             # SQLite Schema 与 EF Core 迁移
+│  ├─ frontend/             # React + Vite 前端
+│  └─ local-tts/            # 可选本地 Qwen3-TTS 运行时
 ├─ docs/                    # 设计与重构文档
 ├─ .env.example
 └─ start-dev.ps1
@@ -178,24 +166,21 @@ alex-director-console/
 开发数据默认保存在：
 
 ```text
-src/AlexDirectorConsole.Api/alex-director-console.db
-src/AlexDirectorConsole.Api/App_Data/blobs/
+src/database/App_Data/alex-director-v2.db
 ```
 
-数据库迁移会在 API 启动时自动应用。历史资产维护不会在普通 Web 启动时执行。升级旧数据前请备份 SQLite 和 `App_Data`，然后显式运行：
+数据库迁移会在 API 启动时自动应用。也可以显式运行：
 
 ```powershell
-dotnet run --project src/AlexDirectorConsole.Api -- --run-maintenance
+dotnet run --project src/database -- migrate
 ```
-
-命令会执行尚未完成的版本化维护任务并退出，状态记录在 `App_Data/maintenance-state.json`。
 
 新增 EF Core 迁移：
 
 ```powershell
 dotnet ef migrations add <MigrationName> `
-  --project src/AlexDirectorConsole.Api `
-  --startup-project src/AlexDirectorConsole.Api `
+   --project src/database `
+   --startup-project src/database `
   --output-dir Data/Migrations
 ```
 
@@ -220,12 +205,13 @@ dotnet ef migrations add <MigrationName> `
 
 ```powershell
 dotnet build AlexDirectorConsole.sln
-npm run lint --prefix src/web
-npm run build --prefix src/web
+npm run lint --prefix src/frontend
+npm run build --prefix src/frontend
+dotnet test src/backend/AlexDirectorConsole.V2.Api.Tests
 git diff --check
 ```
 
-当前尚未引入自动化测试工程。提交改动前至少应通过以上检查，并手动验证受影响工作流。
+提交改动前至少应通过以上检查，并手动验证受影响工作流。
 
 ### 贡献
 
@@ -286,7 +272,7 @@ The project is under active development. It is intended for local development an
 - An Azure OpenAI deployment in Azure AI Foundry
 - Optional: a remote VM, ComfyUI, and the required models for video workflows
 
-Versions are pinned by [global.json](global.json) and [package.json](src/web/package.json).
+Versions are pinned by [global.json](global.json) and [package.json](src/frontend/package.json).
 
 ### Quick Start
 
@@ -332,16 +318,15 @@ Versions are pinned by [global.json](global.json) and [package.json](src/web/pac
 
 5. Open:
 
-   - Web: <http://localhost:6173>
-   - API: <http://localhost:5174>
-   - Swagger: <http://localhost:5174/swagger>
+   - Web: <http://127.0.0.1:5273>
+   - API: <http://127.0.0.1:6275>
 
 To start each service separately:
 
 ```powershell
-dotnet run --project src/AlexDirectorConsole.Api --launch-profile http
-npm install --prefix src/web
-npm run dev --prefix src/web
+dotnet run --project src/backend/AlexDirectorConsole.V2.Api --launch-profile http
+npm install --prefix src/frontend
+npm run dev --prefix src/frontend
 ```
 
 ### Configuration
@@ -387,21 +372,10 @@ See [.env.example](.env.example) for the complete template.
 ```text
 alex-director-console/
 ├─ src/
-│  ├─ AlexDirectorConsole.Api/
-│  │  ├─ Application/       # Use cases, asset boundaries, maintenance
-│  │  ├─ Contracts/         # HTTP DTOs
-│  │  ├─ Data/              # EF Core and migrations
-│  │  ├─ Endpoints/         # Minimal API routes
-│  │  ├─ Models/            # Persistence models
-│  │  ├─ Services/          # Foundry, ComfyUI, Agent Skills
-│  │  ├─ Storage/           # Blob storage
-│  │  ├─ Tools/             # Agent Tool adapters
-│  │  └─ Skills/            # Agent Skill files
-│  └─ web/
-│     └─ src/
-│        ├─ api/            # HTTP and NDJSON clients
-│        ├─ features/       # Features and hooks
-│        └─ models/         # Frontend contracts
+│  ├─ backend/              # ASP.NET Core API and tests
+│  ├─ database/             # SQLite schema and EF Core migrations
+│  ├─ frontend/             # React + Vite frontend
+│  └─ local-tts/            # Optional local Qwen3-TTS runtime
 ├─ docs/                    # Design and refactoring notes
 ├─ .env.example
 └─ start-dev.ps1
@@ -414,24 +388,21 @@ See the [refactoring plan](docs/refactoring-plan.md) for architectural boundarie
 Development data is stored in:
 
 ```text
-src/AlexDirectorConsole.Api/alex-director-console.db
-src/AlexDirectorConsole.Api/App_Data/blobs/
+src/database/App_Data/alex-director-v2.db
 ```
 
-Database migrations are applied automatically when the API starts. Historical asset maintenance is not part of normal web startup. Back up the SQLite database and `App_Data` before upgrading legacy data, then run:
+Database migrations are applied automatically when the API starts. They can also be run explicitly:
 
 ```powershell
-dotnet run --project src/AlexDirectorConsole.Api -- --run-maintenance
+dotnet run --project src/database -- migrate
 ```
-
-The command runs pending versioned maintenance tasks and exits. Completion state is stored in `App_Data/maintenance-state.json`.
 
 Create an EF Core migration with:
 
 ```powershell
 dotnet ef migrations add <MigrationName> `
-  --project src/AlexDirectorConsole.Api `
-  --startup-project src/AlexDirectorConsole.Api `
+   --project src/database `
+   --startup-project src/database `
   --output-dir Data/Migrations
 ```
 
@@ -456,12 +427,13 @@ Swagger exposes the complete contract in development.
 
 ```powershell
 dotnet build AlexDirectorConsole.sln
-npm run lint --prefix src/web
-npm run build --prefix src/web
+npm run lint --prefix src/frontend
+npm run build --prefix src/frontend
+dotnet test src/backend/AlexDirectorConsole.V2.Api.Tests
 git diff --check
 ```
 
-The project does not currently include an automated test project. At minimum, run the checks above and manually verify affected workflows before submitting changes.
+At minimum, run the checks above and manually verify affected workflows before submitting changes.
 
 ### Contributing
 
