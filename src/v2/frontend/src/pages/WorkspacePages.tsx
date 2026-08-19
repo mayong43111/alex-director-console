@@ -42,9 +42,12 @@ import {
   generateVisualReference,
   getVoiceProfile,
   importStoryMaterialAssets,
+  listAudioMaterials,
   listVisualAssets,
   saveVoiceProfile,
+  uploadAudioMaterial,
   updateVisualAsset,
+  type AudioMaterial,
   type SaveVoiceProfileInput,
   type SaveVisualAssetInput,
   type VisualAsset,
@@ -1715,6 +1718,7 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
           <span className="eyebrow">VOICE DESIGN</span>
           <strong>角色音色</strong>
           <p>{profile ? `音色配置 v${profile.version}` : loading ? "正在读取配置" : "尚未建立音色配置"}</p>
+          <p>一致性由固定参考音、提示词与种子维持；当前无需训练 LoRA。</p>
         </div>
         {profile && (
           <button className="primary-button" onClick={generate} disabled={working !== null}>
@@ -1764,8 +1768,178 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
   );
 }
 
+function formatAudioSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatAudioDuration(seconds: number): string {
+  if (seconds <= 0) return "读取播放时长";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${Math.round(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+function AssetTabs({
+  assetType,
+  counts,
+}: {
+  assetType: string;
+  counts?: Partial<Record<"characters" | "scenes" | "props" | "audio", number>>;
+}) {
+  return (
+    <div className="asset-tabs">
+      {[
+        ["人物", "characters"],
+        ["场景", "scenes"],
+        ["道具", "props"],
+        ["音频", "audio"],
+      ].map(([item, path]) => (
+        <NavLink
+          className={path === assetType ? "active" : ""}
+          to={`../${path}`}
+          relative="path"
+          key={item}
+        >
+          {item}
+          {counts?.[path as keyof typeof counts] !== undefined && (
+            <span>{counts[path as keyof typeof counts]}</span>
+          )}
+        </NavLink>
+      ))}
+    </div>
+  );
+}
+
+function AudioAssetsPage({ projectId }: { projectId: string }) {
+  const [materials, setMaterials] = useState<AudioMaterial[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadName, setUploadName] = useState("");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [error, setError] = useState("");
+  const visible = materials.filter((item) =>
+    item.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const selected = materials.find((item) => item.assetId === selectedId) ?? visible[0] ?? null;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    listAudioMaterials(projectId, controller.signal)
+      .then((loaded) => {
+        setMaterials(loaded);
+        setSelectedId((current) => loaded.some((item) => item.assetId === current)
+          ? current
+          : loaded[0]?.assetId ?? "");
+        setError("");
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "音频素材加载失败。");
+      })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [projectId]);
+
+  const submitUpload = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!uploadFile) return;
+    setUploading(true);
+    setError("");
+    try {
+      const uploaded = await uploadAudioMaterial(projectId, uploadName, uploadFile);
+      setMaterials((current) => [uploaded, ...current]);
+      setSelectedId(uploaded.assetId);
+      setUploadOpen(false);
+      setUploadName("");
+      setUploadFile(null);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "音频素材上传失败。");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="page full-height-page asset-bible-page">
+      <PageTitle
+        eyebrow="项目共享资产"
+        title="音频素材"
+        description="角色参考音、对白、环境声与音乐统一作为可追踪素材管理"
+        action={
+          <button className="primary-button" onClick={() => setUploadOpen(true)}>
+            <Upload size={14} />上传音频
+          </button>
+        }
+      />
+      {error && <div className="settings-error asset-error">{error}</div>}
+      <AssetTabs assetType="audio" counts={{ audio: materials.length }} />
+      <div className="asset-workspace audio-asset-workspace">
+        <section className="asset-list-panel">
+          <div className="table-tools">
+            <label><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索音频" /></label>
+          </div>
+          {visible.map((material) => (
+            <button
+              className={selected?.assetId === material.assetId ? "asset-row active" : "asset-row"}
+              onClick={() => setSelectedId(material.assetId)}
+              key={material.assetId}
+            >
+              <span className="asset-thumb audio-thumb"><AudioLines size={18} /></span>
+              <span className="asset-row-copy"><strong>{material.name}</strong><small>{material.source} · {formatAudioDuration(material.durationSeconds)}</small></span>
+              <span className="asset-row-meta"><span className="state-label ready">可用</span><small>v{material.version}</small></span>
+            </button>
+          ))}
+          {!loading && visible.length === 0 && <div className="asset-list-empty"><strong>尚无音频素材</strong><p>上传音频，或在人物资产中生成角色参考音。</p></div>}
+          {loading && <div className="asset-list-empty">正在读取音频素材...</div>}
+        </section>
+        {selected ? (
+          <section className="asset-detail audio-asset-detail">
+            <header className="asset-detail-header">
+              <div className="asset-detail-identity"><span className="eyebrow">AUDIO · {selected.source} · v{selected.version}</span><h2>{selected.name}</h2><p>{selected.fileName}</p></div>
+            </header>
+            <div className="audio-preview-stage">
+              <AudioLines size={28} />
+              <audio controls preload="metadata" src={selected.contentUrl} key={selected.assetId} />
+            </div>
+            <dl className="detail-grid">
+              <div><dt>来源</dt><dd>{selected.source}</dd></div>
+              <div><dt>格式</dt><dd>{selected.contentType}</dd></div>
+              <div><dt>时长</dt><dd>{formatAudioDuration(selected.durationSeconds)}</dd></div>
+              <div><dt>文件大小</dt><dd>{formatAudioSize(selected.sizeBytes)}</dd></div>
+              <div><dt>用途</dt><dd>{selected.kind === "voice-reference" ? "角色音色基准与后续克隆参考" : "对白、环境声、音乐或制作参考"}</dd></div>
+              <div><dt>更新时间</dt><dd>{new Date(selected.updatedAtUtc).toLocaleString()}</dd></div>
+            </dl>
+          </section>
+        ) : (
+          <section className="asset-detail asset-detail-empty"><AudioLines size={28} /><h2>尚无音频素材</h2><p>角色参考音生成后也会自动出现在这里。</p></section>
+        )}
+      </div>
+      {uploadOpen && (
+        <div className="modal-backdrop" onMouseDown={() => setUploadOpen(false)}>
+          <form className="dialog audio-upload-dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={submitUpload}>
+            <span className="eyebrow">AUDIO MATERIAL</span><h2>上传音频素材</h2>
+            <label><span>名称</span><input required maxLength={100} value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder="对白、环境声或音乐名称" /></label>
+            <label><span>音频文件</span><input required type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/ogg,audio/flac,audio/aac,audio/webm" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /></label>
+            <p>支持 WAV、MP3、M4A、OGG、FLAC、AAC、WebM，最大 50 MB。</p>
+            <div><button type="button" className="secondary-button" onClick={() => setUploadOpen(false)}>取消</button><button type="submit" className="primary-button" disabled={uploading || !uploadFile || !uploadName.trim()}><Upload size={14} />{uploading ? "上传中" : "上传"}</button></div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AssetsPage() {
   const { projectId = "", assetType = "characters" } = useParams();
+  return assetType === "audio"
+    ? <AudioAssetsPage projectId={projectId} />
+    : <VisualAssetsPage projectId={projectId} assetType={assetType} />;
+}
+
+function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetType: string }) {
   const kindConfig = assetKinds[assetType] ?? assetKinds.characters;
   const [assets, setAssets] = useState<VisualAsset[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -1783,6 +1957,11 @@ export function AssetsPage() {
   const selected = kindAssets.find((item) => item.resourceId === selectedId)
     ?? kindAssets[0]
     ?? null;
+  const counts = {
+    characters: assets.filter((item) => item.kind === "character").length,
+    scenes: assets.filter((item) => item.kind === "scene").length,
+    props: assets.filter((item) => item.kind === "prop").length,
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1798,12 +1977,6 @@ export function AssetsPage() {
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, [projectId]);
-
-  const counts = {
-    character: assets.filter((item) => item.kind === "character").length,
-    scene: assets.filter((item) => item.kind === "scene").length,
-    prop: assets.filter((item) => item.kind === "prop").length,
-  };
 
   const openCreate = () => {
     setEditingAsset(null);
@@ -1902,23 +2075,7 @@ export function AssetsPage() {
         }
       />
       {error && <div className="settings-error asset-error">{error}</div>}
-      <div className="asset-tabs">
-        {[
-          ["人物", "characters", counts.character],
-          ["场景", "scenes", counts.scene],
-          ["道具", "props", counts.prop],
-        ].map(([item, path, count]) => (
-          <NavLink
-            className={path === assetType ? "active" : ""}
-            to={`../${path}`}
-            relative="path"
-            key={item}
-          >
-            {item}
-            <span>{count}</span>
-          </NavLink>
-        ))}
-      </div>
+      <AssetTabs assetType={assetType} counts={counts} />
       <div className="asset-workspace">
         <section className="asset-list-panel">
           <div className="table-tools">

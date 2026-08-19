@@ -76,6 +76,21 @@ export interface SaveVoiceProfileInput {
   seed: number | null
 }
 
+export interface AudioMaterial {
+  assetId: string
+  resourceId: string
+  version: number
+  name: string
+  kind: 'upload' | 'voice-reference'
+  contentType: string
+  contentUrl: string
+  fileName: string
+  sizeBytes: number
+  durationSeconds: number
+  source: string
+  updatedAtUtc: string
+}
+
 interface ValidationProblem {
   title?: string
   detail?: string
@@ -188,4 +203,29 @@ export async function generateVoiceReference(
   )
   if (!response.ok) throw await readError(response, '参考音生成失败。')
   return response.json() as Promise<VoiceProfile>
+}
+
+export async function listAudioMaterials(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<AudioMaterial[]> {
+  const response = await fetch(`/api/v2/projects/${projectId}/audio-assets`, { signal })
+  if (!response.ok) throw await readError(response, '音频素材加载失败。')
+  return response.json() as Promise<AudioMaterial[]>
+}
+
+export async function uploadAudioMaterial(
+  projectId: string,
+  name: string,
+  file: File,
+): Promise<AudioMaterial> {
+  const body = new FormData()
+  body.append('name', name)
+  body.append('file', file)
+  const response = await fetch(`/api/v2/projects/${projectId}/audio-assets`, {
+    method: 'POST',
+    body,
+  })
+  if (!response.ok) throw await readError(response, '音频素材上传失败。')
+  return response.json() as Promise<AudioMaterial>
 }

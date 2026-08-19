@@ -16,6 +16,7 @@ import {
   useParams,
 } from "react-router-dom";
 import {
+  AudioLines,
   Bell,
   BookOpenText,
   Bot,
@@ -54,6 +55,7 @@ const navigation = [
   { label: "故事", icon: BookOpenText, to: "story/source" },
   { label: "剧本", icon: Film, to: "script" },
   { label: "资产", icon: Boxes, to: "assets/characters" },
+  { label: "音频素材", icon: AudioLines, to: "assets/audio" },
   {
     label: "分镜",
     icon: Clapperboard,
@@ -102,6 +104,7 @@ function getWorkflow(
         { label: "人物", to: `${projectBase}/assets/characters` },
         { label: "场景", to: `${projectBase}/assets/scenes` },
         { label: "道具", to: `${projectBase}/assets/props` },
+        { label: "音频", to: `${projectBase}/assets/audio` },
       ],
     };
   }

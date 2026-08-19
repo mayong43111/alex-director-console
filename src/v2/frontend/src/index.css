@@ -697,6 +697,12 @@ button { color: inherit; }
 .voice-reference-player { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .voice-reference-player audio { width: min(340px, 38vw); height: 34px; }
 .voice-reference-player span { max-width: 280px; overflow: hidden; color: var(--muted); font: 8px 'IBM Plex Mono'; text-overflow: ellipsis; white-space: nowrap; }
+.audio-thumb { color: #2f6658; background: #e5f0ec; }
+.audio-asset-detail { display: grid; grid-template-rows: auto auto 1fr; align-content: start; }
+.audio-preview-stage { min-height: 190px; display: grid; place-items: center; align-content: center; gap: 18px; padding: 24px; border-bottom: 1px solid var(--line); color: var(--accent); background-image: linear-gradient(#edf1ef 1px, transparent 1px), linear-gradient(90deg, #edf1ef 1px, transparent 1px); background-size: 28px 28px; }
+.audio-preview-stage audio { width: min(620px, 90%); }
+.audio-upload-dialog p { margin: -3px 0 10px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.audio-upload-dialog input[type="file"] { padding: 7px; border: 1px solid var(--line); background: #f8faf9; }
 .asset-editor-dialog { width: min(680px, calc(100vw - 28px)); max-height: calc(100dvh - 28px); overflow: auto; }
 .asset-editor-dialog > .asset-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .asset-editor-dialog > .asset-editor-grid label { min-width: 0; }

@@ -131,6 +131,7 @@ app.MapProjectSources();
 app.MapStoryMaterialAnalysis();
 app.MapAdaptationScripts();
 app.MapVisualAssets();
+app.MapAudioMaterials();
 app.MapStoryboards();
 app.MapShotFrameContent();
 app.MapShotVideos();

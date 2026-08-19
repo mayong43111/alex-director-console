@@ -104,6 +104,47 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             item.ConsumerAssetId == reference.Id
             && item.SourceAssetId == character.AssetId
             && item.Role == "voices-character"));
+
+        var audioAssets = await client.GetFromJsonAsync<AudioMaterialView[]>(
+            $"/api/v2/projects/{projectId}/audio-assets");
+        var voiceMaterial = Assert.Single(audioAssets!);
+        Assert.Equal(generated.Reference.AssetId, voiceMaterial.AssetId);
+        Assert.Equal("voice-reference", voiceMaterial.Kind);
+        Assert.Equal("角色参考音", voiceMaterial.Source);
+    }
+
+    [Fact]
+    public async Task Uploaded_audio_material_is_listed_and_streamed()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var wave = new byte[44];
+        "RIFF"u8.CopyTo(wave);
+        "WAVE"u8.CopyTo(wave.AsSpan(8));
+        BitConverter.GetBytes(24000).CopyTo(wave, 24);
+        BitConverter.GetBytes(48000).CopyTo(wave, 28);
+        BitConverter.GetBytes(0).CopyTo(wave, 40);
+        using var content = new MultipartFormDataContent
+        {
+            { new StringContent("雨夜环境声"), "name" },
+            { new ByteArrayContent(wave) { Headers = { ContentType = new("audio/wav") } }, "file", "rain.wav" }
+        };
+
+        var uploadResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/audio-assets",
+            content);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+        var uploaded = await uploadResponse.Content.ReadFromJsonAsync<AudioMaterialView>();
+        Assert.NotNull(uploaded);
+        Assert.Equal("upload", uploaded.Kind);
+        Assert.Equal("雨夜环境声", uploaded.Name);
+        Assert.Equal("audio/wav", uploaded.ContentType);
+
+        var listed = await client.GetFromJsonAsync<AudioMaterialView[]>(
+            $"/api/v2/projects/{projectId}/audio-assets");
+        var material = Assert.Single(listed!);
+        Assert.Equal(uploaded.AssetId, material.AssetId);
+        Assert.Equal(wave, await client.GetByteArrayAsync(material.ContentUrl));
     }
 
     [Fact]
