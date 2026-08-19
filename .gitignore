@@ -33,5 +33,9 @@ src/local-tts/
 # Logs
 *.log
 
+# Python caches
+__pycache__/
+*.py[cod]
+
 # tests
 turbo-ab-test/

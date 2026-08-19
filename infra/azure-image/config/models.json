@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "modelRoot": "/opt/alex-data/models",
+  "models": [
+    {
+      "id": "qwen-3.8-27b",
+      "displayName": "Qwen 3.8 27B",
+      "runtime": "vllm",
+      "required": true,
+      "repositoryEnvironment": "QWEN_LLM_REPO",
+      "target": "huggingface/qwen-3.8-27b",
+      "files": []
+    },
+    {
+      "id": "minimax-h3",
+      "displayName": "MiniMax H3 FL2VA Turbo",
+      "runtime": "comfyui",
+      "required": true,
+      "repositoryEnvironment": "MINIMAX_H3_REPO",
+      "target": "comfyui",
+      "files": [
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+      ]
+    },
+    {
+      "id": "qwen-image-edit-2511",
+      "displayName": "Qwen Image Edit 2511",
+      "runtime": "comfyui",
+      "required": true,
+      "repository": "Comfy-Org/Qwen-Image-Edit_ComfyUI",
+      "target": "comfyui",
+      "files": [
+        "diffusion_models/qwen_image_edit_2511_bf16.safetensors",
+        "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae/qwen_image_vae.safetensors"
+      ],
+      "additionalRepositories": {
+        "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors": "Comfy-Org/HunyuanVideo_1.5_repackaged",
+        "vae/qwen_image_vae.safetensors": "Comfy-Org/Qwen-Image_ComfyUI"
+      }
+    },
+    {
+      "id": "krea-2-turbo",
+      "displayName": "Krea 2 Turbo",
+      "runtime": "comfyui,krea-official",
+      "required": true,
+      "repository": "Comfy-Org/Krea-2",
+      "officialRepository": "krea/Krea-2-Turbo",
+      "officialFiles": [
+        "krea-official/turbo.safetensors"
+      ],
+      "target": "comfyui",
+      "files": [
+        "diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+        "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+        "vae/qwen_image_vae.safetensors"
+      ]
+    }
+  ],
+  "workflowDirectories": [
+    "/opt/alex/app/workflows",
+    "/opt/comfyui/user/default/workflows"
+  ],
+  "requiredComfyUiNodes": [
+    "LoadImage",
+    "UNETLoader",
+    "CLIPLoader",
+    "VAELoader",
+    "MiniMaxH3ImageToVideo",
+    "BasicScheduler",
+    "KSamplerSelect",
+    "SamplerCustomAdvanced",
+    "VAEDecode",
+    "VAEDecodeAudio",
+    "CreateVideo",
+    "SaveVideo",
+    "LoraLoaderModelOnly",
+    "MiniMaxH3SigmaShift"
+  ]
+}

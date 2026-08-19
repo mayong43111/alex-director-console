@@ -1,0 +1,11 @@
+alex_models:
+  base_path: /opt/alex-data/models/comfyui
+  checkpoints: checkpoints
+  clip: text_encoders
+  text_encoders: text_encoders
+  diffusion_models: |
+    diffusion_models
+    unet
+  loras: loras
+  vae: vae
+  controlnet: controlnet

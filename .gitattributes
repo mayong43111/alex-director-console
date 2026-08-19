@@ -1,0 +1,5 @@
+infra/azure-image/**/*.sh text eol=lf
+infra/azure-image/**/*.py text eol=lf
+infra/azure-image/**/*.hcl text eol=lf
+infra/azure-image/**/*.yaml text eol=lf
+infra/azure-image/**/*.tmpl text eol=lf

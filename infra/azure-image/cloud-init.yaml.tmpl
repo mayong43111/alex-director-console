@@ -1,0 +1,31 @@
+#cloud-config
+write_files:
+  - path: /usr/local/sbin/alex-cloud-init-user
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      username="$(printf '%s' '__ALEX_INITIAL_USERNAME_B64__' | base64 -d)"
+      password="$(printf '%s' '__ALEX_INITIAL_PASSWORD_B64__' | base64 -d)"
+      ingress_username="$(printf '%s' '__ALEX_INGRESS_USERNAME_B64__' | base64 -d)"
+      ingress_password="$(printf '%s' '__ALEX_INGRESS_PASSWORD_B64__' | base64 -d)"
+      [[ -n "$username" ]] || username=msuser
+      [[ -n "$password" ]] || password="$(openssl rand -hex 18)"
+      [[ -n "$ingress_username" ]] || ingress_username="$username"
+      [[ -n "$ingress_password" ]] || ingress_password="$password"
+      if ! id "$username" >/dev/null 2>&1; then
+        useradd --create-home --shell /bin/bash --groups sudo "$username"
+      else
+        usermod --append --groups sudo "$username"
+      fi
+      echo "$username:$password" | chpasswd
+      install -d -m 0700 /etc/alex /var/lib/alex
+      printf 'ALEX_INGRESS_USERNAME=%q\nALEX_INGRESS_PASSWORD=%q\n' "$ingress_username" "$ingress_password" >/etc/alex/secrets.env
+      printf 'username=%s\npassword=%s\ningress_username=%s\ningress_password=%s\n' "$username" "$password" "$ingress_username" "$ingress_password" >/var/lib/alex/initial-credentials
+      chmod 0600 /etc/alex/secrets.env /var/lib/alex/initial-credentials
+      install -d -m 0755 /etc/ssh/sshd_config.d
+      printf 'PasswordAuthentication yes\n' >/etc/ssh/sshd_config.d/60-alex-password.conf
+      systemctl restart ssh || systemctl restart sshd
+runcmd:
+  - [bash, /usr/local/sbin/alex-cloud-init-user]
