@@ -368,7 +368,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
         type="button"
         onClick={() => requestAssist(field)}
         disabled={Boolean(assistingField)}
-        title={hasContent ? "使用 GPT-5.4 调整当前内容" : "使用 GPT-5.4 生成内容"}
+        title={hasContent ? "使用 AI 调整当前内容" : "使用 AI 生成内容"}
         aria-label={hasContent ? `调整${assistFieldLabels[field]}` : `生成${assistFieldLabels[field]}`}
       >
         {assistingField === field ? <span className="spinner" /> : <WandSparkles size={15} />}
@@ -680,7 +680,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               void (coverPreview ? generateCover() : previewCover());
             }}
           >
-            <span className="eyebrow">GPT-IMAGE-2 / {settings.cover ? "重新生成" : "首次生成"}</span>
+            <span className="eyebrow">图像模型 / {settings.cover ? "重新生成" : "首次生成"}</span>
             <h2>{coverPreview ? "核对概念封面生成规格" : `${settings.cover ? "重新生成" : "生成"}概念封面`}</h2>
             <p>{coverPreview ? "确认后将严格按以下提示词、参数和输入资产版本执行。" : "先预览完整生成规格；生成结果会保存提示词、参数及输入版本。"}</p>
             <label>
@@ -723,7 +723,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               void assistField(field, instruction || undefined);
             }}
           >
-            <span className="eyebrow">GPT-5.4 / 智能调整</span>
+            <span className="eyebrow">AI / 智能调整</span>
             <h2>调整“{assistFieldLabels[assistConfirmation]}”</h2>
             <p>将基于当前内容和完整项目设定生成替换文本，结果会先回填到表单，不会自动保存版本。</p>
             <label>
@@ -3361,7 +3361,7 @@ export function StoryboardShotPage() {
               void (productionPreview ? startProduction() : previewProduction());
             }}
           >
-            <span className="eyebrow">GPT-IMAGE-2 / {shotCode}</span>
+            <span className="eyebrow">图像模型 / {shotCode}</span>
             <h2>{productionPreview ? "核对镜头帧生成规格" : `${shot.production?.status === "completed" ? "重新制作" : "制作"}${shot.productionMode === "first-last-continuous" ? "首帧与尾帧" : "首帧"}`}</h2>
             <p>{productionPreview ? `确认后将按当前输入版本生成${shot.productionMode === "first-last-continuous" ? "首帧，再以首帧为连续性锚点生成尾帧" : "首帧"}。` : "先预览完整生成规格；每张图片、输入资产版本和对应提示词都会随结果保存。"}</p>
             {productionPreview && <GenerationPreviewDetails preview={productionPreview} />}

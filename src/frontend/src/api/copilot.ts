@@ -41,7 +41,7 @@ export async function sendCopilotMessage(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
-  if (!response.ok) throw await readError(response, 'GPT-5.4 暂时无法回复。')
+  if (!response.ok) throw await readError(response, 'AI 副导演暂时无法回复。')
   return response.json() as Promise<CopilotConversation>
 }
 

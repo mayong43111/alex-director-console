@@ -9,9 +9,14 @@ namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 
 public sealed record FoundryConfigurationView(
     string Provider,
+    string LlmProvider,
     string Endpoint,
     string Deployment,
     bool ApiKeyConfigured,
+    string VllmBaseUrl,
+    string VllmModel,
+    bool VllmApiKeyConfigured,
+    string ImageProvider,
     string ImageEndpoint,
     string ImageDeployment,
     string ImageQuality,
@@ -20,14 +25,26 @@ public sealed record FoundryConfigurationView(
     DateTimeOffset? UpdatedAtUtc)
 {
     public const string ProviderName = "Azure AI Foundry";
+    public const string AzureProvider = "azure-foundry";
+    public const string VllmProvider = "vllm";
+    public const string ComfyUiImageProvider = "comfyui";
     public const string RequiredDeployment = "gpt-5.4";
+    public const string RequiredVllmModel = "Qwen 3.8 27B";
+    public const string DefaultVllmBaseUrl = "http://127.0.0.1:8000/v1";
     public const string RequiredImageDeployment = "gpt-image-2";
+    public const string ComfyUiTextToImageModel = "Krea 2 Turbo";
+    public const string ComfyUiImageEditModel = "Qwen Image Edit 2511";
 
     public static FoundryConfigurationView Empty { get; } = new(
         ProviderName,
+        AzureProvider,
         string.Empty,
         RequiredDeployment,
         false,
+        DefaultVllmBaseUrl,
+        RequiredVllmModel,
+        false,
+        AzureProvider,
         string.Empty,
         RequiredImageDeployment,
         GptImageOptions.DefaultQuality,
@@ -36,23 +53,49 @@ public sealed record FoundryConfigurationView(
         null);
 
     public static FoundryConfigurationView FromEntity(FoundryConfiguration configuration) => new(
-        ProviderName,
+        NormalizeLlmProvider(configuration.LlmProvider) == VllmProvider ? "vLLM" : ProviderName,
+        NormalizeLlmProvider(configuration.LlmProvider),
         configuration.Endpoint,
         configuration.Deployment,
         !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey),
+        configuration.VllmBaseUrl,
+        configuration.VllmModel,
+        !string.IsNullOrWhiteSpace(configuration.ProtectedVllmApiKey),
+        NormalizeImageProvider(configuration.ImageProvider),
         configuration.ImageEndpoint,
         RequiredImageDeployment,
         GptImageOptions.NormalizeQuality(configuration.ImageQuality),
         !string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey),
-        Uri.TryCreate(
-            string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
-                ? configuration.Endpoint
-                : configuration.ImageEndpoint,
-            UriKind.Absolute,
-            out _)
-        && (!string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey)
-            || !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey)),
+        NormalizeImageProvider(configuration.ImageProvider) == ComfyUiImageProvider
+            || (Uri.TryCreate(
+                    string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
+                        ? configuration.Endpoint
+                        : configuration.ImageEndpoint,
+                    UriKind.Absolute,
+                    out _)
+                && (!string.IsNullOrWhiteSpace(configuration.ProtectedImageApiKey)
+                    || !string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))),
         configuration.UpdatedAtUtc);
+
+    public static string NormalizeLlmProvider(string? provider) =>
+        string.Equals(provider, VllmProvider, StringComparison.OrdinalIgnoreCase)
+            ? VllmProvider
+            : AzureProvider;
+
+    public static string NormalizeImageProvider(string? provider) =>
+        string.Equals(provider, ComfyUiImageProvider, StringComparison.OrdinalIgnoreCase)
+            ? ComfyUiImageProvider
+            : AzureProvider;
+
+    public static string TextToImageModel(FoundryConfiguration? configuration) =>
+        NormalizeImageProvider(configuration?.ImageProvider) == ComfyUiImageProvider
+            ? ComfyUiTextToImageModel
+            : RequiredImageDeployment;
+
+    public static string ImageEditModel(FoundryConfiguration? configuration) =>
+        NormalizeImageProvider(configuration?.ImageProvider) == ComfyUiImageProvider
+            ? ComfyUiImageEditModel
+            : RequiredImageDeployment;
 }
 
 public sealed record GetFoundryConfigurationQuery : IQuery<FoundryConfigurationView>;
@@ -74,9 +117,15 @@ public sealed class GetFoundryConfigurationHandler(V2DbContext dbContext)
 }
 
 public sealed record UpdateFoundryConfigurationCommand(
+    string? LlmProvider,
     string? Endpoint,
     string? ApiKey,
     bool ClearApiKey,
+    string? VllmBaseUrl,
+    string? VllmModel,
+    string? VllmApiKey,
+    bool ClearVllmApiKey,
+    string? ImageProvider,
     string? ImageEndpoint,
     string? ImageApiKey,
     bool ClearImageApiKey,
@@ -105,23 +154,40 @@ public sealed class UpdateFoundryConfigurationHandler(
         UpdateFoundryConfigurationCommand command,
         CancellationToken cancellationToken)
     {
-        var endpoint = command.Endpoint?.Trim() ?? string.Empty;
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri)
-            || endpointUri.Scheme is not ("http" or "https"))
+        var llmProvider = FoundryConfigurationView.NormalizeLlmProvider(command.LlmProvider);
+        var endpoint = command.Endpoint?.Trim().TrimEnd('/') ?? string.Empty;
+        if (llmProvider == FoundryConfigurationView.AzureProvider
+            && (!Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri)
+                || endpointUri.Scheme is not ("http" or "https")))
         {
             return UpdateFoundryConfigurationResult.Invalid(
                 "endpoint",
                 "请输入有效的 Azure AI Foundry HTTP(S) Endpoint。");
         }
-            var imageEndpoint = command.ImageEndpoint?.Trim();
-            if (!string.IsNullOrWhiteSpace(imageEndpoint)
-                && (!Uri.TryCreate(imageEndpoint, UriKind.Absolute, out var imageEndpointUri)
+
+        var vllmBaseUrl = command.VllmBaseUrl?.Trim().TrimEnd('/')
+            ?? FoundryConfigurationView.DefaultVllmBaseUrl;
+        if (!Uri.TryCreate(vllmBaseUrl, UriKind.Absolute, out var vllmUri)
+            || vllmUri.Scheme is not ("http" or "https"))
+        {
+            return UpdateFoundryConfigurationResult.Invalid(
+                "vllmBaseUrl",
+                "请输入有效的 vLLM HTTP(S) 地址。");
+        }
+        var vllmModel = string.IsNullOrWhiteSpace(command.VllmModel)
+            ? FoundryConfigurationView.RequiredVllmModel
+            : command.VllmModel.Trim();
+        var imageProvider = FoundryConfigurationView.NormalizeImageProvider(command.ImageProvider);
+        var imageEndpoint = command.ImageEndpoint?.Trim();
+        if (imageProvider == FoundryConfigurationView.AzureProvider
+            && !string.IsNullOrWhiteSpace(imageEndpoint)
+            && (!Uri.TryCreate(imageEndpoint, UriKind.Absolute, out var imageEndpointUri)
                 || imageEndpointUri.Scheme is not ("http" or "https")))
-            {
-                return UpdateFoundryConfigurationResult.Invalid(
+        {
+            return UpdateFoundryConfigurationResult.Invalid(
                 "imageEndpoint",
                 "请输入有效的图片模型 HTTP(S) Endpoint，或留空复用语言模型 Endpoint。");
-            }
+        }
         var imageQuality = command.ImageQuality?.Trim().ToLowerInvariant()
             ?? GptImageOptions.DefaultQuality;
         if (!GptImageOptions.SupportedQualities.Contains(imageQuality))
@@ -139,8 +205,12 @@ public sealed class UpdateFoundryConfigurationHandler(
             dbContext.FoundryConfigurations.Add(configuration);
         }
 
-        configuration.Endpoint = endpoint.TrimEnd('/');
+        configuration.LlmProvider = llmProvider;
+        configuration.Endpoint = endpoint;
         configuration.Deployment = FoundryConfigurationView.RequiredDeployment;
+        configuration.VllmBaseUrl = vllmBaseUrl;
+        configuration.VllmModel = vllmModel;
+        configuration.ImageProvider = imageProvider;
         if (command.ImageEndpoint is not null)
         {
             configuration.ImageEndpoint = imageEndpoint?.TrimEnd('/') ?? string.Empty;
@@ -156,6 +226,14 @@ public sealed class UpdateFoundryConfigurationHandler(
         else if (!string.IsNullOrWhiteSpace(command.ApiKey))
         {
             configuration.ProtectedApiKey = protector.Protect(command.ApiKey.Trim());
+        }
+        if (command.ClearVllmApiKey)
+        {
+            configuration.ProtectedVllmApiKey = string.Empty;
+        }
+        else if (!string.IsNullOrWhiteSpace(command.VllmApiKey))
+        {
+            configuration.ProtectedVllmApiKey = protector.Protect(command.VllmApiKey.Trim());
         }
         if (command.ClearImageApiKey)
         {
@@ -194,31 +272,54 @@ public sealed class TestFoundryConnectionHandler(
         var configuration = await dbContext.FoundryConfigurations
             .AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
-        if (configuration is null
-            || string.IsNullOrWhiteSpace(configuration.Endpoint)
-            || string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))
+        if (configuration is null)
         {
             return new(false, "请先保存 Endpoint 和 API Key。", FoundryConfigurationView.RequiredDeployment, false);
         }
 
-        var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
-        var apiKey = protector.Unprotect(configuration.ProtectedApiKey);
+        var isVllm = FoundryConfigurationView.NormalizeLlmProvider(configuration.LlmProvider)
+            == FoundryConfigurationView.VllmProvider;
+        var endpoint = isVllm ? configuration.VllmBaseUrl : configuration.Endpoint;
+        var deployment = isVllm ? configuration.VllmModel : configuration.Deployment;
+        var protectedApiKey = isVllm
+            ? configuration.ProtectedVllmApiKey
+            : configuration.ProtectedApiKey;
+        if (string.IsNullOrWhiteSpace(endpoint)
+            || (!isVllm && string.IsNullOrWhiteSpace(protectedApiKey)))
+        {
+            return new(false, "请先保存服务地址和所需密钥。", deployment, false);
+        }
+
+        var apiKey = string.IsNullOrWhiteSpace(protectedApiKey)
+            ? "local-vllm"
+            : dataProtectionProvider.CreateProtector("FoundryApiKeys.v1").Unprotect(protectedApiKey);
         try
         {
             await connectionTester.TestAsync(
-                configuration.Endpoint,
-                configuration.Deployment,
+                endpoint,
+                deployment,
                 apiKey,
                 cancellationToken);
-            return new(true, "Azure AI Foundry 连接成功。", configuration.Deployment, true);
+            return new(
+                true,
+                isVllm ? $"vLLM 连接成功，{deployment} 已可用。" : "Azure AI Foundry 连接成功。",
+                deployment,
+                true);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             logger.LogWarning(
                 error,
-                "Azure AI Foundry connection test failed for deployment {Deployment}.",
-                configuration.Deployment);
-            return new(false, "连接失败，请检查 Endpoint、部署名和 API Key。", configuration.Deployment, true);
+                "LLM connection test failed for provider {Provider} and model {Deployment}.",
+                configuration.LlmProvider,
+                deployment);
+            return new(
+                false,
+                isVllm
+                    ? "连接失败，请检查 vLLM Base URL 和模型标识。"
+                    : "连接失败，请检查 Endpoint、部署名和 API Key。",
+                deployment,
+                true);
         }
     }
 }

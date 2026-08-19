@@ -51,15 +51,11 @@ public sealed class MafProjectCopilotAgent(
         var configuration = await dbContext.FoundryConfigurations
             .AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
-        if (configuration is null
-            || string.IsNullOrWhiteSpace(configuration.Endpoint)
-            || string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))
+        if (!LlmChatClientFactory.IsConfigured(configuration))
         {
-            throw new CopilotConfigurationException("请先在系统设置中配置 Azure AI Foundry。");
+            throw new CopilotConfigurationException("请先在系统设置中配置语言模型。");
         }
 
-        var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
-        var apiKey = protector.Unprotect(configuration.ProtectedApiKey);
         var enabledSkills = await dbContext.SkillDefinitions
             .AsNoTracking()
             .Where(skill => skill.IsEnabled)
@@ -90,7 +86,7 @@ public sealed class MafProjectCopilotAgent(
                     await coverService.GenerateAsync(projectId, instruction, toolCancellationToken),
                     JsonSerializerOptions.Web)),
             name: "generate_project_cover",
-            description: "根据当前项目已保存的创作设定调用 gpt-image-2 生成或重新生成项目概念封面，并保存为版本化资产。instruction 是导演对本次生成的可选意见。仅在导演明确要求生成封面时调用。");
+            description: "根据当前项目已保存的创作设定调用已配置的图像模型生成或重新生成项目概念封面，并保存为版本化资产。instruction 是导演对本次生成的可选意见。仅在导演明确要求生成封面时调用。");
         var readProjectSettings = AIFunctionFactory.Create(
             (Func<CancellationToken, Task<string>>)(async toolCancellationToken =>
                 JsonSerializer.Serialize(
@@ -105,8 +101,8 @@ public sealed class MafProjectCopilotAgent(
                     JsonSerializerOptions.Web)),
             name: "update_project_settings",
             description: "用 JSON 对象补丁更新项目设定并保存为新版本。只传需要修改的 camelCase 字段；未传字段保持不变。修改前必须先调用 read_project_settings。可修改字段包括 projectName、description、contentType、targetAudience、plannedEpisodeCount、targetEpisodeSeconds、aspectRatio、outputWidth、outputHeight、visualStyle、artDirection、protagonistSpecies、characterDesign、colorPalette、cameraLanguage、soundStrategy、imagePromptPrefix。");
-        var agent = AzureFoundryChatClientFactory
-            .Create(configuration.Endpoint, configuration.Deployment, apiKey)
+        var agent = LlmChatClientFactory
+            .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
             .AsHarnessAgent(
                 new HarnessAgentOptions
@@ -154,7 +150,7 @@ public sealed class MafProjectCopilotAgent(
 
         return new CopilotAgentReply(
             response.Text.Trim(),
-            configuration.Deployment,
+            LlmChatClientFactory.GetModel(configuration!),
             "MAF HarnessAgent");
     }
 }

@@ -110,11 +110,56 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.Equal("gpt-5.4", result.Deployment);
     }
 
+    [Fact]
+    public async Task Save_selects_vllm_without_requiring_an_api_key()
+    {
+        using var client = factory.CreateClient();
+
+        var save = await client.PutAsJsonAsync(
+            "/api/v2/system/foundry-configuration",
+            new
+            {
+                llmProvider = "vllm",
+                endpoint = "",
+                clearApiKey = false,
+                vllmBaseUrl = "http://127.0.0.1:8000/v1/",
+                vllmModel = "Qwen 3.8 27B",
+                clearVllmApiKey = false,
+                imageProvider = "comfyui",
+                imageEndpoint = "",
+                imageQuality = "medium",
+                clearImageApiKey = false
+            });
+
+        Assert.Equal(HttpStatusCode.OK, save.StatusCode);
+        var configuration = await save.Content.ReadFromJsonAsync<FoundryConfigurationResponse>();
+        Assert.NotNull(configuration);
+        Assert.Equal("vllm", configuration.LlmProvider);
+        Assert.Equal("http://127.0.0.1:8000/v1", configuration.VllmBaseUrl);
+        Assert.Equal("Qwen 3.8 27B", configuration.VllmModel);
+        Assert.False(configuration.VllmApiKeyConfigured);
+        Assert.Equal("comfyui", configuration.ImageProvider);
+        Assert.True(configuration.ImageConfigured);
+
+        var test = await client.PostAsync(
+            "/api/v2/system/foundry-configuration/test",
+            null);
+        Assert.Equal(HttpStatusCode.OK, test.StatusCode);
+        var result = await test.Content.ReadFromJsonAsync<TestConnectionResponse>();
+        Assert.NotNull(result);
+        Assert.Equal("Qwen 3.8 27B", result.Deployment);
+    }
+
     private sealed record FoundryConfigurationResponse(
         string Provider,
+        string LlmProvider,
         string Endpoint,
         string Deployment,
         bool ApiKeyConfigured,
+        string VllmBaseUrl,
+        string VllmModel,
+        bool VllmApiKeyConfigured,
+        string ImageProvider,
         string ImageEndpoint,
         string ImageDeployment,
         string ImageQuality,

@@ -19,7 +19,7 @@ public sealed class AzureFoundryConnectionTester : IFoundryConnectionTester
         string apiKey,
         CancellationToken cancellationToken)
     {
-        var chatClient = AzureFoundryChatClientFactory.Create(endpoint, deployment, apiKey);
+        var chatClient = LlmChatClientFactory.Create(endpoint, deployment, apiKey);
         await chatClient.CompleteChatAsync(
             [new UserChatMessage("Reply with OK.")],
             new ChatCompletionOptions { MaxOutputTokenCount = 64 },

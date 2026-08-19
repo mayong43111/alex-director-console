@@ -289,9 +289,14 @@ public sealed class ProductionRunItem
 public sealed class FoundryConfiguration
 {
     public int Id { get; set; } = 1;
+    public string LlmProvider { get; set; } = "azure-foundry";
     public string Endpoint { get; set; } = string.Empty;
     public string Deployment { get; set; } = "gpt-5.4";
     public string ProtectedApiKey { get; set; } = string.Empty;
+    public string VllmBaseUrl { get; set; } = "http://127.0.0.1:8000/v1";
+    public string VllmModel { get; set; } = "Qwen 3.8 27B";
+    public string ProtectedVllmApiKey { get; set; } = string.Empty;
+    public string ImageProvider { get; set; } = "azure-foundry";
     public string ImageEndpoint { get; set; } = string.Empty;
     public string ImageDeployment { get; set; } = "gpt-image-2";
     public string ImageQuality { get; set; } = "medium";
@@ -305,6 +310,8 @@ public sealed class ComfyUiConfiguration
     public string ConnectionMode { get; set; } = "local-http";
     public string BaseUrl { get; set; } = "http://127.0.0.1:8188";
     public string WorkflowProfile { get; set; } = "minimax-h3-fl2va-turbo-4step";
+    public string TextToImageWorkflow { get; set; } = "krea-2-text-to-image";
+    public string ImageEditWorkflow { get; set; } = "qwen-image-edit-2511";
     public int MaxConcurrentJobs { get; set; } = 1;
     public bool IsEnabled { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

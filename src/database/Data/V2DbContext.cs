@@ -360,9 +360,14 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.ToTable("FoundryConfigurations", table =>
                 table.HasCheckConstraint("CK_FoundryConfigurations_Singleton", "Id = 1"));
             entity.HasKey(item => item.Id);
+            entity.Property(item => item.LlmProvider).HasMaxLength(30).IsRequired();
             entity.Property(item => item.Endpoint).HasMaxLength(1000).IsRequired();
             entity.Property(item => item.Deployment).HasMaxLength(100).IsRequired();
             entity.Property(item => item.ProtectedApiKey).HasMaxLength(4000).IsRequired();
+            entity.Property(item => item.VllmBaseUrl).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.VllmModel).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.ProtectedVllmApiKey).HasMaxLength(4000).IsRequired();
+            entity.Property(item => item.ImageProvider).HasMaxLength(30).IsRequired();
             entity.Property(item => item.ImageEndpoint).HasMaxLength(1000).IsRequired();
             entity.Property(item => item.ImageDeployment).HasMaxLength(100).IsRequired();
             entity.Property(item => item.ImageQuality).HasMaxLength(20).IsRequired();
@@ -380,6 +385,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.ConnectionMode).HasMaxLength(30).IsRequired();
             entity.Property(item => item.BaseUrl).HasMaxLength(1000).IsRequired();
             entity.Property(item => item.WorkflowProfile).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.TextToImageWorkflow).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.ImageEditWorkflow).HasMaxLength(100).IsRequired();
         });
 
         modelBuilder.Entity<SkillDefinition>(entity =>

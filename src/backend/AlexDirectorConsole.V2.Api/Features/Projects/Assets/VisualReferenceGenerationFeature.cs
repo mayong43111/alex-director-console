@@ -229,7 +229,7 @@ public sealed class VisualReferenceService(
             SubjectResourceId = subjectResourceId,
             SubjectType = document.Kind,
             Purpose = Purpose,
-            Source = "gpt-image-2",
+            Source = generated.Deployment,
             ReviewStatus = "active",
             InheritsFromAssetId = previous?.Id,
             CreatedAtUtc = now

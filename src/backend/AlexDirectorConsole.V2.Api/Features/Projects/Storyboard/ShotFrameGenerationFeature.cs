@@ -4,6 +4,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -42,7 +43,9 @@ public interface IShotFrameGenerator
 public sealed class AzureFoundryShotFrameGenerator(
     HttpClient httpClient,
     V2DbContext dbContext,
-    IDataProtectionProvider dataProtectionProvider) : IShotFrameGenerator
+    IDataProtectionProvider dataProtectionProvider,
+    IComfyUiImageClient comfyUiImageClient,
+    IComfyUiImageWorkflowProvider comfyUiWorkflowProvider) : IShotFrameGenerator
 {
     private const string ApiVersion = "2025-04-01-preview";
     public async Task<GeneratedShotFrame> GenerateAsync(
@@ -59,7 +62,40 @@ public sealed class AzureFoundryShotFrameGenerator(
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (configuration is null)
         {
-            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 Azure AI Foundry。");
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置图片生成服务。");
+        }
+        if (FoundryConfigurationView.NormalizeImageProvider(configuration.ImageProvider)
+            == FoundryConfigurationView.ComfyUiImageProvider)
+        {
+            var comfyUi = await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            if (comfyUi is null || !comfyUi.IsEnabled)
+            {
+                throw new ProjectGenerationConfigurationException("请先在系统设置中启用本地 ComfyUI。");
+            }
+            var dimensions = size.Split('x', StringSplitOptions.TrimEntries);
+            if (dimensions.Length != 2
+                || !int.TryParse(dimensions[0], out var width)
+                || !int.TryParse(dimensions[1], out var height))
+            {
+                throw new ArgumentException("图片尺寸格式无效。", nameof(size));
+            }
+            var generated = await comfyUiImageClient.GenerateAsync(
+                new(
+                    comfyUi.BaseUrl,
+                    await comfyUiWorkflowProvider.ReadImageEditAsync(cancellationToken),
+                    prompt,
+                    width,
+                    height,
+                    references.Select(item => new ComfyUiImageReference(item.Bytes, item.ContentType)).ToArray()),
+                cancellationToken);
+            return new(
+                generated.Bytes,
+                generated.ContentType,
+                ".png",
+                FoundryConfigurationView.ComfyUiImageEditModel,
+                GptImageOptions.NormalizeQuality(configuration.ImageQuality),
+                null);
         }
         var endpoint = string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
             ? configuration.Endpoint
@@ -282,7 +318,7 @@ public sealed class ShotFrameService(
             "generate-storyboard-first-frame",
             prompt,
             new(
-                FoundryConfigurationView.RequiredImageDeployment,
+                FoundryConfigurationView.ImageEditModel(configuration),
                 GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
                 modelSize,
                 "png",

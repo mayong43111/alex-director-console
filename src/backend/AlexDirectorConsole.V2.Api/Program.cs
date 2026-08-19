@@ -43,6 +43,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IFoundryConnectionTester, AzureFoundryConnectionTester>();
 builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddHttpClient("ComfyUiVideo", client => client.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddHttpClient("ComfyUiImage", client => client.Timeout = TimeSpan.FromMinutes(5));
 builder.Services.AddHttpClient<ILocalVoiceDesigner, LocalQwenVoiceDesigner>((provider, client) =>
 {
     var baseUrl = provider.GetRequiredService<IConfiguration>()["LocalTts:BaseUrl"]
@@ -53,6 +54,8 @@ builder.Services.AddHttpClient<ILocalVoiceDesigner, LocalQwenVoiceDesigner>((pro
 builder.Services.AddSingleton<IComfyUiConnectionTester, ComfyUiConnectionTester>();
 builder.Services.AddSingleton<IComfyUiVideoClient, ComfyUiVideoClient>();
 builder.Services.AddSingleton<IComfyUiWorkflowProvider, PackagedComfyUiWorkflowProvider>();
+builder.Services.AddSingleton<IComfyUiImageClient, ComfyUiImageClient>();
+builder.Services.AddSingleton<IComfyUiImageWorkflowProvider, PackagedComfyUiImageWorkflowProvider>();
 builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddHostedService<ShotVideoWorker>();
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();

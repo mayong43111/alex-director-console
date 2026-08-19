@@ -24,6 +24,8 @@ public sealed class ComfyUiConfigurationEndpointTests(V2ApiFactory factory)
         Assert.Equal("local-http", configuration.ConnectionMode);
         Assert.Equal("http://127.0.0.1:8188", configuration.BaseUrl);
         Assert.Equal("minimax-h3-fl2va-turbo-4step", configuration.WorkflowProfile);
+        Assert.Equal("krea-2-text-to-image", configuration.TextToImageWorkflow);
+        Assert.Equal("qwen-image-edit-2511", configuration.ImageEditWorkflow);
         Assert.Equal(1, configuration.MaxConcurrentJobs);
         Assert.False(configuration.IsEnabled);
     }
@@ -80,6 +82,8 @@ public sealed class ComfyUiConfigurationEndpointTests(V2ApiFactory factory)
         string ConnectionMode,
         string BaseUrl,
         string WorkflowProfile,
+        string TextToImageWorkflow,
+        string ImageEditWorkflow,
         int MaxConcurrentJobs,
         bool IsEnabled);
 

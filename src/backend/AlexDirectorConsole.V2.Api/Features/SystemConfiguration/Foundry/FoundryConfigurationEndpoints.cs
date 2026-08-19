@@ -3,9 +3,15 @@ using AlexDirectorConsole.V2.Api.Application.Cqrs;
 namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 
 public sealed record UpdateFoundryConfigurationRequest(
+    string? LlmProvider,
     string? Endpoint,
     string? ApiKey,
     bool ClearApiKey,
+    string? VllmBaseUrl,
+    string? VllmModel,
+    string? VllmApiKey,
+    bool ClearVllmApiKey,
+    string? ImageProvider,
     string? ImageEndpoint,
     string? ImageApiKey,
     bool ClearImageApiKey,
@@ -34,9 +40,15 @@ public static class FoundryConfigurationEndpoints
         {
             var result = await commandDispatcher.SendAsync(
                 new UpdateFoundryConfigurationCommand(
+                    request.LlmProvider,
                     request.Endpoint,
                     request.ApiKey,
                     request.ClearApiKey,
+                    request.VllmBaseUrl,
+                    request.VllmModel,
+                    request.VllmApiKey,
+                    request.ClearVllmApiKey,
+                    request.ImageProvider,
                     request.ImageEndpoint,
                     request.ImageApiKey,
                     request.ClearImageApiKey,

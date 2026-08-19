@@ -428,18 +428,13 @@ public sealed class MafStoryMaterialAnalyzer(
         var configuration = await dbContext.FoundryConfigurations
             .AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
-        if (configuration is null
-            || string.IsNullOrWhiteSpace(configuration.Endpoint)
-            || string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))
+        if (!LlmChatClientFactory.IsConfigured(configuration))
         {
-            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 GPT-5.4。");
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
 
-        var apiKey = dataProtectionProvider
-            .CreateProtector("FoundryApiKeys.v1")
-            .Unprotect(configuration.ProtectedApiKey);
-        var agent = AzureFoundryChatClientFactory
-            .Create(configuration.Endpoint, configuration.Deployment, apiKey)
+        var agent = LlmChatClientFactory
+            .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
             .AsHarnessAgent(
                 new HarnessAgentOptions
@@ -500,7 +495,7 @@ public sealed class MafStoryMaterialAnalyzer(
             payload.Locations,
             payload.PlotBeats,
             payload.Relations,
-            configuration.Deployment,
+            LlmChatClientFactory.GetModel(configuration!),
             "MAF HarnessAgent");
     }
 

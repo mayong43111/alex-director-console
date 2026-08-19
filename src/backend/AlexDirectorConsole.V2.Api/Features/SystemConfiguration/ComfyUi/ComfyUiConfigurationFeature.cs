@@ -12,6 +12,8 @@ public sealed record ComfyUiConfigurationView(
     string ConnectionMode,
     string BaseUrl,
     string WorkflowProfile,
+    string TextToImageWorkflow,
+    string ImageEditWorkflow,
     int MaxConcurrentJobs,
     bool IsEnabled,
     bool IsConfigured,
@@ -20,6 +22,8 @@ public sealed record ComfyUiConfigurationView(
     public const string ProviderName = "ComfyUI";
     public const string RequiredConnectionMode = "local-http";
     public const string RequiredWorkflowProfile = "minimax-h3-fl2va-turbo-4step";
+    public const string RequiredTextToImageWorkflow = "krea-2-text-to-image";
+    public const string RequiredImageEditWorkflow = "qwen-image-edit-2511";
     public const string DefaultBaseUrl = "http://127.0.0.1:8188";
 
     public static ComfyUiConfigurationView Empty { get; } = new(
@@ -27,6 +31,8 @@ public sealed record ComfyUiConfigurationView(
         RequiredConnectionMode,
         DefaultBaseUrl,
         RequiredWorkflowProfile,
+        RequiredTextToImageWorkflow,
+        RequiredImageEditWorkflow,
         1,
         false,
         false,
@@ -37,6 +43,8 @@ public sealed record ComfyUiConfigurationView(
         RequiredConnectionMode,
         configuration.BaseUrl,
         RequiredWorkflowProfile,
+        RequiredTextToImageWorkflow,
+        RequiredImageEditWorkflow,
         1,
         configuration.IsEnabled,
         Uri.TryCreate(configuration.BaseUrl, UriKind.Absolute, out _),
@@ -103,6 +111,8 @@ public sealed class UpdateComfyUiConfigurationHandler(
         configuration.ConnectionMode = ComfyUiConfigurationView.RequiredConnectionMode;
         configuration.BaseUrl = baseUrl;
         configuration.WorkflowProfile = ComfyUiConfigurationView.RequiredWorkflowProfile;
+        configuration.TextToImageWorkflow = ComfyUiConfigurationView.RequiredTextToImageWorkflow;
+        configuration.ImageEditWorkflow = ComfyUiConfigurationView.RequiredImageEditWorkflow;
         configuration.MaxConcurrentJobs = 1;
         configuration.IsEnabled = command.IsEnabled;
         configuration.UpdatedAtUtc = timeProvider.GetUtcNow();
@@ -151,7 +161,12 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
         "minimax_h3_video_vae_fp16.safetensors",
         "minimax_h3_audio_vae_fp32.safetensors",
-        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        "krea2_turbo_fp8_scaled.safetensors",
+        "qwen3vl_4b_fp8_scaled.safetensors",
+        "qwen_image_edit_2511_bf16.safetensors",
+        "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "qwen_image_vae.safetensors"
     ];
 
     public async Task<ComfyUiCapabilities> TestAsync(
@@ -176,7 +191,7 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         return new(
             isReady,
             isReady
-                ? "ComfyUI 连接成功，MiniMax H3 workflow 所需节点和模型已就绪。"
+                ? "ComfyUI 连接成功，Krea 2、Qwen Image Edit 2511 和 MiniMax H3 所需节点与模型已就绪。"
                 : $"ComfyUI 已连接，但缺少 {missing.Length} 个节点和 {missingModels.Length} 个模型文件。",
             ComfyUiConfigurationView.RequiredWorkflowProfile,
             RequiredNodes,

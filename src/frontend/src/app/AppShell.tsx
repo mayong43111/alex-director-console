@@ -615,7 +615,7 @@ function AgentPanel({
     } catch (sendError) {
       setMessages((current) => current.filter((item) => item.id !== pendingId));
       setMessage(trimmed);
-      setError(sendError instanceof Error ? sendError.message : "GPT-5.4 暂时无法回复。");
+      setError(sendError instanceof Error ? sendError.message : "AI 副导演暂时无法回复。");
     } finally {
       setSending(false);
     }
@@ -677,7 +677,7 @@ function AgentPanel({
         ) : messages.length === 0 ? (
           <div className="agent-empty">
             <div className="agent-avatar"><Sparkles size={16} /></div>
-            <strong>GPT-5.4 副导演已就绪</strong>
+            <strong>AI 副导演已就绪</strong>
             <p>可以讨论当前项目、页面和生产集。Agent 会加载启用的 Skills，但不会虚构尚未执行的生产操作。</p>
             <button onClick={() => void sendMessage("请总结当前上下文，并给出三个最值得优先处理的事项。")}>总结当前上下文</button>
             <button onClick={() => void sendMessage("请根据当前项目给出下一步制作建议，不要声称已经执行。")}>建议下一步</button>
@@ -692,7 +692,7 @@ function AgentPanel({
               </article>
             ))}
             {sending && (
-              <div className="agent-thinking"><span className="spinner" />GPT-5.4 正在思考...</div>
+              <div className="agent-thinking"><span className="spinner" />AI 副导演正在思考...</div>
             )}
           </div>
         )}
@@ -702,7 +702,7 @@ function AgentPanel({
       <form className="composer" onSubmit={submitMessage}>
         <div className="composer-context">
           <span>项目级对话</span>
-          <span>GPT-5.4</span>
+          <span>AI 副导演</span>
         </div>
         <textarea
           value={message}

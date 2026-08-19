@@ -1,8 +1,13 @@
 export interface FoundryConfiguration {
   provider: string
+  llmProvider: 'azure-foundry' | 'vllm'
   endpoint: string
   deployment: string
   apiKeyConfigured: boolean
+  vllmBaseUrl: string
+  vllmModel: string
+  vllmApiKeyConfigured: boolean
+  imageProvider: 'azure-foundry' | 'comfyui'
   imageEndpoint: string
   imageDeployment: string
   imageQuality: 'low' | 'medium' | 'high'
@@ -23,6 +28,8 @@ export interface ComfyUiConfiguration {
   connectionMode: 'local-http'
   baseUrl: string
   workflowProfile: string
+  textToImageWorkflow: string
+  imageEditWorkflow: string
   maxConcurrentJobs: number
   isEnabled: boolean
   isConfigured: boolean
@@ -61,9 +68,15 @@ export async function getFoundryConfiguration(signal?: AbortSignal): Promise<Fou
 }
 
 export async function updateFoundryConfiguration(input: {
+  llmProvider: 'azure-foundry' | 'vllm'
   endpoint: string
   apiKey?: string
   clearApiKey: boolean
+  vllmBaseUrl: string
+  vllmModel: string
+  vllmApiKey?: string
+  clearVllmApiKey: boolean
+  imageProvider: 'azure-foundry' | 'comfyui'
   imageEndpoint: string
   imageQuality: 'low' | 'medium' | 'high'
   imageApiKey?: string

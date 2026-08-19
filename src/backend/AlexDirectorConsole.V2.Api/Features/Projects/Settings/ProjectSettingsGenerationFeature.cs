@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -70,7 +71,9 @@ public sealed class ProjectGenerationConfigurationException(string message)
 public sealed class AzureFoundryProjectCoverGenerator(
     HttpClient httpClient,
     V2DbContext dbContext,
-    IDataProtectionProvider dataProtectionProvider) : IProjectCoverGenerator
+    IDataProtectionProvider dataProtectionProvider,
+    IComfyUiImageClient comfyUiImageClient,
+    IComfyUiImageWorkflowProvider comfyUiWorkflowProvider) : IProjectCoverGenerator
 {
     private const string ApiVersion = "2025-04-01-preview";
     public async Task<GeneratedProjectCover> GenerateAsync(
@@ -83,7 +86,34 @@ public sealed class AzureFoundryProjectCoverGenerator(
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (configuration is null)
         {
-            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 Azure AI Foundry。");
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置图片生成服务。");
+        }
+        if (FoundryConfigurationView.NormalizeImageProvider(configuration.ImageProvider)
+            == FoundryConfigurationView.ComfyUiImageProvider)
+        {
+            var comfyUi = await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            if (comfyUi is null || !comfyUi.IsEnabled)
+            {
+                throw new ProjectGenerationConfigurationException("请先在系统设置中启用本地 ComfyUI。");
+            }
+            var (width, height) = ParseSize(size);
+            var generated = await comfyUiImageClient.GenerateAsync(
+                new(
+                    comfyUi.BaseUrl,
+                    await comfyUiWorkflowProvider.ReadTextToImageAsync(cancellationToken),
+                    prompt,
+                    width,
+                    height,
+                    []),
+                cancellationToken);
+            return new(
+                generated.Bytes,
+                generated.ContentType,
+                ".png",
+                FoundryConfigurationView.ComfyUiTextToImageModel,
+                GptImageOptions.NormalizeQuality(configuration.ImageQuality),
+                null);
         }
 
         var endpoint = string.IsNullOrWhiteSpace(configuration.ImageEndpoint)
@@ -176,6 +206,18 @@ public sealed class AzureFoundryProjectCoverGenerator(
             return responseBody;
         }
     }
+
+    private static (int Width, int Height) ParseSize(string size)
+    {
+        var dimensions = size.Split('x', StringSplitOptions.TrimEntries);
+        if (dimensions.Length != 2
+            || !int.TryParse(dimensions[0], out var width)
+            || !int.TryParse(dimensions[1], out var height))
+        {
+            throw new ArgumentException("图片尺寸格式无效。", nameof(size));
+        }
+        return (width, height);
+    }
 }
 
 public interface IProjectCoverService
@@ -221,7 +263,7 @@ public sealed class ProjectCoverService(
             "generate-project-cover",
             prompt,
             new(
-                FoundryConfigurationView.RequiredImageDeployment,
+                FoundryConfigurationView.TextToImageModel(configuration),
                 GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
                 modelSize,
                 "png",
@@ -472,17 +514,13 @@ public sealed class MafProjectSettingsAssistant(
         var configuration = await dbContext.FoundryConfigurations
             .AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
-        if (configuration is null
-            || string.IsNullOrWhiteSpace(configuration.Endpoint)
-            || string.IsNullOrWhiteSpace(configuration.ProtectedApiKey))
+        if (!LlmChatClientFactory.IsConfigured(configuration))
         {
-            throw new ProjectGenerationConfigurationException("请先在系统设置中配置 GPT-5.4。");
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
 
-        var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
-        var apiKey = protector.Unprotect(configuration.ProtectedApiKey);
-        var agent = AzureFoundryChatClientFactory
-            .Create(configuration.Endpoint, configuration.Deployment, apiKey)
+        var agent = LlmChatClientFactory
+            .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
             .AsHarnessAgent(
                 new HarnessAgentOptions
@@ -528,7 +566,7 @@ public sealed class MafProjectSettingsAssistant(
         {
             value = value[..fieldDefinition.MaxLength].TrimEnd();
         }
-        return new(field, value, configuration.Deployment, "MAF HarnessAgent");
+        return new(field, value, LlmChatClientFactory.GetModel(configuration!), "MAF HarnessAgent");
     }
 }
 #pragma warning restore MAAI001

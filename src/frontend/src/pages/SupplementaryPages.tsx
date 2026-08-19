@@ -1032,9 +1032,15 @@ function GlobalSettingsShell({
 
 export function ServicesPage() {
   const [configuration, setConfiguration] = useState<FoundryConfiguration | null>(null);
+  const [llmProvider, setLlmProvider] = useState<"azure-foundry" | "vllm">("azure-foundry");
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
+  const [vllmBaseUrl, setVllmBaseUrl] = useState("http://127.0.0.1:8000/v1");
+  const [vllmModel, setVllmModel] = useState("Qwen 3.8 27B");
+  const [vllmApiKey, setVllmApiKey] = useState("");
+  const [clearVllmApiKey, setClearVllmApiKey] = useState(false);
+  const [imageProvider, setImageProvider] = useState<"azure-foundry" | "comfyui">("azure-foundry");
   const [imageEndpoint, setImageEndpoint] = useState("");
   const [imageQuality, setImageQuality] = useState<"low" | "medium" | "high">("medium");
   const [imageApiKey, setImageApiKey] = useState("");
@@ -1049,7 +1055,11 @@ export function ServicesPage() {
     getFoundryConfiguration(controller.signal)
       .then((loaded) => {
         setConfiguration(loaded);
+        setLlmProvider(loaded.llmProvider);
         setEndpoint(loaded.endpoint);
+        setVllmBaseUrl(loaded.vllmBaseUrl);
+        setVllmModel(loaded.vllmModel);
+        setImageProvider(loaded.imageProvider);
         setImageEndpoint(loaded.imageEndpoint);
         setImageQuality(loaded.imageQuality);
       })
@@ -1072,18 +1082,30 @@ export function ServicesPage() {
     setMessage(null);
     try {
       const saved = await updateFoundryConfiguration({
+        llmProvider,
         endpoint,
         apiKey: apiKey || undefined,
         clearApiKey,
+        vllmBaseUrl,
+        vllmModel,
+        vllmApiKey: vllmApiKey || undefined,
+        clearVllmApiKey,
+        imageProvider,
         imageEndpoint,
         imageQuality,
         imageApiKey: imageApiKey || undefined,
         clearImageApiKey,
       });
       setConfiguration(saved);
+      setLlmProvider(saved.llmProvider);
       setEndpoint(saved.endpoint);
       setApiKey("");
       setClearApiKey(false);
+      setVllmBaseUrl(saved.vllmBaseUrl);
+      setVllmModel(saved.vllmModel);
+      setVllmApiKey("");
+      setClearVllmApiKey(false);
+      setImageProvider(saved.imageProvider);
       setImageEndpoint(saved.imageEndpoint);
       setImageQuality(saved.imageQuality);
       setImageApiKey("");
@@ -1111,7 +1133,9 @@ export function ServicesPage() {
     }
   }
 
-  const configured = configuration?.apiKeyConfigured && Boolean(configuration.endpoint);
+  const configured = llmProvider === "vllm"
+    ? Boolean(vllmBaseUrl && vllmModel)
+    : Boolean(configuration?.apiKeyConfigured && endpoint);
 
   return (
     <GlobalSettingsShell active="services">
@@ -1134,8 +1158,12 @@ export function ServicesPage() {
             <Cloud size={18} />
           </span>
           <span>
-            <strong>Azure AI Foundry</strong>
-            <small>GPT-5.4 · gpt-image-2</small>
+            <strong>{llmProvider === "vllm" ? "本地 vLLM" : "Azure AI Foundry"}</strong>
+            <small>
+              {llmProvider === "vllm" ? vllmModel : "GPT-5.4"}
+              {" · "}
+              {imageProvider === "comfyui" ? "Krea 2 / Qwen Image Edit 2511" : "gpt-image-2"}
+            </small>
           </span>
           <span className={`connection-state ${configured ? "online" : "offline"}`}>
             <i />
@@ -1148,10 +1176,27 @@ export function ServicesPage() {
       </section>
       <form className="connection-form panel" onSubmit={saveConfiguration}>
         <header className="panel-header">
-          <h2>Azure AI Foundry</h2>
-          <span>API Key 仅加密存储，保存后不再回传到浏览器</span>
+          <h2>语言模型</h2>
+          <span>密钥仅加密存储，保存后不再回传到浏览器</span>
         </header>
         <div className="form-grid">
+          <label>
+            <span>提供方</span>
+            <select
+              value={llmProvider}
+              onChange={(event) => setLlmProvider(event.target.value as "azure-foundry" | "vllm")}
+              disabled={loading || Boolean(busy)}
+            >
+              <option value="azure-foundry">Azure AI Foundry</option>
+              <option value="vllm">本地 vLLM</option>
+            </select>
+          </label>
+          <label>
+            <span>模型</span>
+            <input value={llmProvider === "vllm" ? "Qwen 3.8 27B" : "GPT-5.4"} readOnly />
+          </label>
+          {llmProvider === "azure-foundry" ? (
+            <>
           <label>
             <span>Endpoint</span>
             <input
@@ -1161,12 +1206,8 @@ export function ServicesPage() {
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
               disabled={loading || Boolean(busy)}
-              required
+              required={llmProvider === "azure-foundry"}
             />
-          </label>
-          <label>
-            <span>Deployment</span>
-            <input value="gpt-5.4" readOnly />
           </label>
           <label>
             <span>API Key</span>
@@ -1190,13 +1231,77 @@ export function ServicesPage() {
               <span>清除已保存的 API Key</span>
             </label>
           )}
+            </>
+          ) : (
+            <>
+              <label>
+                <span>vLLM Base URL</span>
+                <input
+                  type="url"
+                  value={vllmBaseUrl}
+                  onChange={(event) => setVllmBaseUrl(event.target.value)}
+                  disabled={loading || Boolean(busy)}
+                  required
+                />
+              </label>
+              <label>
+                <span>Serving Model ID</span>
+                <input
+                  value={vllmModel}
+                  onChange={(event) => setVllmModel(event.target.value)}
+                  disabled={loading || Boolean(busy)}
+                  required
+                />
+              </label>
+              <label>
+                <span>API Key（可选）</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={configuration?.vllmApiKeyConfigured ? "已配置，留空保持不变" : "本地无鉴权时留空"}
+                  value={vllmApiKey}
+                  onChange={(event) => setVllmApiKey(event.target.value)}
+                  disabled={loading || Boolean(busy) || clearVllmApiKey}
+                />
+              </label>
+              {configuration?.vllmApiKeyConfigured && (
+                <label className="check-field">
+                  <input
+                    type="checkbox"
+                    checked={clearVllmApiKey}
+                    onChange={(event) => setClearVllmApiKey(event.target.checked)}
+                    disabled={Boolean(busy)}
+                  />
+                  <span>清除已保存的 vLLM API Key</span>
+                </label>
+              )}
+            </>
+          )}
           <div className="span-2 section-heading second">
             <div>
               <h2>图像生成</h2>
-              <p>留空 Endpoint 或 API Key 时复用上方 GPT-5.4 配置。</p>
+              <p>{imageProvider === "comfyui" ? "文生图使用 Krea 2，图片修改使用 Qwen Image Edit 2511。" : "留空 Endpoint 或 API Key 时复用上方 Azure 配置。"}</p>
             </div>
-            {configuration?.imageConfigured && <span className="saved-state"><Check size={13} />gpt-image-2 已配置</span>}
+            {configuration?.imageConfigured && <span className="saved-state"><Check size={13} />图片服务已配置</span>}
           </div>
+          <label>
+            <span>图片提供方</span>
+            <select
+              value={imageProvider}
+              onChange={(event) => setImageProvider(event.target.value as "azure-foundry" | "comfyui")}
+              disabled={loading || Boolean(busy)}
+            >
+              <option value="azure-foundry">Azure AI Foundry</option>
+              <option value="comfyui">本地 ComfyUI</option>
+            </select>
+          </label>
+          {imageProvider === "comfyui" ? (
+            <label>
+              <span>模型组合</span>
+              <input value="Krea 2 · Qwen Image Edit 2511" readOnly />
+            </label>
+          ) : (
+            <>
           <label>
             <span>Image Endpoint</span>
             <input
@@ -1244,6 +1349,8 @@ export function ServicesPage() {
               />
               <span>清除独立图片 API Key，改为复用 GPT Key</span>
             </label>
+          )}
+            </>
           )}
         </div>
         {(message || error) && (
