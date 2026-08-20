@@ -16,6 +16,19 @@ public sealed record ResourceVersionView(
     bool IsCurrent,
     DateTimeOffset CreatedAtUtc);
 
+public sealed record ResourceVersionDetailView(
+    Guid AssetId,
+    Guid ResourceId,
+    int Version,
+    string Type,
+    string Name,
+    bool IsCurrent,
+    DateTimeOffset CreatedAtUtc,
+    string? ContentType,
+    string? FileName,
+    long SizeBytes,
+    string? DocumentJson);
+
 public sealed record SetCurrentResourceVersionRequest(Guid AssetId);
 
 public static class ResourceVersionEndpoints
@@ -24,6 +37,7 @@ public static class ResourceVersionEndpoints
     {
         var group = app.MapGroup("/api/v2/projects/{projectId:guid}/assets/{assetId:guid}/versions");
         group.MapGet("/", ListVersionsAsync);
+        group.MapGet("/{versionAssetId:guid}", GetVersionAsync);
         group.MapPut("/current", SetCurrentAsync);
         return app;
     }
@@ -62,6 +76,47 @@ public static class ResourceVersionEndpoints
             item.Name,
             item.Id == currentAssetId,
             item.CreatedAtUtc)));
+    }
+
+    private static async Task<IResult> GetVersionAsync(
+        Guid projectId,
+        Guid assetId,
+        Guid versionAssetId,
+        V2DbContext dbContext,
+        CancellationToken cancellationToken)
+    {
+        var anchor = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.ProjectId == projectId && item.Id == assetId,
+            cancellationToken);
+        if (anchor is null) return Results.NotFound();
+
+        var target = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.Id == versionAssetId
+                && item.ResourceId == anchor.ResourceId
+                && item.Type == anchor.Type,
+            cancellationToken);
+        if (target is null) return Results.NotFound();
+
+        var currentAssetId = await ResolveCurrentAssetIdAsync(
+            dbContext,
+            projectId,
+            anchor.ResourceId,
+            anchor.Type,
+            anchor.Id,
+            cancellationToken);
+        return Results.Ok(new ResourceVersionDetailView(
+            target.Id,
+            target.ResourceId,
+            target.Version,
+            target.Type,
+            target.Name,
+            target.Id == currentAssetId,
+            target.CreatedAtUtc,
+            target.ContentType,
+            target.FileName,
+            target.SizeBytes,
+            target.DocumentJson));
     }
 
     private static async Task<IResult> SetCurrentAsync(

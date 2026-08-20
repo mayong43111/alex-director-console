@@ -8,6 +8,13 @@ export interface ResourceVersion {
   createdAtUtc: string
 }
 
+export interface ResourceVersionDetail extends ResourceVersion {
+  contentType: string | null
+  fileName: string | null
+  sizeBytes: number
+  documentJson: string | null
+}
+
 async function readError(response: Response, fallback: string): Promise<Error> {
   const problem = await response.json().catch(() => null) as { error?: string; detail?: string; title?: string } | null
   return new Error(problem?.error || problem?.detail || problem?.title || fallback)
@@ -35,4 +42,16 @@ export async function setCurrentResourceVersion(
   })
   if (!response.ok) throw await readError(response, '当前版本切换失败。')
   return response.json() as Promise<ResourceVersion>
+}
+
+export async function getResourceVersion(
+  projectId: string,
+  anchorAssetId: string,
+  assetId: string,
+): Promise<ResourceVersionDetail> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/assets/${anchorAssetId}/versions/${assetId}`,
+  )
+  if (!response.ok) throw await readError(response, '历史版本读取失败。')
+  return response.json() as Promise<ResourceVersionDetail>
 }

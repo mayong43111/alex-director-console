@@ -19,7 +19,6 @@ export interface AssistantDirectorSession {
   title: string;
   page: string;
   episode?: string;
-  context: Array<{ label: string; value: string }>;
 }
 
 export function AssistantDirectorPanel({
@@ -127,11 +126,6 @@ export function AssistantDirectorPanel({
             <strong>{agent.name}</strong>
             <span className="online-dot" />
           </div>
-          <div className="context-tags">
-            {session.context.map((item) => (
-              <span key={item.label}>{item.label}：{item.value}</span>
-            ))}
-          </div>
           <div className="agent-header-actions">
             <button
               className="icon-button"
@@ -167,7 +161,6 @@ export function AssistantDirectorPanel({
               <article className={`agent-message ${item.role}`} key={item.id}>
                 <header>{item.role === "user" ? "导演" : "副导演"}</header>
                 <p>{item.content}</p>
-                {item.model && <small>{item.model}</small>}
               </article>
             ))}
             {sending && (

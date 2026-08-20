@@ -49,7 +49,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(3, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(9, await dbContext.AgentDefinitions.CountAsync());
         var link = Assert.Single(await dbContext.AgentSkills
             .Where(item => item.AgentId == created.Id)
             .ToListAsync());
@@ -99,7 +99,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v2/agents/{created.Id}")).StatusCode);
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(2, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(8, await dbContext.AgentDefinitions.CountAsync());
         Assert.DoesNotContain(
             await dbContext.AgentSkills.ToListAsync(),
             link => link.AgentId == created.Id);
@@ -130,6 +130,42 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal("原始项目描述", invocation.Input);
         Assert.Equal("三个火枪手", invocation.Context.GetProperty("projectName").GetString());
         Assert.Equal(4000, invocation.MaxLength);
+    }
+
+    public static TheoryData<Guid, string, string> ProjectSettingsTextAgentCases => new()
+    {
+        { BuiltInAgents.ArtDirectionWriterId, "项目美术方向助手", "影视项目美术总监" },
+        { BuiltInAgents.CharacterDesignWriterId, "角色造型约束助手", "影视角色设计总监" },
+        { BuiltInAgents.ColorPaletteWriterId, "项目色彩策略助手", "影视色彩设计师" },
+        { BuiltInAgents.CameraLanguageWriterId, "项目摄影语言助手", "影视摄影指导" },
+        { BuiltInAgents.SoundStrategyWriterId, "项目声音策略助手", "影视声音指导" },
+        { BuiltInAgents.ImagePromptPrefixWriterId, "图像生成约束助手", "影视图像生成提示词总监" }
+    };
+
+    [Theory]
+    [MemberData(nameof(ProjectSettingsTextAgentCases))]
+    public async Task Project_settings_text_agent_is_seeded_and_invokable(
+        Guid agentId,
+        string expectedName,
+        string expectedPromptFragment)
+    {
+        using var client = factory.CreateClient();
+
+        var agentResponse = await client.GetAsync($"/api/v2/agents/{agentId}");
+        Assert.Equal(HttpStatusCode.OK, agentResponse.StatusCode);
+        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentResponse>();
+        Assert.NotNull(agent);
+        Assert.Equal(expectedName, agent.Name);
+        Assert.Contains(expectedPromptFragment, agent.SystemPrompt, StringComparison.Ordinal);
+
+        var invokeResponse = await client.PostAsJsonAsync($"/api/v2/agents/{agentId}/invoke", new
+        {
+            input = "当前字段草稿",
+            context = new { projectName = "三个火枪手" },
+            maxLength = 2000
+        });
+        Assert.Equal(HttpStatusCode.OK, invokeResponse.StatusCode);
+        Assert.Equal(agentId, factory.LastAgentTextInvocation?.Agent.Id);
     }
 
     [Fact]

@@ -14,7 +14,6 @@ export interface ProjectSettings {
   outputHeight: number
   visualStyle: string
   artDirection: string
-  protagonistSpecies: string
   characterDesign: string
   colorPalette: string
   cameraLanguage: string
@@ -36,7 +35,6 @@ export interface ProjectCover {
 
 export type ProjectSettingsAssistField =
   | 'visualStyle'
-  | 'protagonistSpecies'
   | 'artDirection'
   | 'characterDesign'
   | 'colorPalette'

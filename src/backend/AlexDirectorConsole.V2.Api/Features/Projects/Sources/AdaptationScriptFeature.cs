@@ -141,7 +141,7 @@ public interface IAdaptationScriptWriter
     Task<AdaptationScriptResult> WriteAsync(
         ProjectSettingsView projectSettings,
         StoryMaterialAnalysisView analysis,
-        int desiredEpisodeCount,
+        int? desiredEpisodeCount,
         string? instruction,
         CancellationToken cancellationToken);
 
@@ -284,9 +284,10 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             new GetProjectSettingsQuery(command.ProjectId),
             cancellationToken);
         if (projectSettings is null) return null;
-        var desiredEpisodeCount = command.DesiredEpisodeCount ?? projectSettings.PlannedEpisodeCount;
-        if (desiredEpisodeCount is < 1 or > 6)
-            throw new ArgumentException("单次改写的剧集数量必须为 1 至 6；更长项目请分批规划。", nameof(command));
+        var desiredEpisodeCount = command.DesiredEpisodeCount
+            ?? (projectSettings.PlannedEpisodeCount == -1 ? null : projectSettings.PlannedEpisodeCount);
+        if (desiredEpisodeCount.HasValue && desiredEpisodeCount is < 1 or > 1000)
+            throw new ArgumentException("改编草案的剧集数量必须为 1 至 1000。", nameof(command));
         var analysis = await StoryMaterialAnalysisQueries.GetCurrentAsync(
             dbContext,
             command.ProjectId,
@@ -302,7 +303,9 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             desiredEpisodeCount,
             command.Instruction,
             cancellationToken);
-        if (result.Episodes.Count != desiredEpisodeCount)
+        if (result.Episodes.Count is < 1 or > 1000)
+            throw new InvalidOperationException($"GPT-5.4 应返回 1 至 1000 集，实际返回 {result.Episodes.Count} 集。");
+        if (desiredEpisodeCount.HasValue && result.Episodes.Count != desiredEpisodeCount.Value)
             throw new InvalidOperationException($"GPT-5.4 应返回 {desiredEpisodeCount} 集，实际返回 {result.Episodes.Count} 集。");
         result = result with { OverallSmallHooks = [], OverallBigHooks = [] };
 
@@ -327,7 +330,7 @@ public sealed class GenerateAdaptationScriptCommandHandler(
         StoryMaterialAnalysisView analysis,
         Guid? projectSettingsAssetId,
         AdaptationScriptResult result,
-        int desiredEpisodeCount,
+        int? requestedEpisodeCount,
         string? instruction,
         CancellationToken cancellationToken)
     {
@@ -337,7 +340,6 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             sourceResourceId,
             cancellationToken);
         var normalizedEpisodes = result.Episodes
-            .Take(6)
             .Select(NormalizeOutline)
             .ToArray();
         var document = new AdaptationScriptDocument(
@@ -380,7 +382,14 @@ public sealed class GenerateAdaptationScriptCommandHandler(
             ContentType = "application/json",
             SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
             GenerationMetadataJson = JsonSerializer.Serialize(
-                new { result.Model, result.Runtime, desiredEpisodeCount, instruction },
+                new
+                {
+                    result.Model,
+                    result.Runtime,
+                    requestedEpisodeCount,
+                    actualEpisodeCount = normalizedEpisodes.Length,
+                    instruction
+                },
                 ProjectSourceDefaults.JsonOptions),
             CreatedAtUtc = now,
             UpdatedAtUtc = now
@@ -461,8 +470,8 @@ public sealed class AppendAdaptationEpisodeCommandHandler(
         var currentDocument = AdaptationScriptQueries.ReadDocument(current.Asset);
         if (currentDocument.Status != "draft")
             throw new StoryDevelopmentConflictException("已确认的剧本不能直接添加剧集，请新建改编版本。");
-        if (currentDocument.Episodes.Count >= 6)
-            throw new ArgumentException("单份改编草案最多包含 6 集。", nameof(command));
+        if (currentDocument.Episodes.Count >= 1000)
+            throw new ArgumentException("单份改编草案最多包含 1000 集。", nameof(command));
 
         var projectSettings = await new GetProjectSettingsQueryHandler(dbContext).HandleAsync(
             new GetProjectSettingsQuery(command.ProjectId),
@@ -1168,7 +1177,7 @@ public sealed class MafAdaptationScriptWriter(
     public async Task<AdaptationScriptResult> WriteAsync(
         ProjectSettingsView projectSettings,
         StoryMaterialAnalysisView analysis,
-        int desiredEpisodeCount,
+        int? desiredEpisodeCount,
         string? instruction,
         CancellationToken cancellationToken)
     {
@@ -1208,54 +1217,109 @@ public sealed class MafAdaptationScriptWriter(
                     }
                 },
                 loggerFactory);
-        var input = JsonSerializer.Serialize(
-            new
-            {
-                projectSettings = new
+        var batchCounts = new List<int?>();
+        if (desiredEpisodeCount is > 6)
+        {
+            for (var remaining = desiredEpisodeCount.Value; remaining > 0; remaining -= 6)
+                batchCounts.Add(Math.Min(remaining, 6));
+        }
+        else
+        {
+            batchCounts.Add(desiredEpisodeCount);
+        }
+
+        var episodes = new List<AdaptationEpisodeDraft>();
+        var overallSmallHooks = new List<string>();
+        var overallBigHooks = new List<string>();
+        var title = string.Empty;
+        var approach = string.Empty;
+        foreach (var batchCount in batchCounts)
+        {
+            var batchStart = episodes.Count + 1;
+            var batchEnd = batchStart + (batchCount ?? 1) - 1;
+            var input = JsonSerializer.Serialize(
+                new
                 {
-                    projectSettings.ProjectName,
-                    projectSettings.Description,
-                    projectSettings.ContentType,
-                    projectSettings.TargetAudience,
-                    projectSettings.PlannedEpisodeCount,
-                    projectSettings.TargetEpisodeSeconds,
-                    projectSettings.VisualStyle,
-                    projectSettings.ArtDirection,
-                    projectSettings.ProtagonistSpecies,
-                    projectSettings.CharacterDesign,
-                    projectSettings.CameraLanguage,
-                    projectSettings.SoundStrategy
+                    projectSettings = new
+                    {
+                        projectSettings.ProjectName,
+                        projectSettings.Description,
+                        projectSettings.ContentType,
+                        projectSettings.TargetAudience,
+                        projectSettings.PlannedEpisodeCount,
+                        projectSettings.TargetEpisodeSeconds,
+                        projectSettings.VisualStyle,
+                        projectSettings.ArtDirection,
+                        projectSettings.CharacterDesign,
+                        projectSettings.CameraLanguage,
+                        projectSettings.SoundStrategy
+                    },
+                    desiredEpisodeCount = batchCount,
+                    seriesPlan = desiredEpisodeCount is > 6
+                        ? new
+                        {
+                            totalEpisodeCount = desiredEpisodeCount.Value,
+                            batchStart,
+                            batchEnd,
+                            previousEpisodes = episodes.TakeLast(6).Select(item => new
+                            {
+                                item.ProposalNumber,
+                                item.Title,
+                                item.Logline,
+                                item.SmallHooks,
+                                item.BigHooks
+                            })
+                        }
+                        : null,
+                    instruction = instruction?.Trim(),
+                    analysis = new
+                    {
+                        analysis.Summary,
+                        analysis.Characters,
+                        analysis.Locations,
+                        analysis.PlotBeats,
+                        analysis.Relations
+                    }
                 },
-                desiredEpisodeCount,
-                instruction = instruction?.Trim(),
-                analysis = new
-                {
-                    analysis.Summary,
-                    analysis.Characters,
-                    analysis.Locations,
-                    analysis.PlotBeats,
-                    analysis.Relations
-                }
-            },
-            ProjectSourceDefaults.JsonOptions);
-        var response = await agent.RunAsync(
-            $"生成恰好 {desiredEpisodeCount} 集改编大纲：\n{input}",
-            cancellationToken: cancellationToken);
-        var json = ExtractJson(response.Text);
-        var payload = JsonSerializer.Deserialize<AdaptationScriptPayload>(
-            json,
-            ProjectSourceDefaults.JsonOptions)
-            ?? throw new InvalidOperationException("GPT-5.4 未返回有效的改编大纲。");
-        if (payload.Episodes.Count == 0)
-            throw new InvalidOperationException("GPT-5.4 返回的改编大纲没有剧集。");
+                ProjectSourceDefaults.JsonOptions);
+            var episodePlanningInstruction = desiredEpisodeCount is > 6
+                ? $"整个项目共规划 {desiredEpisodeCount.Value} 集；当前只生成第 {batchStart} 至 {batchEnd} 集，恰好返回 {batchCount} 集，并承接 previousEpisodes"
+                : batchCount.HasValue
+                    ? $"生成恰好 {batchCount.Value} 集改编大纲"
+                    : "根据素材内容和单集目标时长自行规划合理集数，返回 1 至 6 集改编大纲";
+            var response = await agent.RunAsync(
+                $"{episodePlanningInstruction}：\n{input}",
+                cancellationToken: cancellationToken);
+            var json = ExtractJson(response.Text);
+            var payload = JsonSerializer.Deserialize<AdaptationScriptPayload>(
+                json,
+                ProjectSourceDefaults.JsonOptions)
+                ?? throw new InvalidOperationException("GPT-5.4 未返回有效的改编大纲。");
+            if (payload.Episodes.Count == 0)
+                throw new InvalidOperationException("GPT-5.4 返回的改编大纲没有剧集。");
+            if (batchCount.HasValue && payload.Episodes.Count != batchCount.Value)
+                throw new InvalidOperationException(
+                    $"GPT-5.4 本批应返回 {batchCount.Value} 集，实际返回 {payload.Episodes.Count} 集。");
+
+            if (episodes.Count == 0)
+            {
+                title = payload.Title;
+                approach = payload.Approach;
+            }
+            episodes.AddRange(payload.Episodes.Select((episode, index) =>
+                episode with { ProposalNumber = batchStart + index }));
+            overallSmallHooks.AddRange(payload.OverallSmallHooks);
+            overallBigHooks.AddRange(payload.OverallBigHooks);
+        }
+
         return new(
-            payload.Title,
-            payload.Approach,
-            payload.Episodes,
+            title,
+            approach,
+            episodes,
             LlmChatClientFactory.GetModel(configuration!),
             "MAF HarnessAgent",
-            payload.OverallSmallHooks,
-            payload.OverallBigHooks);
+            overallSmallHooks,
+            overallBigHooks);
     }
 
     public async Task<ProductionScriptEpisodeDraft> WriteProductionScriptAsync(
@@ -1297,6 +1361,7 @@ public sealed class MafAdaptationScriptWriter(
                             返回前必须逐场统计 lines 的全部字符数并自行删改到预算以内。如果输入包含 correction，表示上一版未通过硬校验；错误消息中每个“最多 N 字”都是硬上限，必须把对应场次压到不超过 N-8 字，不能只删一两字或原样重交。
                             如果输入包含 previousScript，必须进入定向返修模式：完整保留上一版的 title、logline、场次数量、heading、summary、action、characters、props、storyFunction、targetSeconds、rhythm、visualContrast、shotPlan、smallHooks 和 bigHooks，只按 correction 重写 dialogues。仍须返回完整 JSON，禁止借返修改动剧情、动作、时长或摄影骨架。
                             严格遵循大纲主线与爆点，不重新引入已删支线；可以补充完成场景连接和人物动机所需的动作与对白，但不能改变核心事件结果。
+                            characterDesign 是角色造型与身份连续性的硬约束。动作、人物称谓和可拍摄描述必须遵守，禁止生成与其冲突的年龄、外貌、服装、物种或身份设定。
                             同时为下游分镜给出最小摄影骨架：每场 targetSeconds、rhythm、visualContrast 和 shotPlan。镜号连续，镜头总时长等于单集目标时长；分镜只在此基础上细化构图、画面、动作、对白和声音。
                             全部正文使用简体中文。只返回 JSON，不要 Markdown 围栏。结构必须为：
                             {"title":"...","logline":"...","targetSeconds":100,"smallHooks":["..."],"bigHooks":["..."],"scenes":[{"sceneNumber":1,"heading":"外景 巴黎街道 日","summary":"本场剧情摘要","action":"现在时、可拍摄的连续动作描述","dialogues":[{"character":"达达尼昂","parenthetical":"压低声音","lines":["第一句台词。","第二句台词。"]}],"characters":["达达尼昂"],"props":["推荐信"],"storyFunction":"推进冲突","targetSeconds":20,"rhythm":"...","visualContrast":"...","shotPlan":[{"shotNumber":1,"durationSeconds":5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","purpose":"建立空间"}]}]}
@@ -1314,6 +1379,7 @@ public sealed class MafAdaptationScriptWriter(
                 projectSettings.TargetEpisodeSeconds,
                 projectSettings.VisualStyle,
                 projectSettings.ArtDirection,
+                projectSettings.CharacterDesign,
                 projectSettings.CameraLanguage,
                 projectSettings.SoundStrategy
             },

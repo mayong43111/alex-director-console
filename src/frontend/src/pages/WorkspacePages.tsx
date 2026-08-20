@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type UIEvent } from "react";
 import {
   Navigate,
   NavLink,
@@ -6,7 +6,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import { Image, Select } from "antd";
+import { Image, Select, Tabs } from "antd";
 import {
   Check,
   ChevronDown,
@@ -72,6 +72,7 @@ import {
   updateStoryboardShotAssets,
 } from "../api/storyboards";
 import type { ImageGenerationPreview } from "../api/generation";
+import { builtInAgentIds, builtInAgentLabels } from "../api/agents";
 import {
   getProductionRun,
   listProductionRuns,
@@ -97,6 +98,7 @@ import {
 } from "../api/projectSources";
 import { VersionPicker } from "../components/VersionPicker";
 import { RelationGraph } from "../components/RelationGraph";
+import { AgentTextArea, type AgentTextAreaStatus } from "../components/AgentTextArea";
 
 const episodes = [
   { id: "production-e01", code: "E01", title: "失控的早晨", state: "review" },
@@ -189,7 +191,6 @@ const settingSections = [
 
 const assistFieldLabels: Record<ProjectSettingsAssistField, string> = {
   visualStyle: "视觉风格",
-  protagonistSpecies: "主角物种",
   artDirection: "美术方向",
   characterDesign: "角色造型硬约束",
   colorPalette: "色彩策略",
@@ -210,7 +211,15 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   const [assistingField, setAssistingField] = useState<ProjectSettingsAssistField | null>(null);
   const [assistConfirmation, setAssistConfirmation] = useState<ProjectSettingsAssistField | null>(null);
   const [assistInstruction, setAssistInstruction] = useState("");
+  const [textAgentStatuses, setTextAgentStatuses] = useState<Record<string, AgentTextAreaStatus>>({});
   const [error, setError] = useState<string | null>(null);
+  const textAgentBusy = Object.values(textAgentStatuses).some((agentStatus) => agentStatus !== "idle");
+
+  function trackTextAgent(field: string, agentStatus: AgentTextAreaStatus) {
+    setTextAgentStatuses((current) => current[field] === agentStatus
+      ? current
+      : { ...current, [field]: agentStatus });
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -387,6 +396,21 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
     editor.scrollTo({ top, behavior: "smooth" });
   }
 
+  function syncActiveSection(event: UIEvent<HTMLFormElement>) {
+    const editor = event.currentTarget;
+    if (editor.scrollTop + editor.clientHeight >= editor.scrollHeight - 2) {
+      setActiveSection(settingSections.at(-1)!.id);
+      return;
+    }
+    const threshold = editor.scrollTop + 96;
+    let currentSection = settingSections[0].id;
+    for (const section of settingSections) {
+      const element = document.getElementById(section.id);
+      if (element && element.offsetTop <= threshold) currentSection = section.id;
+    }
+    setActiveSection(currentSection);
+  }
+
   if (!settings) {
     return (
       <div className="page settings-loading">
@@ -399,39 +423,32 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
 
   return (
     <div className="page settings-page">
-      <header className="page-header settings-page-header">
-        <div>
-          <div className="settings-title-line">
-            <span className="settings-context-label">当前版本</span>
-            <small>{settings.version === 0 ? "草稿" : `v${settings.version}`}</small>
-            {settings.assetId && <VersionPicker compact projectId={projectId} assetId={settings.assetId} label="项目设定版本" />}
-          </div>
-        </div>
-        <button
-          className="primary-button settings-header-save"
-          type="submit"
-          form="project-settings-form"
-          disabled={status === "saving" || status === "idle" || status === "saved"}
-        >
-          <Save size={14} />
-          {status === "saving" ? "正在保存" : `保存为 v${settings.version + 1}`}
-        </button>
-      </header>
       <div className="settings-layout">
-        <aside className="subnav">
+        <aside className="subnav" aria-label="项目设定章节">
+          <div className="settings-subnav-heading">
+            <strong>项目设定</strong>
+            <span>快速跳转</span>
+          </div>
           {settingSections.map((item, index) => (
             <button
               type="button"
               className={activeSection === item.id ? "active" : ""}
               key={item.id}
               onClick={() => openSection(item.id)}
+              aria-current={activeSection === item.id ? "location" : undefined}
             >
               <b>{String(index + 1).padStart(2, "0")}</b>
               {item.label}
             </button>
           ))}
         </aside>
-        <form className="editor-surface settings-editor" id="project-settings-form" onSubmit={submitSettings}>
+        <form
+          className="editor-surface settings-editor"
+          id="project-settings-form"
+          data-workspace-save-state={textAgentBusy || assistingField ? "blocked" : status}
+          onSubmit={submitSettings}
+          onScroll={syncActiveSection}
+        >
           <section className="settings-cover" aria-label="项目概念封面">
             {settings.cover ? (
               <Image
@@ -478,10 +495,15 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
                 <h2>基础与片型</h2>
                 <p>定义项目身份、受众和生产规模。</p>
               </div>
-              <span className={`saved-state ${status}`}>
-                <Check size={13} />
-                {status === "dirty" ? "有未保存修改" : status === "saved" ? "新版本已保存" : `v${settings.version} 已同步`}
-              </span>
+              <div className="settings-state-actions">
+                {settings.assetId && (
+                  <VersionPicker compact projectId={projectId} assetId={settings.assetId} label="项目设定版本" />
+                )}
+                <span className={`saved-state ${status}`}>
+                  <Check size={13} />
+                  {status === "dirty" ? "有未保存修改" : status === "saved" ? "新版本已保存" : `v${settings.version} 已同步`}
+                </span>
+              </div>
             </div>
             <div className="form-grid">
               <label>
@@ -498,7 +520,16 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               </label>
               <label className="span-2">
                 <span>项目简介</span>
-                <textarea rows={3} maxLength={4000} value={settings.description} onChange={(event) => updateField("description", event.target.value)} />
+                <AgentTextArea
+                  agentId={builtInAgentIds.projectDescriptionWriter}
+                  agentLabel={builtInAgentLabels.projectDescriptionWriter}
+                  value={settings.description}
+                  onChange={(value) => updateField("description", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("description", agentStatus)}
+                  rows={3}
+                  maxLength={4000}
+                />
               </label>
               <label className="span-2">
                 <span>目标受众</span>
@@ -506,7 +537,23 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               </label>
               <label>
                 <span>计划生产集数</span>
-                <input required type="number" min={1} max={1000} value={settings.plannedEpisodeCount} onChange={(event) => updateField("plannedEpisodeCount", Number(event.target.value))} />
+                <input
+                  required
+                  type="number"
+                  min={-1}
+                  max={1000}
+                  step={1}
+                  title="-1 表示由剧本内容决定集数"
+                  value={settings.plannedEpisodeCount}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    if (!Number.isInteger(value)) return;
+                    updateField(
+                      "plannedEpisodeCount",
+                      value === 0 ? (settings.plannedEpisodeCount === -1 ? 1 : -1) : value,
+                    );
+                  }}
+                />
               </label>
               <label>
                 <span>单集目标时长</span>
@@ -584,34 +631,46 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
                   {renderAiFieldAction("visualStyle")}
                 </div>
               </label>
-              <label>
-                <span>主角物种</span>
-                <div className="ai-field-control">
-                  <input required maxLength={200} value={settings.protagonistSpecies} onChange={(event) => updateField("protagonistSpecies", event.target.value)} />
-                  {renderAiFieldAction("protagonistSpecies")}
-                </div>
-              </label>
               <label className="span-2">
                 <span>美术方向</span>
-                <div className="ai-field-control">
-                  <textarea rows={4} maxLength={2000} value={settings.artDirection} onChange={(event) => updateField("artDirection", event.target.value)} />
-                  {renderAiFieldAction("artDirection")}
-                </div>
+                <AgentTextArea
+                  agentId={builtInAgentIds.artDirectionWriter}
+                  agentLabel={builtInAgentLabels.artDirectionWriter}
+                  value={settings.artDirection}
+                  onChange={(value) => updateField("artDirection", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("artDirection", agentStatus)}
+                  rows={4}
+                  maxLength={2000}
+                />
               </label>
               <label className="span-2">
                 <span>角色造型硬约束</span>
-                <div className="ai-field-control">
-                  <textarea required rows={4} maxLength={1000} value={settings.characterDesign} onChange={(event) => updateField("characterDesign", event.target.value)} />
-                  {renderAiFieldAction("characterDesign")}
-                </div>
+                <AgentTextArea
+                  agentId={builtInAgentIds.characterDesignWriter}
+                  agentLabel={builtInAgentLabels.characterDesignWriter}
+                  value={settings.characterDesign}
+                  onChange={(value) => updateField("characterDesign", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("characterDesign", agentStatus)}
+                  required
+                  rows={4}
+                  maxLength={1000}
+                />
                 <small>主人公的物种、体型、服装和拟人化程度必须在这里明确。</small>
               </label>
               <label className="span-2">
                 <span>色彩策略</span>
-                <div className="ai-field-control">
-                  <textarea rows={3} maxLength={1000} value={settings.colorPalette} onChange={(event) => updateField("colorPalette", event.target.value)} />
-                  {renderAiFieldAction("colorPalette")}
-                </div>
+                <AgentTextArea
+                  agentId={builtInAgentIds.colorPaletteWriter}
+                  agentLabel={builtInAgentLabels.colorPaletteWriter}
+                  value={settings.colorPalette}
+                  onChange={(value) => updateField("colorPalette", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("colorPalette", agentStatus)}
+                  rows={3}
+                  maxLength={1000}
+                />
               </label>
             </div>
           </section>
@@ -627,17 +686,29 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
             <div className="form-grid">
               <label className="span-2">
                 <span>摄影语言</span>
-                <div className="ai-field-control">
-                  <textarea rows={4} maxLength={2000} value={settings.cameraLanguage} onChange={(event) => updateField("cameraLanguage", event.target.value)} />
-                  {renderAiFieldAction("cameraLanguage")}
-                </div>
+                <AgentTextArea
+                  agentId={builtInAgentIds.cameraLanguageWriter}
+                  agentLabel={builtInAgentLabels.cameraLanguageWriter}
+                  value={settings.cameraLanguage}
+                  onChange={(value) => updateField("cameraLanguage", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("cameraLanguage", agentStatus)}
+                  rows={4}
+                  maxLength={2000}
+                />
               </label>
               <label className="span-2">
                 <span>声音策略</span>
-                <div className="ai-field-control">
-                  <textarea rows={4} maxLength={2000} value={settings.soundStrategy} onChange={(event) => updateField("soundStrategy", event.target.value)} />
-                  {renderAiFieldAction("soundStrategy")}
-                </div>
+                <AgentTextArea
+                  agentId={builtInAgentIds.soundStrategyWriter}
+                  agentLabel={builtInAgentLabels.soundStrategyWriter}
+                  value={settings.soundStrategy}
+                  onChange={(value) => updateField("soundStrategy", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("soundStrategy", agentStatus)}
+                  rows={4}
+                  maxLength={2000}
+                />
               </label>
             </div>
           </section>
@@ -650,16 +721,20 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               <p>作为所有图像提示词的项目级前缀，不包含具体镜头内容。</p>
               </div>
             </div>
-            <div className="ai-field-control">
-              <textarea
-                className="prompt-prefix"
-                rows={6}
-                maxLength={4000}
-                value={settings.imagePromptPrefix}
-                onChange={(event) => updateField("imagePromptPrefix", event.target.value)}
-                placeholder="例如：法式彩色冒险漫画，拟人犬角色，清晰墨线……"
-              />
-              {renderAiFieldAction("imagePromptPrefix")}
+            <div className="form-grid">
+              <div className="span-2">
+                <AgentTextArea
+                  agentId={builtInAgentIds.imagePromptPrefixWriter}
+                  agentLabel={builtInAgentLabels.imagePromptPrefixWriter}
+                  value={settings.imagePromptPrefix}
+                  onChange={(value) => updateField("imagePromptPrefix", value)}
+                  context={settings}
+                  onStatusChange={(agentStatus) => trackTextAgent("imagePromptPrefix", agentStatus)}
+                  rows={6}
+                  maxLength={4000}
+                  placeholder="例如：法式彩色冒险漫画，拟人犬角色，清晰墨线……"
+                />
+              </div>
             </div>
           </section>
 
@@ -751,18 +826,29 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   );
 }
 
+type SourceWorkspaceView = "source" | "analysis" | "script";
+
+function getSourceWorkspacePath(
+  projectId: string,
+  sourceId: string,
+  view: SourceWorkspaceView,
+) {
+  if (view === "script") {
+    return `/projects/${projectId}/script/adaptation/${sourceId}`;
+  }
+  return `/projects/${projectId}/story/${sourceId}/${view === "analysis" ? "material" : "source"}`;
+}
+
 export function SourcePage() {
-  const { projectId = "", sourceEpisodeId } = useParams();
+  const { projectId = "", sourceId, sourceEpisodeId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const workspaceView: "source" | "analysis" | "script" = location.pathname.includes("/story/material")
+  const workspaceView: SourceWorkspaceView = /\/story\/[^/]+\/material\/?$/.test(location.pathname)
     ? "analysis"
     : location.pathname.includes("/script/adaptation") || location.pathname.includes("/script/draft")
       ? "script"
       : "source";
-  const sourceRouteBase = workspaceView === "script"
-    ? `/projects/${projectId}/script/adaptation`
-    : `/projects/${projectId}/story/${workspaceView === "source" ? "source" : "material"}`;
+  const requestedSourceId = sourceId ?? sourceEpisodeId;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [sources, setSources] = useState<ProjectSource[]>([]);
   const [selectedChapterId, setSelectedChapterId] = useState<string>();
@@ -778,6 +864,8 @@ export function SourcePage() {
   const [importMode, setImportMode] = useState<"create" | "append">("create");
   const fileModeRef = useRef<"create" | "append">("create");
   const [analysis, setAnalysis] = useState<StoryMaterialAnalysis | null>(null);
+  const [analysisSourceId, setAnalysisSourceId] = useState<string>();
+  const [analysisErrorSourceId, setAnalysisErrorSourceId] = useState<string>();
   const [script, setScript] = useState<AdaptationScript | null>(null);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings | null>(null);
   const [working, setWorking] = useState<"analysis" | "script" | "append" | "regenerate" | "confirm" | null>(null);
@@ -789,15 +877,18 @@ export function SourcePage() {
       .then((items) => {
         setSources(items);
         setError("");
-        const requested = items.find((item) => item.id === sourceEpisodeId);
+        const requested = items.find((item) => item.id === requestedSourceId);
         const first = requested ?? items[0];
         if (first) {
           setSelectedChapterId(first.chapters[0]?.id);
-          if (!requested) {
-            navigate(`${sourceRouteBase}/${first.id}`, { replace: true });
+          const canonicalPath = getSourceWorkspacePath(projectId, first.id, workspaceView);
+          if (!requested || location.pathname !== canonicalPath) {
+            navigate(canonicalPath, { replace: true });
           }
-        } else if (sourceEpisodeId) {
-          navigate(sourceRouteBase, { replace: true });
+        } else if (requestedSourceId) {
+          navigate(workspaceView === "script"
+            ? `/projects/${projectId}/script/adaptation`
+            : `/projects/${projectId}/story`, { replace: true });
         }
       })
       .catch((loadError: unknown) => {
@@ -809,9 +900,9 @@ export function SourcePage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [navigate, projectId, sourceEpisodeId, sourceRouteBase]);
+  }, [location.pathname, navigate, projectId, requestedSourceId, workspaceView]);
 
-  const activeSource = sources.find((item) => item.id === sourceEpisodeId) ?? sources[0];
+  const activeSource = sources.find((item) => item.id === requestedSourceId) ?? sources[0];
   const selectedChapter = activeSource?.chapters.find((item) => item.id === selectedChapterId)
     ?? activeSource?.chapters[0];
   const normalizedSearch = search.trim().toLocaleLowerCase();
@@ -820,6 +911,11 @@ export function SourcePage() {
     || chapter.title.toLocaleLowerCase().includes(normalizedSearch)
     || chapter.content.toLocaleLowerCase().includes(normalizedSearch)) ?? [];
   const activeSourceId = activeSource?.id;
+  const analysisLoadState = analysisSourceId === activeSourceId
+    ? "ready"
+    : analysisErrorSourceId === activeSourceId
+      ? "error"
+      : "loading";
 
   useEffect(() => () => analysisControllerRef.current?.abort(), [activeSourceId, selectedChapterId]);
 
@@ -832,10 +928,13 @@ export function SourcePage() {
       getProjectSettings(projectId, controller.signal),
     ]).then(([loadedAnalysis, loadedScript, loadedSettings]) => {
       setAnalysis(loadedAnalysis);
+      setAnalysisSourceId(activeSourceId);
+      setAnalysisErrorSourceId(undefined);
       setScript(loadedScript);
       setProjectSettings(loadedSettings);
     }).catch((loadError: unknown) => {
       if (!controller.signal.aborted) {
+        setAnalysisErrorSourceId(activeSourceId);
         setError(loadError instanceof Error ? loadError.message : "故事开发资料加载失败。");
       }
     });
@@ -844,7 +943,7 @@ export function SourcePage() {
 
   const selectSource = (source: ProjectSource) => {
     setSelectedChapterId(source.chapters[0]?.id);
-    navigate(`${sourceRouteBase}/${source.id}`);
+    navigate(getSourceWorkspacePath(projectId, source.id, workspaceView));
   };
 
   const openImport = (mode: "create" | "append" = "create") => {
@@ -900,7 +999,7 @@ export function SourcePage() {
         });
       }
       setImportOpen(false);
-      navigate(`/projects/${projectId}/story/source/${source.id}`);
+      navigate(getSourceWorkspacePath(projectId, source.id, "source"));
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : "原文资料导入失败。");
     } finally {
@@ -1006,49 +1105,50 @@ export function SourcePage() {
   };
 
   return (
-    <div className="page full-height-page">
-      <PageTitle
-        title={workspaceView === "source" ? "原文资料" : workspaceView === "analysis" ? "素材图谱" : "改编方案"}
-        action={workspaceView === "source" ? (
-          <div className="button-group">
-            <input
-              ref={fileInputRef}
-              className="visually-hidden"
-              type="file"
-              accept=".txt,.md,.markdown,text/plain,text/markdown"
-              onChange={(event) => void chooseFile(event.target.files?.[0])}
-            />
-            <button className="secondary-button" type="button" onClick={() => {
-              fileModeRef.current = activeSource ? "append" : "create";
-              fileInputRef.current?.click();
-            }}>
-              <Upload size={14} />
-              {activeSource ? "上传追加" : "上传文本"}
-            </button>
-            {activeSource && (
-              <button className="secondary-button" type="button" onClick={() => openImport("create")}>
-                <Plus size={14} />新建资料
-              </button>
-            )}
-            <button className="primary-button" type="button" onClick={() => openImport(activeSource ? "append" : "create")}>
-              <Plus size={14} />
-              {activeSource ? "追加章节" : "粘贴原文"}
-            </button>
-          </div>
-        ) : undefined}
-      />
+    <div className={`page full-height-page${workspaceView === "analysis" ? " material-page" : ""}`}>
+      {workspaceView === "source" && (
+        <input
+          ref={fileInputRef}
+          className="visually-hidden"
+          type="file"
+          accept=".txt,.md,.markdown,text/plain,text/markdown"
+          onChange={(event) => void chooseFile(event.target.files?.[0])}
+        />
+      )}
+      {workspaceView === "script" && (
+        <PageTitle title="改编方案" />
+      )}
       {workspaceView === "script" && (
         <ScriptStageTabs projectId={projectId} active="adaptation" />
       )}
       {sources.length > 0 && workspaceView !== "script" && (
-        <div className="story-stage-tabs" role="tablist" aria-label="原文开发视图">
-          <button className={workspaceView === "source" ? "active" : ""} type="button" role="tab" aria-selected={workspaceView === "source"} onClick={() => navigate(`/projects/${projectId}/story/source/${activeSource?.id ?? ""}`)}>
-            <span>01</span><strong>原文章节</strong>
-          </button>
-          <button className={workspaceView === "analysis" ? "active" : ""} type="button" role="tab" aria-selected={workspaceView === "analysis"} onClick={() => navigate(`/projects/${projectId}/story/material/${activeSource?.id ?? ""}`)}>
-            <span>02</span><strong>素材图谱</strong>
-          </button>
-        </div>
+        <Tabs
+          className={`story-view-tabs${workspaceView === "source" ? " with-actions" : ""}`}
+          size="small"
+          activeKey={workspaceView}
+          items={[
+            { key: "source", label: "原文章节" },
+            { key: "analysis", label: "素材图谱" },
+          ]}
+          onChange={(key) => {
+            if (activeSource) {
+              navigate(getSourceWorkspacePath(projectId, activeSource.id, key === "source" ? "source" : "analysis"));
+            }
+          }}
+          tabBarExtraContent={workspaceView === "source" ? (
+            <div className="button-group">
+              <button className="secondary-button" type="button" onClick={() => {
+                fileModeRef.current = "append";
+                fileInputRef.current?.click();
+              }}>
+                <Upload size={14} />上传追加
+              </button>
+              <button className="primary-button" type="button" onClick={() => openImport("append")}>
+                <Plus size={14} />追加章节
+              </button>
+            </div>
+          ) : undefined}
+        />
       )}
       {error && !importOpen && <div className="settings-error">{error}</div>}
       {loading ? (
@@ -1091,17 +1191,31 @@ export function SourcePage() {
               </label>
             )}
             <div className="tree-group">
-              {filteredChapters.map((chapter) => (
-                <button
-                  type="button"
-                  className={selectedChapter?.id === chapter.id ? "tree-section active" : "tree-section"}
-                  onClick={() => setSelectedChapterId(chapter.id)}
-                  key={chapter.id}
-                >
-                  <span>{String(chapter.number).padStart(2, "0")}</span>
-                  <strong title={chapter.title}>{chapter.title}</strong>
-                </button>
-              ))}
+              {filteredChapters.map((chapter) => {
+                const isAnalyzed = analysis?.analyzedChapterIds?.includes(chapter.id) ?? false;
+                const status = analysisLoadState === "loading"
+                  ? { className: "loading", label: "读取中" }
+                  : analysisLoadState === "error"
+                    ? { className: "unknown", label: "未知" }
+                    : isAnalyzed
+                      ? { className: "analyzed", label: "已分析" }
+                      : { className: "pending", label: "未分析" };
+                return (
+                  <button
+                    type="button"
+                    className={selectedChapter?.id === chapter.id ? "tree-section active" : "tree-section"}
+                    onClick={() => setSelectedChapterId(chapter.id)}
+                    key={chapter.id}
+                  >
+                    <span className="tree-section-number">{String(chapter.number).padStart(2, "0")}</span>
+                    <strong title={chapter.title}>{chapter.title}</strong>
+                    <span className={`tree-analysis-status ${status.className}`} title={`分析状态：${status.label}`}>
+                      {isAnalyzed && analysisLoadState === "ready" && <Check size={10} />}
+                      {status.label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </aside>
           <article className="reader">
@@ -1133,7 +1247,6 @@ export function SourcePage() {
         </div>
       ) : workspaceView === "analysis" ? (
         <StoryMaterialWorkspace
-          projectId={projectId}
           source={activeSource}
           analysis={analysis}
         />
@@ -1187,11 +1300,9 @@ export function SourcePage() {
 }
 
 function StoryMaterialWorkspace({
-  projectId,
   source,
   analysis,
 }: {
-  projectId: string;
   source?: ProjectSource;
   analysis: StoryMaterialAnalysis | null;
 }) {
@@ -1206,21 +1317,7 @@ function StoryMaterialWorkspace({
   }
 
   return (
-    <div className="development-workspace">
-      <header>
-        <div>
-          <span className="eyebrow">素材图谱 / 来源 v{analysis.sourceVersion}</span>
-        </div>
-        <div className="button-group">
-          <VersionPicker compact projectId={projectId} assetId={analysis.assetId} label="素材分析版本" />
-          <span className="status-chip">
-            已分析 {analysis.analyzedChapterIds?.length ?? 0}/{source?.chapterCount ?? 0} 章
-          </span>
-          <span className={analysis.isStale ? "status-chip warning" : "status-chip"}>
-            {analysis.isStale ? "原文已有新版本" : "与当前原文同步"}
-          </span>
-        </div>
-      </header>
+    <div className="development-workspace material-development-workspace">
       {analysis.isStale && <div className="development-warning">{analysis.staleReason} 既有剧本不会自动变化。</div>}
       <section className="relation-graph-section">
         <div className="relation-graph-heading">
@@ -1267,6 +1364,7 @@ function AdaptationScriptWorkspace({
   const [activeEpisodeNumber, setActiveEpisodeNumber] = useState(1);
   const [regenerateEpisodeNumber, setRegenerateEpisodeNumber] = useState<number | null>(null);
   const [regenerateInstruction, setRegenerateInstruction] = useState("");
+  const hasFixedEpisodeCount = plannedEpisodeCount !== undefined && plannedEpisodeCount >= 1;
 
   if (!analysis) {
     return (
@@ -1281,10 +1379,10 @@ function AdaptationScriptWorkspace({
     return (
       <div className="source-empty-state development-empty-state">
         <span className="eyebrow">改编草案 / 来源 v{analysis.sourceVersion}</span>
-        <h2>按项目设定规划{plannedEpisodeCount ? ` ${plannedEpisodeCount} ` : ""}集</h2>
+        <h2>{hasFixedEpisodeCount ? `按项目设定规划 ${plannedEpisodeCount} 集` : "按剧本内容规划"}</h2>
         <p>模型会从素材图谱提取原故事主线，按网剧节奏删减支线、合并事件并补充必要连接，输出新的主线和分集大纲。此阶段不写正式对白和镜头。</p>
         <button className="primary-button" type="button" disabled={working !== null || analysis.isStale} onClick={onGenerate}>
-          <WandSparkles size={14} />{working === "script" ? "生成中" : analysis.isStale ? "请先分析新增章节" : `生成${plannedEpisodeCount ? `${plannedEpisodeCount}集` : "完整"}草案`}
+          <WandSparkles size={14} />{working === "script" ? "生成中" : analysis.isStale ? "请先分析新增章节" : `生成${hasFixedEpisodeCount ? `${plannedEpisodeCount}集` : "完整"}草案`}
         </button>
       </div>
     );
@@ -1322,7 +1420,7 @@ function AdaptationScriptWorkspace({
           {script.status === "draft" && (
             <>
               <button className="secondary-button" type="button" disabled={working !== null} onClick={onGenerate}>
-                <WandSparkles size={13} />{working === "script" ? "重新生成中" : `按设定重新生成${plannedEpisodeCount ? ` ${plannedEpisodeCount} 集` : "全部"}`}
+                <WandSparkles size={13} />{working === "script" ? "重新生成中" : `按设定重新生成${hasFixedEpisodeCount ? ` ${plannedEpisodeCount} 集` : "全部"}`}
               </button>
               <button className="secondary-button" type="button" disabled={working !== null || script.episodes.length >= 6} onClick={onAppend}>
                 <Plus size={13} />{working === "append" ? "添加中" : "添加剧集"}

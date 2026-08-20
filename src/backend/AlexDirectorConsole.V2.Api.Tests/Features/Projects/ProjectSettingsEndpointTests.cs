@@ -32,6 +32,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.NotNull(settings);
         Assert.Equal(0, settings.Version);
         Assert.Equal("三个火枪手", settings.ProjectName);
+        Assert.Equal(-1, settings.PlannedEpisodeCount);
         Assert.Equal("16:9", settings.AspectRatio);
         Assert.Equal(1920, settings.OutputWidth);
         Assert.Equal(1080, settings.OutputHeight);
@@ -72,6 +73,8 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Single(assets.Select(item => item.ResourceId).Distinct());
         Assert.Single(assets.Select(item => item.Number).Distinct());
         Assert.Equal(assets[1].Id, project.CurrentCreativeSettingsId);
+        Assert.All(assets, asset => Assert.Equal(2, asset.SchemaVersion));
+        Assert.All(assets, asset => Assert.DoesNotContain("protagonistSpecies", asset.DocumentJson));
     }
 
     [Fact]
@@ -152,6 +155,16 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Equal([2, 1], versions?.Select(item => item.Version));
         Assert.True(versions?[0].IsCurrent);
 
+        var historicalVersion = await client.GetFromJsonAsync<ResourceVersionDetailView>(
+            $"/api/v2/projects/{projectId}/assets/{second.AssetId}/versions/{first.AssetId}");
+        Assert.NotNull(historicalVersion);
+        Assert.Equal(1, historicalVersion.Version);
+        Assert.False(historicalVersion.IsCurrent);
+        using var historicalDocument = JsonDocument.Parse(historicalVersion.DocumentJson!);
+        Assert.Equal(
+            "欧式冒险漫画",
+            historicalDocument.RootElement.GetProperty("visualStyle").GetString());
+
         var switchResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/assets/{second.AssetId}/versions/current",
             new { assetId = first.AssetId });
@@ -188,6 +201,41 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         Assert.False(await dbContext.Assets.AnyAsync(item => item.ProjectId == projectId));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-2)]
+    public async Task Invalid_planned_episode_count_returns_400(int plannedEpisodeCount)
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var request = ValidSettings("欧式冒险漫画") with
+        {
+            PlannedEpisodeCount = plannedEpisodeCount
+        };
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Automatic_planned_episode_count_can_be_saved()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var request = ValidSettings("欧式冒险漫画") with { PlannedEpisodeCount = -1 };
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            request);
+
+        response.EnsureSuccessStatusCode();
+        var settings = await response.Content.ReadFromJsonAsync<ProjectSettingsResponse>();
+        Assert.Equal(-1, settings?.PlannedEpisodeCount);
     }
 
     [Fact]
@@ -322,11 +370,10 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         var tool = scope.ServiceProvider.GetRequiredService<IProjectSettingsToolService>();
         var updated = await tool.UpdateAsync(
             projectId,
-            """{"protagonistSpecies":"拟人牛","characterDesign":"三位主人公均为拟人牛。","imagePromptPrefix":"法式彩色冒险漫画，拟人牛主角。"}""",
+            """{"characterDesign":"三位主人公均为拟人牛。","imagePromptPrefix":"法式彩色冒险漫画，拟人牛主角。"}""",
             CancellationToken.None);
 
         Assert.Equal(2, updated.Version);
-        Assert.Equal("拟人牛", updated.ProtagonistSpecies);
         Assert.Equal("三位主人公均为拟人牛。", updated.CharacterDesign);
         Assert.Equal("法式彩色冒险漫画，拟人牛主角。", updated.ImagePromptPrefix);
         Assert.Equal("法式彩色冒险漫画", updated.VisualStyle);
@@ -388,7 +435,6 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         1080,
         visualStyle,
         "17 世纪法国质感与清晰墨线",
-        "犬类",
         "所有主人公均为拟人犬，保留犬种轮廓与佩剑服装。",
         "宝石红、法国蓝、羊皮纸金",
         "动态漫画构图与低机位英雄镜头",
@@ -409,7 +455,6 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         int OutputHeight,
         string VisualStyle,
         string ArtDirection,
-        string ProtagonistSpecies,
         string CharacterDesign,
         string ColorPalette,
         string CameraLanguage,
@@ -420,6 +465,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Guid ProjectId,
         int Version,
         string ProjectName,
+        int PlannedEpisodeCount,
         string AspectRatio,
         int OutputWidth,
         int OutputHeight,

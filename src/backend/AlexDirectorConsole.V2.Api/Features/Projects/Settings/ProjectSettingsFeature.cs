@@ -22,7 +22,6 @@ public sealed record ProjectSettingsView(
     int OutputHeight,
     string VisualStyle,
     string ArtDirection,
-    string ProtagonistSpecies,
     string CharacterDesign,
     string ColorPalette,
     string CameraLanguage,
@@ -102,7 +101,6 @@ public sealed record SaveProjectSettingsCommand(
     int OutputHeight,
     string? VisualStyle,
     string? ArtDirection,
-    string? ProtagonistSpecies,
     string? CharacterDesign,
     string? ColorPalette,
     string? CameraLanguage,
@@ -170,7 +168,7 @@ public sealed class SaveProjectSettingsCommandHandler(
             Number = assetNumber,
             Type = ProjectSettingsDefaults.AssetType,
             Name = $"项目设定 v{version}",
-            SchemaVersion = 1,
+            SchemaVersion = ProjectSettingsDefaults.SchemaVersion,
             DocumentJson = documentJson,
             ContentType = "application/json",
             SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
@@ -231,7 +229,6 @@ public sealed class SaveProjectSettingsCommandHandler(
         AddTextError(errors, "contentType", command.ContentType, 80, "请选择片型。");
         AddTextError(errors, "targetAudience", command.TargetAudience, 300, "请输入目标受众。");
         AddTextError(errors, "visualStyle", command.VisualStyle, 200, "请输入视觉风格。");
-        AddTextError(errors, "protagonistSpecies", command.ProtagonistSpecies, 200, "请输入主角物种设定。");
         AddTextError(errors, "characterDesign", command.CharacterDesign, 1000, "请输入角色造型规则。");
         if ((command.Description?.Trim().Length ?? 0) > 4000) errors["description"] = ["项目简介不能超过 4000 字符。"];
         if ((command.ArtDirection?.Trim().Length ?? 0) > 2000) errors["artDirection"] = ["美术方向不能超过 2000 字符。"];
@@ -239,7 +236,8 @@ public sealed class SaveProjectSettingsCommandHandler(
         if ((command.CameraLanguage?.Trim().Length ?? 0) > 2000) errors["cameraLanguage"] = ["摄影语言不能超过 2000 字符。"];
         if ((command.SoundStrategy?.Trim().Length ?? 0) > 2000) errors["soundStrategy"] = ["声音策略不能超过 2000 字符。"];
         if ((command.ImagePromptPrefix?.Trim().Length ?? 0) > 4000) errors["imagePromptPrefix"] = ["图像提示词前缀不能超过 4000 字符。"];
-        if (command.PlannedEpisodeCount is < 1 or > 1000) errors["plannedEpisodeCount"] = ["计划集数必须在 1 到 1000 之间。"];
+        if (command.PlannedEpisodeCount != -1 && command.PlannedEpisodeCount is < 1 or > 1000)
+            errors["plannedEpisodeCount"] = ["计划集数必须为 -1，或 1 到 1000 之间的整数。"];
         if (command.TargetEpisodeSeconds is < 1 or > 86400) errors["targetEpisodeSeconds"] = ["单集时长必须在 1 到 86400 秒之间。"];
         if (command.AspectRatio is not ("16:9" or "9:16" or "2.39:1")) errors["aspectRatio"] = ["请选择支持的画幅比例。"];
         if (command.OutputWidth is < 64 or > 8192 || command.OutputHeight is < 64 or > 8192) errors["resolution"] = ["输出尺寸必须在 64 到 8192 像素之间。"];
@@ -270,7 +268,6 @@ public sealed record SaveProjectSettingsRequest(
     int OutputHeight,
     string? VisualStyle,
     string? ArtDirection,
-    string? ProtagonistSpecies,
     string? CharacterDesign,
     string? ColorPalette,
     string? CameraLanguage,
@@ -312,7 +309,6 @@ public static class ProjectSettingsEndpoints
                     request.OutputHeight,
                     request.VisualStyle,
                     request.ArtDirection,
-                    request.ProtagonistSpecies,
                     request.CharacterDesign,
                     request.ColorPalette,
                     request.CameraLanguage,
@@ -456,7 +452,6 @@ internal sealed record ProjectSettingsDocument(
     int OutputHeight,
     string VisualStyle,
     string ArtDirection,
-    string ProtagonistSpecies,
     string CharacterDesign,
     string ColorPalette,
     string CameraLanguage,
@@ -475,7 +470,6 @@ internal sealed record ProjectSettingsDocument(
         command.OutputHeight,
         command.VisualStyle!.Trim(),
         command.ArtDirection?.Trim() ?? string.Empty,
-        command.ProtagonistSpecies!.Trim(),
         command.CharacterDesign!.Trim(),
         command.ColorPalette?.Trim() ?? string.Empty,
         command.CameraLanguage?.Trim() ?? string.Empty,
@@ -502,7 +496,6 @@ internal sealed record ProjectSettingsDocument(
         OutputHeight,
         VisualStyle,
         ArtDirection,
-        ProtagonistSpecies,
         CharacterDesign,
         ColorPalette,
         CameraLanguage,
@@ -517,6 +510,7 @@ internal sealed record ProjectSettingsDocument(
 internal static class ProjectSettingsDefaults
 {
     public const string AssetType = "creative-settings";
+    public const int SchemaVersion = 2;
     public static JsonSerializerOptions JsonOptions { get; } = new(JsonSerializerDefaults.Web);
 
     public static ProjectSettingsView ForProject(Project project) => new(
@@ -526,14 +520,13 @@ internal static class ProjectSettingsDefaults
         project.Description ?? string.Empty,
         "动画短剧",
         "全年龄冒险故事观众",
-        3,
+        -1,
         100,
         "16:9",
         1920,
         1080,
         "电影感漫画",
         string.Empty,
-        "拟人动物",
         string.Empty,
         string.Empty,
         string.Empty,

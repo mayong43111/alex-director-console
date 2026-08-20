@@ -20,6 +20,14 @@ function LegacyAdaptationRedirect() {
   return <Navigate to={`/projects/${projectId}/script/adaptation${sourceEpisodeId ? `/${sourceEpisodeId}` : ''}`} replace />
 }
 
+function LegacyStoryRedirect({ view = 'source' }: { view?: 'source' | 'material' }) {
+  const { projectId = '', sourceEpisodeId } = useParams()
+  const target = sourceEpisodeId
+    ? `/projects/${projectId}/story/${sourceEpisodeId}/${view}`
+    : `/projects/${projectId}/story`
+  return <Navigate to={target} replace />
+}
+
 export default function App() {
   return (
     <Routes>
@@ -29,15 +37,22 @@ export default function App() {
         <Route path="/settings/agents" element={<AgentsPage />} />
         <Route path="/settings/skills" element={<SkillsPage />} />
         <Route path="/settings/sessions" element={<SessionsPage />} />
+        <Route path="/projects/:projectId/settings/services" element={<ServicesPage />} />
+        <Route path="/projects/:projectId/settings/agents" element={<AgentsPage />} />
+        <Route path="/projects/:projectId/settings/skills" element={<SkillsPage />} />
+        <Route path="/projects/:projectId/settings/sessions" element={<SessionsPage />} />
       </Route>
       <Route path="/projects/:projectId" element={<AppShell />}>
         <Route path="overview" element={<Navigate to="../settings" replace />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="story/source/:sourceEpisodeId?" element={<SourcePage />} />
-        <Route path="story/material/:sourceEpisodeId?" element={<SourcePage />} />
+        <Route path="story" element={<SourcePage />} />
+        <Route path="story/:sourceId/source" element={<SourcePage />} />
+        <Route path="story/:sourceId/material" element={<SourcePage />} />
+        <Route path="story/source/:sourceEpisodeId?" element={<LegacyStoryRedirect />} />
+        <Route path="story/material/:sourceEpisodeId?" element={<LegacyStoryRedirect view="material" />} />
         <Route path="story/adaptation/:sourceEpisodeId?" element={<LegacyAdaptationRedirect />} />
-        <Route path="story/outline" element={<Navigate to="../source" replace />} />
-        <Route path="story/chapters" element={<Navigate to="../source" replace />} />
+        <Route path="story/outline" element={<LegacyStoryRedirect />} />
+        <Route path="story/chapters" element={<LegacyStoryRedirect />} />
         <Route path="assets/:assetType" element={<AssetsPage />} />
         <Route path="script/adaptation/:sourceEpisodeId?" element={<SourcePage />} />
         <Route path="script/draft/:sourceEpisodeId?" element={<LegacyAdaptationRedirect />} />

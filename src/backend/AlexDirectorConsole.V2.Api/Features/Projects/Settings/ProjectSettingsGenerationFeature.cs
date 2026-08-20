@@ -493,7 +493,6 @@ public sealed class MafProjectSettingsAssistant(
         {
             ["description"] = ("项目描述", 4000),
             ["visualStyle"] = ("视觉风格", 200),
-            ["protagonistSpecies"] = ("主角物种", 200),
             ["artDirection"] = ("美术方向", 2000),
             ["characterDesign"] = ("角色造型硬约束", 1000),
             ["colorPalette"] = ("色彩策略", 1000),

@@ -374,7 +374,7 @@ export function DemoPage({ title }: { title: string }) {
         <span className="eyebrow">DEMO / 尚未接入真实数据</span>
         <h1>{title}</h1>
         <p>该阶段不属于当前一级实现。页面已停止展示演示数据，完成正式接口和版本语义前不可操作。</p>
-        <Link className="primary-button" to={`/projects/${projectId}/story/source`}>
+        <Link className="primary-button" to={`/projects/${projectId}/story`}>
           返回当前制作主线
         </Link>
       </div>

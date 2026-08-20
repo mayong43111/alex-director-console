@@ -14,6 +14,7 @@ export type AgentTextAreaStatus = "idle" | "loading" | "review";
 
 export type AgentTextAreaProps = Omit<TextAreaProps, "value" | "onChange"> & {
   agentId: string;
+  agentLabel?: string;
   value: string;
   onChange: (value: string) => void;
   context?: unknown;
@@ -23,6 +24,7 @@ export type AgentTextAreaProps = Omit<TextAreaProps, "value" | "onChange"> & {
 
 export function AgentTextArea({
   agentId,
+  agentLabel = "Agent",
   value,
   onChange,
   context,
@@ -104,8 +106,8 @@ export function AgentTextArea({
             type="button"
             onClick={generateCandidate}
             disabled={disabled || invokeDisabled || loading}
-            title="调用 Agent"
-            aria-label="调用 Agent"
+            title={`调用${agentLabel}`}
+            aria-label={`调用${agentLabel}`}
           >
             {loading ? <span className="spinner" /> : <WandSparkles size={15} />}
           </button>

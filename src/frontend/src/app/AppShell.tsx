@@ -1,26 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Badge, Button, Dropdown, Tag, Tooltip, type MenuProps } from "antd";
+import { Button, Dropdown, Tag, Tooltip, type MenuProps } from "antd";
 import {
-  Link,
   Outlet,
   useLocation,
   useNavigate,
   useParams,
 } from "react-router-dom";
 import {
-  AudioLines,
-  Bell,
-  BookOpenText,
   Bot,
-  Boxes,
   ChevronDown,
   Clapperboard,
-  Film,
-  Gauge,
   LayoutDashboard,
-  Search,
-  SlidersHorizontal,
-  Sparkles,
   X,
 } from "lucide-react";
 import { project } from "../data/mockData";
@@ -33,26 +23,13 @@ import {
 } from "../api/projects";
 import { assistantDirectorAgent } from "../api/sessions";
 import { AssistantDirectorPanel } from "../components/AssistantDirectorPanel";
+import { ProjectRailNavigation } from "../navigation/ProjectRailNavigation";
+import { projectNavigation } from "../navigation/projectNavigation";
 import {
   AppLayout,
   StandardWorkspaceLayout,
   TitledWorkspaceLayout,
 } from "../layouts";
-
-const navigation = [
-  { label: "设定", icon: SlidersHorizontal, to: "settings" },
-  { label: "故事", icon: BookOpenText, to: "story/source" },
-  { label: "剧本", icon: Film, to: "script" },
-  { label: "资产", icon: Boxes, to: "assets/characters" },
-  { label: "音频素材", icon: AudioLines, to: "assets/audio" },
-  {
-    label: "分镜",
-    icon: Clapperboard,
-    to: "storyboard",
-  },
-  { label: "生产", icon: Gauge, to: "production" },
-  { label: "审阅", icon: Sparkles, to: "review" },
-];
 
 type Workflow = {
   label: string;
@@ -70,19 +47,22 @@ function getWorkflow(
     return {
       label: "项目设定",
       tabs: [],
-      next: { label: "导入原文资料", to: `${projectBase}/story/source` },
+      next: { label: "导入原文资料", to: `${projectBase}/story` },
     };
   }
-  if (pathname.includes("/story/")) {
-    const next = pathname.includes("/story/source")
-      ? { label: "分析素材图谱", to: `${projectBase}/story/material` }
-      : { label: "建立改编方案", to: `${projectBase}/script/adaptation` };
+  if (pathname === `${projectBase}/story` || pathname.startsWith(`${projectBase}/story/`)) {
+    const [sourceId, view] = pathname
+      .slice(`${projectBase}/story`.length)
+      .split("/")
+      .filter(Boolean);
+    const next = sourceId && view === "source"
+      ? { label: "分析素材图谱", to: `${projectBase}/story/${sourceId}/material` }
+      : sourceId && view === "material"
+        ? { label: "建立改编方案", to: `${projectBase}/script/adaptation/${sourceId}` }
+        : undefined;
     return {
-      label: "故事",
-      tabs: [
-        { label: "原文资料", to: `${projectBase}/story/source` },
-        { label: "素材图谱", to: `${projectBase}/story/material` },
-      ],
+      label: view === "material" ? "素材图谱" : view === "source" ? "原文资料" : "故事",
+      tabs: [],
       next,
     };
   }
@@ -228,10 +208,6 @@ export function AppShell() {
     };
   }, [projectId]);
   useEffect(() => {
-    sessionStorage.setItem(
-      "alex-director-v2.lastProjectPath",
-      location.pathname,
-    );
     mainCanvasRef.current?.scrollTo({ top: 0, left: 0 });
   }, [location.pathname]);
   useEffect(() => {
@@ -301,21 +277,15 @@ export function AppShell() {
   const routingEpisode = currentEpisode;
   const projectBase = `/projects/${projectId}`;
   const workflow = getWorkflow(location.pathname, projectBase, routingEpisode);
-  const scopedNavigation = navigation.map((item) => ({
-    ...item,
-    to: item.to.replace("production-e01", routingEpisode),
-  }));
-  const primaryNavigation = scopedNavigation.filter(
-    (item) => item.to !== "settings",
-  );
-  const settingsNavigation = scopedNavigation.find(
-    (item) => item.to === "settings",
-  );
   const activeRoot = location.pathname
     .slice(projectBase.length + 1)
     .split("/")[0];
-  const active = navigation.find(
-    (item) => item.to.split("/")[0] === activeRoot,
+  const activeNavigationKey = activeRoot === "assets"
+    && location.pathname.startsWith(`${projectBase}/assets/audio`)
+    ? "audio"
+    : activeRoot;
+  const active = projectNavigation.find(
+    (item) => item.key === activeNavigationKey,
   );
 
   const switchProject = (nextProject: ProjectRecord) => {
@@ -388,83 +358,28 @@ export function AppShell() {
         </>
       }
       headerActions={
-        <>
-          <Button className="command-search" icon={<Search size={15} />}>
-            搜索或执行命令 <kbd>⌘ K</kbd>
-          </Button>
-          <Badge className="header-notifications" count={3} size="small">
-            <Tooltip title="任务通知">
-              <Button
-                type="text"
-                icon={<Bell size={17} />}
-                aria-label="任务通知"
-              />
-            </Tooltip>
-          </Badge>
-          <Tooltip title={agentOpen ? "收起副导演" : "展开副导演"}>
-            <Button
-              className="header-agent-button"
-              type={agentOpen ? "primary" : "default"}
-              icon={<Bot size={16} />}
-              aria-label="副导演"
-              aria-expanded={agentOpen}
-              onClick={() => updateAgentOpen(!agentOpen)}
-            />
-          </Tooltip>
-        </>
+        <Tooltip title={agentOpen ? "收起副导演" : "展开副导演"}>
+          <Button
+            className="header-agent-button"
+            type={agentOpen ? "primary" : "default"}
+            icon={<Bot size={16} />}
+            aria-label="副导演"
+            aria-expanded={agentOpen}
+            onClick={() => updateAgentOpen(!agentOpen)}
+          />
+        </Tooltip>
       }
     >
       <StandardWorkspaceLayout
         agentOverlay={isAgentOverlay}
         onCloseAgent={() => updateAgentOpen(false)}
-        navigation={
-          <>
-            <nav className="director-rail-nav">
-              {primaryNavigation.map(({ label, icon: Icon, to }) => {
-                const target = `${projectBase}/${to}`;
-                const isActive = to.split("/")[0] === activeRoot;
-                return (
-                  <Tooltip title={label} placement="right" key={target}>
-                    <Link
-                      to={target}
-                      className={`director-rail-link ${isActive ? "active" : ""}`}
-                      aria-label={label}
-                      aria-current={isActive ? "page" : undefined}
-                    >
-                      <Icon size={19} strokeWidth={1.8} />
-                      <span>{label}</span>
-                    </Link>
-                  </Tooltip>
-                );
-              })}
-            </nav>
-            <div className="director-rail-footer">
-              {settingsNavigation && (
-                <Tooltip title="项目设定" placement="right">
-                  <Link
-                    to={`${projectBase}/${settingsNavigation.to}`}
-                    className={`director-rail-link ${activeRoot === "settings" ? "active" : ""}`}
-                    aria-label="项目设定"
-                    aria-current={
-                      activeRoot === "settings" ? "page" : undefined
-                    }
-                  >
-                    <settingsNavigation.icon size={19} strokeWidth={1.8} />
-                    <span>项目设定</span>
-                  </Link>
-                </Tooltip>
-              )}
-              <Tooltip title="服务正常 · 4 / 4" placement="right">
-                <div
-                  className="director-rail-status"
-                  aria-label="服务正常，4 / 4"
-                >
-                  <Badge status="success" />
-                </div>
-              </Tooltip>
-            </div>
-          </>
-        }
+        navigation={(
+          <ProjectRailNavigation
+            activeKey={activeNavigationKey}
+            projectBase={projectBase}
+            productionEpisodeId={routingEpisode}
+          />
+        )}
         agent={
           agentOpen ? (
             <AssistantDirectorPanel
@@ -478,16 +393,6 @@ export function AppShell() {
                 episode: currentEpisodeData
                   ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
                   : "未创建",
-                context: [
-                  { label: "项目", value: projectName },
-                  { label: "页面", value: active?.label ?? "驾驶舱" },
-                  {
-                    label: "生产集",
-                    value: currentEpisodeData
-                      ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
-                      : "未创建",
-                  },
-                ],
               }}
               onClose={() => updateAgentOpen(false)}
             />
@@ -501,12 +406,8 @@ export function AppShell() {
           pathname={location.pathname}
           tabs={workflow?.tabs}
           contentRef={mainCanvasRef}
-          status={
-            <>
-              <span className="online-dot" />
-              <span>工作区已同步</span>
-            </>
-          }
+          saveFormId={location.pathname.endsWith("/settings") ? "project-settings-form" : undefined}
+          compact
         >
           <Outlet />
         </TitledWorkspaceLayout>

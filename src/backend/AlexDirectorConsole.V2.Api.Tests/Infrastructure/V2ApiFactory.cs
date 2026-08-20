@@ -214,13 +214,16 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         public Task<AdaptationScriptResult> WriteAsync(
             ProjectSettingsView projectSettings,
             StoryMaterialAnalysisView analysis,
-            int desiredEpisodeCount,
+            int? desiredEpisodeCount,
             string? instruction,
-            CancellationToken cancellationToken) => Task.FromResult(
+            CancellationToken cancellationToken)
+        {
+            var episodeCount = desiredEpisodeCount ?? Math.Clamp(analysis.PlotBeats.Count, 1, 6);
+            return Task.FromResult(
                 new AdaptationScriptResult(
                     "初到巴黎",
                     "合并前两章并以得到接见作为单集收束。",
-                    Enumerable.Range(1, desiredEpisodeCount).Select(number => new AdaptationEpisodeDraft(
+                    Enumerable.Range(1, episodeCount).Select(number => new AdaptationEpisodeDraft(
                         number,
                         $"年轻人的推荐信 {number}",
                         "达达尼昂带着推荐信闯入巴黎火枪手世界。",
@@ -259,6 +262,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     "Test Harness",
                     ["三集持续升级达达尼昂的入局压力"],
                     ["最终揭示阴谋指向王后"]));
+        }
 
         public Task<ProductionScriptEpisodeDraft> WriteProductionScriptAsync(
             ProjectSettingsView projectSettings,

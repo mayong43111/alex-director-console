@@ -373,7 +373,7 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Script_draft_uses_project_episode_count_and_appends_without_rewriting_existing_episodes()
+    public async Task Script_draft_automatically_plans_episode_count_and_appends_without_rewriting_existing_episodes()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
@@ -399,7 +399,7 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         generateResponse.EnsureSuccessStatusCode();
         var draft = await generateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
         Assert.NotNull(draft);
-        Assert.Equal(3, draft.Episodes.Count);
+        Assert.Equal(2, draft.Episodes.Count);
         Assert.Empty(draft.OverallSmallHooks);
         Assert.Empty(draft.OverallBigHooks);
         Assert.All(draft.Episodes, episode =>
@@ -421,9 +421,9 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var appended = await appendResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
         Assert.NotNull(appended);
         Assert.Equal(2, appended.Version);
-        Assert.Equal(4, appended.Episodes.Count);
-        Assert.Equal(originalTitles, appended.Episodes.Take(3).Select(item => item.Title));
-        Assert.Equal(4, appended.Episodes[3].ProposalNumber);
+        Assert.Equal(3, appended.Episodes.Count);
+        Assert.Equal(originalTitles, appended.Episodes.Take(2).Select(item => item.Title));
+        Assert.Equal(3, appended.Episodes[2].ProposalNumber);
         Assert.Empty(appended.ProductionEpisodeIds);
 
         var regenerateResponse = await client.PostAsJsonAsync(
@@ -433,12 +433,11 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var regenerated = await regenerateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>();
         Assert.NotNull(regenerated);
         Assert.Equal(3, regenerated.Version);
-        Assert.Equal(4, regenerated.Episodes.Count);
+        Assert.Equal(3, regenerated.Episodes.Count);
         Assert.Equal(originalTitles[0], regenerated.Episodes[0].Title);
         Assert.NotEqual(originalTitles[1], regenerated.Episodes[1].Title);
         Assert.Equal(2, regenerated.Episodes[1].ProposalNumber);
-        Assert.Equal(originalTitles[2], regenerated.Episodes[2].Title);
-        Assert.Equal(appended.Episodes[3].Title, regenerated.Episodes[3].Title);
+        Assert.Equal(appended.Episodes[2].Title, regenerated.Episodes[2].Title);
 
         var restoreResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/assets/{draft.AssetId}/versions/current",
@@ -455,6 +454,60 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
         Assert.Equal(4, await dbContext.Assets.CountAsync(item => item.Type == "adaptation-script-draft"));
+    }
+
+    [Fact]
+    public async Task Script_draft_uses_fixed_project_episode_count_above_single_model_batch()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var settingsResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            new
+            {
+                projectName = "三个火枪手",
+                description = "经典文学改编",
+                contentType = "系列短剧",
+                targetAudience = "全年龄冒险故事观众",
+                plannedEpisodeCount = 7,
+                targetEpisodeSeconds = 100,
+                aspectRatio = "16:9",
+                outputWidth = 1920,
+                outputHeight = 1080,
+                visualStyle = "法式彩色冒险漫画",
+                artDirection = "17 世纪法国质感与清晰墨线",
+                characterDesign = "角色年龄、外貌和服装必须保持连续。",
+                colorPalette = "宝石红、法国蓝、羊皮纸金",
+                cameraLanguage = "动态漫画构图与低机位英雄镜头",
+                soundStrategy = "管弦乐冒险主题与轻快喜剧节奏",
+                imagePromptPrefix = "法式彩色冒险漫画，清晰墨线"
+            });
+        settingsResponse.EnsureSuccessStatusCode();
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources",
+            new
+            {
+                title = "三个火枪手原著",
+                description = "长篇系列改编参考",
+                content = "# 第一章\n达达尼昂离开故乡。\n\n# 第二章\n达达尼昂抵达巴黎。",
+                fileName = "chapters-1-2.md"
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var source = Assert.IsType<ProjectSourceView>(
+            await createResponse.Content.ReadFromJsonAsync<ProjectSourceView>());
+        (await client.PostAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis",
+            null)).EnsureSuccessStatusCode();
+
+        var generateResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft",
+            new { instruction = "按项目设定生成完整系列草案" });
+
+        generateResponse.EnsureSuccessStatusCode();
+        var draft = Assert.IsType<AdaptationScriptView>(
+            await generateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>());
+        Assert.Equal(7, draft.Episodes.Count);
+        Assert.Equal(Enumerable.Range(1, 7), draft.Episodes.Select(item => item.ProposalNumber));
     }
 
     private static async Task<Guid> CreateProjectAsync(HttpClient client)
