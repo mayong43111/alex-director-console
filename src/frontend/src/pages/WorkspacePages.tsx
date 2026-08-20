@@ -402,7 +402,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
       <header className="page-header settings-page-header">
         <div>
           <div className="settings-title-line">
-            <h1>项目设定</h1>
+            <span className="settings-context-label">当前版本</span>
             <small>{settings.version === 0 ? "草稿" : `v${settings.version}`}</small>
             {settings.assetId && <VersionPicker compact projectId={projectId} assetId={settings.assetId} label="项目设定版本" />}
           </div>

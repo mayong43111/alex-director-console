@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ProLayout } from "@ant-design/pro-components";
 import {
   Badge,
   Button,
@@ -22,7 +21,6 @@ import {
   Bot,
   Boxes,
   ChevronDown,
-  ChevronRight,
   Clapperboard,
   Film,
   Gauge,
@@ -30,7 +28,6 @@ import {
   RotateCcw,
   Search,
   SendHorizontal,
-  Settings,
   SlidersHorizontal,
   Sparkles,
   X,
@@ -49,6 +46,11 @@ import {
   sendCopilotMessage,
   type CopilotMessage,
 } from "../api/copilot";
+import {
+  AppLayout,
+  StandardWorkspaceLayout,
+  TitledWorkspaceLayout,
+} from "../layouts";
 
 const navigation = [
   { label: "设定", icon: SlidersHorizontal, to: "settings" },
@@ -255,19 +257,6 @@ export function AppShell() {
     mobileQuery.addEventListener("change", syncAgentVisibility);
     return () => mobileQuery.removeEventListener("change", syncAgentVisibility);
   }, []);
-  const [isMobile, setIsMobile] = useState(
-    () => window.matchMedia("(max-width: 767px)").matches,
-  );
-  const [mobileMenuCollapsed, setMobileMenuCollapsed] = useState(true);
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 767px)");
-    const syncMobileState = (event: MediaQueryListEvent) => {
-      setIsMobile(event.matches);
-      setMobileMenuCollapsed(true);
-    };
-    mediaQuery.addEventListener("change", syncMobileState);
-    return () => mediaQuery.removeEventListener("change", syncMobileState);
-  }, []);
   const [queueOpen, setQueueOpen] = useState(false);
   const routeEpisode = location.pathname.match(/(?:script|storyboard|production|review)\/episodes\/([^/]+)/)?.[1];
   const currentEpisode = routeEpisode ?? selectedEpisode;
@@ -280,6 +269,8 @@ export function AppShell() {
     ...item,
     to: item.to.replace("production-e01", routingEpisode),
   }));
+  const primaryNavigation = scopedNavigation.filter((item) => item.to !== "settings");
+  const settingsNavigation = scopedNavigation.find((item) => item.to === "settings");
   const activeRoot = location.pathname.slice(projectBase.length + 1).split("/")[0];
   const active = navigation.find((item) => item.to.split("/")[0] === activeRoot);
 
@@ -290,11 +281,6 @@ export function AppShell() {
     });
   };
 
-  const proRoutes = scopedNavigation.map(({ label, icon: Icon, to }) => ({
-    path: `${projectBase}/${to}`,
-    name: label,
-    icon: <Icon size={17} />,
-  }));
   const projectMenuItems: MenuProps["items"] = [
     {
       key: "project-center",
@@ -327,36 +313,18 @@ export function AppShell() {
     const nextProject = projects.find((item) => item.id === key);
     if (nextProject) switchProject(nextProject);
   };
+  const workspaceTitle = workflow?.label ?? active?.label ?? "驾驶舱";
 
   return (
-    <ProLayout
-      className="alex-pro-layout"
-      title="Alex 导演台"
-      logo={<span className="brand-mark">A</span>}
-      layout="mix"
-      fixedHeader
-      fixSiderbar
-      siderWidth={208}
-      breakpoint={false}
-      collapsed={isMobile ? mobileMenuCollapsed : true}
-      onCollapse={(collapsed) => {
-        if (isMobile) setMobileMenuCollapsed(collapsed);
-      }}
-      collapsedButtonRender={isMobile ? undefined : false}
-      contentWidth="Fluid"
-      route={{ path: projectBase, routes: proRoutes }}
-      location={{ pathname: location.pathname }}
-      menu={{ defaultOpenAll: true }}
-      menuItemRender={(item, dom) =>
-        item.path ? <Link to={item.path}>{dom}</Link> : dom
-      }
-      menuHeaderRender={(logo) => (
-        <button className="pro-brand" onClick={() => navigate("/")}>
-          {logo}
-          <span>Alex 导演台</span>
-        </button>
-      )}
-      headerTitleRender={() => (
+    <AppLayout
+      agentOpen={agentOpen}
+      headerStart={(
+        <>
+          <button className="director-brand" onClick={() => navigate("/")} aria-label="返回项目中心">
+            <span className="brand-mark">A</span>
+            <span>Alex 导演台</span>
+          </button>
+          <span className="director-header-divider" />
         <Dropdown
           menu={{ items: projectMenuItems, onClick: handleProjectMenuClick }}
           trigger={["click"]}
@@ -365,60 +333,80 @@ export function AppShell() {
             <span className="project-menu-mark"><Clapperboard size={14} /></span>
             <span className="project-switcher-name">{projectName}</span>
             <ChevronDown size={14} />
-            <span className="header-current-page">{active?.label ?? "驾驶舱"}</span>
           </Button>
         </Dropdown>
+        </>
       )}
-      actionsRender={() => [
-        <Button className="command-search" icon={<Search size={15} />} key="search">
-          搜索或执行命令 <kbd>⌘ K</kbd>
-        </Button>,
-        <Badge className="header-notifications" count={3} size="small" key="notifications">
-          <Tooltip title="任务通知">
-            <Button type="text" icon={<Bell size={17} />} aria-label="任务通知" />
+      headerActions={(
+        <>
+          <Button className="command-search" icon={<Search size={15} />}>
+            搜索或执行命令 <kbd>⌘ K</kbd>
+          </Button>
+          <Badge className="header-notifications" count={3} size="small">
+            <Tooltip title="任务通知">
+              <Button type="text" icon={<Bell size={17} />} aria-label="任务通知" />
+            </Tooltip>
+          </Badge>
+          <Tooltip title={agentOpen ? "收起副导演" : "展开副导演"}>
+            <Button
+              className="header-agent-button"
+              type={agentOpen ? "primary" : "default"}
+              icon={<Bot size={16} />}
+              aria-label="副导演"
+              aria-expanded={agentOpen}
+              onClick={() => updateAgentOpen(!agentOpen)}
+            />
           </Tooltip>
-        </Badge>,
-        <Tooltip title="全局设置" key="settings">
-          <Button
-            className="header-settings"
-            type="text"
-            icon={<Settings size={17} />}
-            aria-label="全局设置"
-            onClick={() => navigate("/settings/services")}
-          />
-        </Tooltip>,
-        <Tooltip title="副导演" key="agent">
-          <Button
-            className="header-agent-button"
-            type={agentOpen ? "primary" : "default"}
-            icon={<Bot size={16} />}
-            aria-label="副导演"
-            aria-expanded={agentOpen}
-            onClick={isAgentOverlay ? () => updateAgentOpen(!agentOpen) : undefined}
-          />
-        </Tooltip>,
-      ]}
-      menuFooterRender={() => (
-        <div className="pro-service-status">
-          <Badge status="success" />
-          <span>服务正常</span>
-          <b>4 / 4</b>
-        </div>
+        </>
       )}
     >
-      <div className={`app-shell ${agentOpen ? "" : "agent-closed"}`}>
-        <main className="main-canvas" ref={mainCanvasRef}>
-          {workflow && (
-            <WorkflowToolbar
-              workflow={workflow}
-              projectName={projectName}
-              projectBase={projectBase}
-              pathname={location.pathname}
-            />
-          )}
-          <Outlet />
-        </main>
-        {agentOpen && (
+      <StandardWorkspaceLayout
+        agentOverlay={isAgentOverlay}
+        onCloseAgent={() => updateAgentOpen(false)}
+        navigation={(
+          <>
+          <nav className="director-rail-nav">
+            {primaryNavigation.map(({ label, icon: Icon, to }) => {
+              const target = `${projectBase}/${to}`;
+              const isActive = to.split("/")[0] === activeRoot;
+              return (
+                <Tooltip title={label} placement="right" key={target}>
+                  <Link
+                    to={target}
+                    className={`director-rail-link ${isActive ? "active" : ""}`}
+                    aria-label={label}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    <Icon size={19} strokeWidth={1.8} />
+                    <span>{label}</span>
+                  </Link>
+                </Tooltip>
+              );
+            })}
+          </nav>
+          <div className="director-rail-footer">
+            {settingsNavigation && (
+              <Tooltip title="项目设定" placement="right">
+                <Link
+                  to={`${projectBase}/${settingsNavigation.to}`}
+                  className={`director-rail-link ${activeRoot === "settings" ? "active" : ""}`}
+                  aria-label="项目设定"
+                  aria-current={activeRoot === "settings" ? "page" : undefined}
+                >
+                  <settingsNavigation.icon size={19} strokeWidth={1.8} />
+                  <span>项目设定</span>
+                </Link>
+              </Tooltip>
+            )}
+            <Tooltip title="服务正常 · 4 / 4" placement="right">
+              <div className="director-rail-status" aria-label="服务正常，4 / 4">
+                <Badge status="success" />
+              </div>
+            </Tooltip>
+          </div>
+          </>
+        )}
+        agent={agentOpen ? (
           <AgentPanel
             key={projectId}
             projectId={projectId}
@@ -427,9 +415,26 @@ export function AppShell() {
             episode={currentEpisodeData
               ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
               : "未创建"}
-            onClose={isAgentOverlay ? () => updateAgentOpen(false) : undefined}
+            onClose={() => updateAgentOpen(false)}
           />
-        )}
+        ) : undefined}
+      >
+        <TitledWorkspaceLayout
+          title={workspaceTitle}
+          projectName={projectName}
+          projectHome={`${projectBase}/settings`}
+          pathname={location.pathname}
+          tabs={workflow?.tabs}
+          contentRef={mainCanvasRef}
+          status={(
+            <>
+              <span className="online-dot" />
+              <span>工作区已同步</span>
+            </>
+          )}
+        >
+            <Outlet />
+        </TitledWorkspaceLayout>
         {queueOpen && workflow?.queue && (
           <BatchReviewDialog
             title={workflow.queue}
@@ -437,45 +442,8 @@ export function AppShell() {
             onClose={() => setQueueOpen(false)}
           />
         )}
-        <div className="activity-bar">
-          <Badge status="default" />
-          <strong>{productionEpisodes.length === 0 ? "暂无生产任务" : `${productionEpisodes.length} 个生产集`}</strong>
-          <span>{productionEpisodes.length === 0 ? "创建生产剧集后可安排脚本、分镜与生成任务" : "生产运行状态请在生产中心查看"}</span>
-        </div>
-      </div>
-    </ProLayout>
-  );
-}
-
-function WorkflowToolbar({
-  workflow,
-  projectName,
-  projectBase,
-  pathname,
-}: {
-  workflow: Workflow;
-  projectName: string;
-  projectBase: string;
-  pathname: string;
-}) {
-  const currentTab = workflow.tabs.find((tab) =>
-    pathname === tab.to || pathname.startsWith(`${tab.to}/`));
-  return (
-    <div className="workflow-toolbar">
-      <nav className="workflow-breadcrumb" aria-label="面包屑导航">
-        <Link to={`${projectBase}/settings`}>{projectName}</Link>
-        <ChevronRight size={13} />
-        {currentTab ? (
-          <>
-            <Link to={workflow.tabs[0].to}>{workflow.label}</Link>
-            <ChevronRight size={13} />
-            <span aria-current="page">{currentTab.label}</span>
-          </>
-        ) : (
-          <span aria-current="page">{workflow.label}</span>
-        )}
-      </nav>
-    </div>
+      </StandardWorkspaceLayout>
+    </AppLayout>
   );
 }
 

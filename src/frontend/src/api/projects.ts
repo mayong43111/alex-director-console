@@ -51,6 +51,47 @@ export async function getProject(
   return response.json() as Promise<ProjectRecord>
 }
 
+export async function updateProject(
+  projectId: string,
+  input: { name: string; description?: string },
+  signal?: AbortSignal,
+): Promise<ProjectRecord> {
+  const response = await fetch(`/api/v2/projects/${projectId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    signal,
+  })
+
+  if (response.ok) {
+    return response.json() as Promise<ProjectRecord>
+  }
+
+  throw new Error(await readProjectError(response, '项目更新失败，请稍后重试。'))
+}
+
+export async function deleteProject(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api/v2/projects/${projectId}`, {
+    method: 'DELETE',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(await readProjectError(response, '项目删除失败，请稍后重试。'))
+  }
+}
+
+async function readProjectError(response: Response, fallback: string): Promise<string> {
+  const problem = await response.json().catch(() => null) as ValidationProblem | null
+  const validationMessage = problem?.errors
+    ? Object.values(problem.errors).flat().join(' ')
+    : null
+  return validationMessage || problem?.detail || problem?.title || fallback
+}
+
 export interface ProductionEpisodeRecord {
   id: string
   episodeNumber: number

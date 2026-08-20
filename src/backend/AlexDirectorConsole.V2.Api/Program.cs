@@ -3,6 +3,7 @@ using AlexDirectorConsole.V2.Api.Features.Copilot;
 using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
+using AlexDirectorConsole.V2.Api.Features.Projects.ManageProject;
 using AlexDirectorConsole.V2.Api.Features.Projects.Production;
 using AlexDirectorConsole.V2.Api.Features.Projects.Queries;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
@@ -77,6 +78,8 @@ builder.Services.AddScoped<IStoryboardDesigner, MafStoryboardDesigner>();
 builder.Services.AddScoped<ICommandDispatcher, CommandDispatcher>();
 builder.Services.AddScoped<IQueryDispatcher, QueryDispatcher>();
 builder.Services.AddScoped<ICommandHandler<CreateProjectCommand, CreateProjectResult>, CreateProjectCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateProjectCommand, UpdateProjectResult>, UpdateProjectCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<DeleteProjectCommand, DeleteProjectResult>, DeleteProjectCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<ListProjectsQuery, IReadOnlyList<ProjectView>>, ListProjectsQueryHandler>();
 builder.Services.AddScoped<IQueryHandler<GetProjectQuery, ProjectView?>, GetProjectQueryHandler>();
 builder.Services.AddScoped<IQueryHandler<ListProductionEpisodesQuery, IReadOnlyList<ProductionEpisodeView>>, ListProductionEpisodesQueryHandler>();
@@ -127,6 +130,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 
 app.UseExceptionHandler();
 app.MapCreateProject();
+app.MapProjectManagement();
 app.MapProjectQueries();
 app.MapProjectSettings();
 app.MapResourceVersions();

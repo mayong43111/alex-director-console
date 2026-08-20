@@ -5,9 +5,13 @@ import {
   type FormEvent,
 } from "react";
 import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
+import { ProTable, type ProColumns } from "@ant-design/pro-components";
+import { Button, Input, Modal, Popconfirm, Space, Tooltip } from "antd";
 import {
   createProject,
+  deleteProject,
   listProjects,
+  updateProject,
   type ProjectRecord,
 } from "../api/projects";
 import {
@@ -26,24 +30,23 @@ import {
   type SkillRecord,
 } from "../api/skills";
 import {
-  ArrowLeft,
   Bot,
   Check,
   ChevronDown,
   CircleAlert,
   Cloud,
   Code2,
-  Grid2X2,
-  List,
+  ExternalLink,
   MoreHorizontal,
   Pause,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
   Search,
   Server,
-  Settings,
   Sparkles,
+  Trash2,
   Volume2,
 } from "lucide-react";
 
@@ -96,11 +99,14 @@ function PageTitle({
 
 export function ProjectCenterPage() {
   const navigate = useNavigate();
-  const [view, setView] = useState<"list" | "grid">("list");
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [draftName, setDraftName] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<{ mode: "create" | "edit"; project?: ProjectRecord } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectsError, setProjectsError] = useState<string | null>(null);
@@ -121,193 +127,222 @@ export function ProjectCenterPage() {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    const openCreateDialog = () => {
+      setDraftName("");
+      setDraftDescription("");
+      setActionError(null);
+      setEditor({ mode: "create" });
+    };
+    window.addEventListener("alex:create-project", openCreateDialog);
+    return () => window.removeEventListener("alex:create-project", openCreateDialog);
+  }, []);
+
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draftName.trim() || creating) return;
+    if (!draftName.trim() || saving || !editor) return;
 
-    setCreating(true);
-    setCreateError(null);
+    setSaving(true);
+    setActionError(null);
     try {
-      const project = await createProject({
-        name: draftName,
-        description: draftDescription,
-      });
+      const input = { name: draftName, description: draftDescription };
+      const project = editor.mode === "edit" && editor.project
+        ? await updateProject(editor.project.id, input)
+        : await createProject(input);
       sessionStorage.setItem(
         `alex-director-v2.project.${project.id}`,
         JSON.stringify(project),
       );
-      navigate(`/projects/${project.id}/settings`, {
-        state: { projectName: project.name },
-      });
+      setProjects((current) => editor.mode === "edit"
+        ? current.map((item) => item.id === project.id ? project : item)
+        : [project, ...current]);
+      setEditor(null);
     } catch (error) {
-      setCreateError(
-        error instanceof Error ? error.message : "项目创建失败，请稍后重试。",
+      setActionError(
+        error instanceof Error ? error.message : "项目保存失败，请稍后重试。",
       );
     } finally {
-      setCreating(false);
+      setSaving(false);
     }
   }
 
+  function editProject(project: ProjectRecord) {
+    setDraftName(project.name);
+    setDraftDescription(project.description ?? "");
+    setActionError(null);
+    setEditor({ mode: "edit", project });
+  }
+
+  async function removeProject(project: ProjectRecord) {
+    if (deletingId) return;
+    setDeletingId(project.id);
+    setActionError(null);
+    try {
+      await deleteProject(project.id);
+      sessionStorage.removeItem(`alex-director-v2.project.${project.id}`);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "项目删除失败，请稍后重试。");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  const filteredProjects = projects.filter((project) => {
+    const keyword = deferredSearch.trim().toLocaleLowerCase();
+    return !keyword
+      || project.name.toLocaleLowerCase().includes(keyword)
+      || project.description?.toLocaleLowerCase().includes(keyword);
+  });
+
+  const columns: ProColumns<ProjectRecord>[] = [
+    {
+      title: "项目标题",
+      key: "name",
+      width: 260,
+      render: (_, project) => (
+        <div className="project-table-name">
+          <span className="project-monogram">{project.name.slice(0, 1)}</span>
+          <strong>{project.name}</strong>
+        </div>
+      ),
+    },
+    {
+      title: "描述",
+      dataIndex: "description",
+      key: "description",
+      ellipsis: true,
+      render: (_, project) => <span className="project-table-description">{project.description || "暂无描述"}</span>,
+    },
+    {
+      title: "更新时间",
+      dataIndex: "updatedAtUtc",
+      width: 120,
+      render: (_, project) => new Date(project.updatedAtUtc).toLocaleDateString("zh-CN"),
+      sorter: (left, right) => Date.parse(left.updatedAtUtc) - Date.parse(right.updatedAtUtc),
+      defaultSortOrder: "descend",
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 112,
+      align: "right",
+      render: (_, project) => (
+        <Space size={2}>
+          <Tooltip title="打开项目">
+            <Button
+              type="text"
+              size="small"
+              icon={<ExternalLink size={14} />}
+              aria-label="打开项目"
+              onClick={() => navigate(`/projects/${project.id}/settings`, { state: { projectName: project.name } })}
+            />
+          </Tooltip>
+          <Tooltip title="编辑项目">
+            <Button
+              type="text"
+              size="small"
+              icon={<Pencil size={14} />}
+              aria-label="编辑项目"
+              onClick={() => editProject(project)}
+            />
+          </Tooltip>
+          <Popconfirm
+            title="删除项目"
+            description={`确定删除“${project.name}”吗？已有业务数据的项目不会被删除。`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true, loading: deletingId === project.id }}
+            onConfirm={() => removeProject(project)}
+          >
+            <Tooltip title="删除项目">
+              <Button type="text" danger size="small" icon={<Trash2 size={14} />} aria-label="删除项目" />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
   return (
     <div className="project-center">
-      <header className="center-topbar">
-        <Link className="center-brand" to="/">
-          <span>A</span>
-          <strong>ALEX DIRECTOR</strong>
-        </Link>
-        <div>
-          <span className="service-dot" />
-          服务在线
-          <button
-            className="icon-button"
-            aria-label="系统设置"
-            onClick={() => navigate("/settings/services")}
-          >
-            <Settings size={17} />
-          </button>
-        </div>
-      </header>
       <main className="center-layout">
         <section className="project-browser">
-          <PageTitle
-            eyebrow="工作空间"
-            title="项目"
-            description="从创意设定到分集交付的全部制作空间"
-            action={
-              <button
-                className="primary-button"
-                onClick={() =>
-                  document.getElementById("new-project-name")?.focus()
-                }
-              >
-                <Plus size={14} />
-                创建项目
-              </button>
-            }
-          />
           <div className="workspace-toolbar">
             <div className="project-filters">
               <label>
                 <Search size={14} />
-                <input placeholder="搜索项目" />
+                <input
+                  placeholder="搜索项目名称或描述"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
               </label>
-              <button>
-                片型
-                <ChevronDown size={13} />
-              </button>
-              <button>
-                状态
-                <ChevronDown size={13} />
-              </button>
-            </div>
-            <div className="segmented">
-              <button
-                className={view === "list" ? "active" : ""}
-                onClick={() => setView("list")}
-                aria-label="表格视图"
-              >
-                <List size={14} />
-              </button>
-              <button
-                className={view === "grid" ? "active" : ""}
-                onClick={() => setView("grid")}
-                aria-label="网格视图"
-              >
-                <Grid2X2 size={14} />
-              </button>
             </div>
           </div>
-          <div className={`project-collection ${view}`}>
-            {projectsLoading && <p className="project-list-state">正在加载项目…</p>}
-            {projectsError && (
-              <p className="project-list-state error" role="alert">
-                {projectsError}
-              </p>
-            )}
-            {!projectsLoading && !projectsError && projects.length === 0 && (
-              <p className="project-list-state">还没有项目，请创建第一个制作空间。</p>
-            )}
-            {projects.map((project) => (
-              <Link
-                className="project-item"
-                to={`/projects/${project.id}/settings`}
-                key={project.id}
-              >
-                <span className="project-monogram">
-                  {project.name.slice(0, 1)}
-                </span>
-                <span className="project-name">
-                  <strong>{project.name}</strong>
-                  <small>空项目</small>
-                </span>
-                <span className="project-stage">等待项目设定</span>
-                <span className="state-label draft">草稿</span>
-                <span className="project-updated">
-                  {new Date(project.updatedAtUtc).toLocaleDateString("zh-CN")}
-                </span>
-                <MoreHorizontal size={16} />
-              </Link>
-            ))}
-          </div>
+          {actionError && <p className="project-action-error" role="alert"><CircleAlert size={14} />{actionError}</p>}
+          <ProTable<ProjectRecord>
+            className="project-table"
+            rowKey="id"
+            columns={columns}
+            dataSource={filteredProjects}
+            loading={projectsLoading}
+            size="small"
+            search={false}
+            options={false}
+            toolBarRender={false}
+            scroll={{ x: 700 }}
+            pagination={{
+              pageSize: 10,
+              showSizeChanger: false,
+              showTotal: () => null,
+              size: "small",
+            }}
+            locale={{ emptyText: projectsError || "还没有项目，请创建第一个制作空间。" }}
+          />
         </section>
-        <form className="create-project-panel" onSubmit={submitProject}>
-          <span className="eyebrow">创建项目</span>
-          <h2>建立制作空间</h2>
-          <div className="creation-steps">
-            <span className="active">
-              <b>1</b>基本信息
-            </span>
-            <span>
-              <b>2</b>时长与交付
-            </span>
-            <span>
-              <b>3</b>Agent 设定草案
-            </span>
-          </div>
+      </main>
+      <Modal
+        title={editor?.mode === "edit" ? "编辑项目" : "创建项目"}
+        open={editor !== null}
+        onCancel={() => !saving && setEditor(null)}
+        footer={null}
+        destroyOnHidden
+      >
+        <form className="project-editor-form" onSubmit={submitProject}>
           <label htmlFor="new-project-name">
             项目名称
-            <input
+            <Input
               id="new-project-name"
               value={draftName}
               maxLength={200}
               onChange={(event) => setDraftName(event.target.value)}
               placeholder="输入项目名称"
               autoComplete="off"
+              autoFocus
             />
           </label>
           <label htmlFor="new-project-description">
             项目描述
-            <textarea
+            <Input.TextArea
               id="new-project-description"
               value={draftDescription}
               maxLength={4000}
               onChange={(event) => setDraftDescription(event.target.value)}
               placeholder="故事类型、制作目标或项目范围（可选）"
               rows={4}
+              showCount
             />
           </label>
-          {createError && (
-            <p className="create-project-error" role="alert">
-              <CircleAlert size={13} />
-              {createError}
-            </p>
-          )}
-          <button
-            className="primary-button wide"
-            type="submit"
-            disabled={!draftName.trim() || creating}
-          >
-            {creating ? "正在创建…" : "创建并进入项目"}
-          </button>
-          <div className="agent-draft">
-            <Sparkles size={15} />
-            <p>
-              <strong>先创建空项目</strong>
-              <span>项目设定、生产集和资产将在进入工作区后逐步建立。</span>
-            </p>
+          {actionError && <p className="project-action-error" role="alert"><CircleAlert size={14} />{actionError}</p>}
+          <div className="project-editor-actions">
+            <Button onClick={() => setEditor(null)} disabled={saving}>取消</Button>
+            <Button type="primary" htmlType="submit" loading={saving} disabled={!draftName.trim()}>
+              {editor?.mode === "edit" ? "保存修改" : "创建项目"}
+            </Button>
           </div>
         </form>
-      </main>
+      </Modal>
     </div>
   );
 }
@@ -983,25 +1018,8 @@ function GlobalSettingsShell({
   active: "services" | "skills";
   children: React.ReactNode;
 }) {
-  const returnTo = sessionStorage.getItem("alex-director-v2.lastProjectPath") ?? "/";
-
   return (
     <div className="global-settings">
-      <header>
-        <Link className="center-brand" to="/">
-          <span>A</span>
-          <strong>ALEX</strong>
-        </Link>
-        <div className="global-breadcrumb">
-          <span>全局设置</span>
-          <b>/</b>
-          <strong>{active === "services" ? "服务连接" : "Agent 技能"}</strong>
-        </div>
-        <Link className="secondary-button" to={returnTo}>
-          <ArrowLeft size={14} />
-          返回项目
-        </Link>
-      </header>
       <div className="global-settings-layout">
         <aside>
           <span className="eyebrow">全局设置</span>
@@ -1010,7 +1028,7 @@ function GlobalSettingsShell({
             to="/settings/services"
           >
             <Server size={16} />
-            服务连接
+            服务器连接
           </NavLink>
           <NavLink
             className={active === "skills" ? "active" : ""}
@@ -1139,19 +1157,14 @@ export function ServicesPage() {
 
   return (
     <GlobalSettingsShell active="services">
-      <PageTitle
-        eyebrow="基础设施"
-        title="服务连接"
-        description="项目只引用服务能力，不在项目内保存密钥"
-        action={
-          configured ? (
-            <span className="saved-state">
-              <Check size={13} />
-              密钥已加密保存
-            </span>
-          ) : undefined
-        }
-      />
+      {configured && (
+        <div className="settings-page-toolbar">
+          <span className="saved-state">
+            <Check size={13} />
+            密钥已加密保存
+          </span>
+        </div>
+      )}
       <section className="service-list panel">
         <div className="service-row">
           <span className="service-icon">
@@ -1548,17 +1561,12 @@ export function SkillsPage() {
 
   return (
     <GlobalSettingsShell active="skills">
-      <PageTitle
-        eyebrow="Agent 能力"
-        title="技能目录"
-        description="管理技能版本、工具权限与项目副本"
-        action={
-          <button className="primary-button" disabled title="Skill 导入将在项目副本阶段开放">
-            <Plus size={14} />
-            导入技能
-          </button>
-        }
-      />
+      <div className="settings-page-toolbar">
+        <button className="primary-button" disabled title="Skill 导入将在项目副本阶段开放">
+          <Plus size={14} />
+          导入技能
+        </button>
+      </div>
       <div className="skills-workspace">
         <section className="skills-list">
           <label>

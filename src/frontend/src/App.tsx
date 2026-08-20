@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { AppShell } from './app/AppShell'
+import { ApplicationLayout } from './layouts'
 import { DemoPage, ProjectCenterPage, ServicesPage, SkillsPage } from './pages/SupplementaryPages'
 import {
   AssetsPage,
@@ -21,7 +22,11 @@ function LegacyAdaptationRedirect() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<ProjectCenterPage />} />
+      <Route element={<ApplicationLayout />}>
+        <Route path="/" element={<ProjectCenterPage />} />
+        <Route path="/settings/services" element={<ServicesPage />} />
+        <Route path="/settings/skills" element={<SkillsPage />} />
+      </Route>
       <Route path="/projects/:projectId" element={<AppShell />}>
         <Route path="overview" element={<Navigate to="../settings" replace />} />
         <Route path="settings" element={<SettingsPage />} />
@@ -47,8 +52,6 @@ export default function App() {
         <Route path="review" element={<DemoPage title="审阅交付" />} />
         <Route path="review/episodes/:productionEpisodeId?" element={<DemoPage title="审阅交付" />} />
       </Route>
-      <Route path="/settings/services" element={<ServicesPage />} />
-      <Route path="/settings/skills" element={<SkillsPage />} />
       <Route path="*" element={<Navigate to="/projects/tianqiao/overview" replace />} />
     </Routes>
   )
