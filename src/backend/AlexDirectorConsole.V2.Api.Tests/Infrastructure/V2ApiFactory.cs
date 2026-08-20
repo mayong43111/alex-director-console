@@ -1,4 +1,5 @@
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Copilot;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
@@ -41,6 +42,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IShotFrameGenerator>();
             services.RemoveAll<ILocalVoiceDesigner>();
             services.RemoveAll<IProjectSettingsAssistant>();
+            services.RemoveAll<IAgentTextInvoker>();
             services.RemoveAll<IStoryMaterialAnalyzer>();
             services.RemoveAll<IAdaptationScriptWriter>();
             services.RemoveAll<IStoryboardDesigner>();
@@ -56,7 +58,12 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
             services.AddSingleton<IShotFrameGenerator, TestShotFrameGenerator>();
             services.AddSingleton<ILocalVoiceDesigner, TestLocalVoiceDesigner>();
-            services.AddSingleton<IProjectSettingsAssistant, TestProjectSettingsAssistant>();
+            services.AddSingleton<TestProjectSettingsAssistant>();
+            services.AddSingleton<IProjectSettingsAssistant>(provider =>
+                provider.GetRequiredService<TestProjectSettingsAssistant>());
+            services.AddSingleton<TestAgentTextInvoker>();
+            services.AddSingleton<IAgentTextInvoker>(provider =>
+                provider.GetRequiredService<TestAgentTextInvoker>());
             services.AddSingleton<IStoryMaterialAnalyzer, TestStoryMaterialAnalyzer>();
             services.AddSingleton<IAdaptationScriptWriter, TestAdaptationScriptWriter>();
             services.AddSingleton<IStoryboardDesigner, TestStoryboardDesigner>();
@@ -70,6 +77,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         await dbContext.Database.EnsureDeletedAsync();
         await dbContext.Database.MigrateAsync();
         Services.GetRequiredService<TestComfyUiVideoClient>().Reset();
+        Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
+        Services.GetRequiredService<TestAgentTextInvoker>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
         await skillSynchronizer.SynchronizeAsync();
     }
@@ -369,15 +378,46 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
 
     private sealed class TestProjectSettingsAssistant : IProjectSettingsAssistant
     {
+        public ProjectSettingsAssistRequest? LastRequest { get; private set; }
+
+        public void Reset() => LastRequest = null;
+
         public Task<ProjectSettingsAssistView> WriteAsync(
             ProjectSettingsAssistRequest request,
-            CancellationToken cancellationToken) => Task.FromResult(
-                new ProjectSettingsAssistView(
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(new ProjectSettingsAssistView(
                     request.Field ?? string.Empty,
                     $"AI 优化：{request.CurrentValue}",
                     "gpt-5.4",
                     "MAF HarnessAgent"));
+        }
     }
+
+    private sealed class TestAgentTextInvoker : IAgentTextInvoker
+    {
+        public AgentTextInvocation? LastInvocation { get; private set; }
+
+        public void Reset() => LastInvocation = null;
+
+        public Task<AgentTextInvocationResult> InvokeAsync(
+            AgentTextInvocation invocation,
+            CancellationToken cancellationToken)
+        {
+            LastInvocation = invocation;
+            return Task.FromResult(new AgentTextInvocationResult(
+                $"Agent 候选：{invocation.Input}",
+                "gpt-5.4",
+                "Test Harness"));
+        }
+    }
+
+    public ProjectSettingsAssistRequest? LastProjectSettingsAssistRequest =>
+        Services.GetRequiredService<TestProjectSettingsAssistant>().LastRequest;
+
+    public AgentTextInvocation? LastAgentTextInvocation =>
+        Services.GetRequiredService<TestAgentTextInvoker>().LastInvocation;
 }
 
 public sealed class TestComfyUiVideoClient : IComfyUiVideoClient

@@ -1,6 +1,8 @@
 using OpenAI;
 using OpenAI.Chat;
 using System.ClientModel;
+using System.Security.Cryptography;
+using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.AspNetCore.DataProtection;
 
@@ -8,6 +10,9 @@ namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 
 public static class LlmChatClientFactory
 {
+    public const string InvalidProtectedApiKeyMessage =
+        "已保存的 API Key 无法解密，本机加密密钥可能已更改或丢失。请在“设置 > 服务器连接”中重新输入并保存对应 API Key。";
+
     public static bool IsConfigured(FoundryConfiguration? configuration)
     {
         if (configuration is null) return false;
@@ -36,7 +41,7 @@ public static class LlmChatClientFactory
             : configuration.ProtectedApiKey;
         var apiKey = string.IsNullOrWhiteSpace(protectedApiKey)
             ? "local-vllm"
-            : dataProtectionProvider.CreateProtector("FoundryApiKeys.v1").Unprotect(protectedApiKey);
+            : UnprotectApiKey(dataProtectionProvider, protectedApiKey);
         return Create(
             isVllm ? configuration.VllmBaseUrl : configuration.Endpoint,
             GetModel(configuration),
@@ -46,6 +51,21 @@ public static class LlmChatClientFactory
 
     public static ChatClient Create(string endpoint, string deployment, string apiKey)
         => Create(endpoint, deployment, apiKey, false);
+
+    public static string UnprotectApiKey(
+        IDataProtectionProvider dataProtectionProvider,
+        string protectedApiKey)
+    {
+        try
+        {
+            return dataProtectionProvider.CreateProtector("FoundryApiKeys.v1")
+                .Unprotect(protectedApiKey);
+        }
+        catch (CryptographicException)
+        {
+            throw new ProjectGenerationConfigurationException(InvalidProtectedApiKeyMessage);
+        }
+    }
 
     private static ChatClient Create(
         string endpoint,

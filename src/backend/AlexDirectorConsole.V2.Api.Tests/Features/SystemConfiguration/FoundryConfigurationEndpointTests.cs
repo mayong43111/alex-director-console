@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Features.SystemConfiguration;
@@ -108,6 +109,36 @@ public sealed class FoundryConfigurationEndpointTests(V2ApiFactory factory)
         Assert.NotNull(result);
         Assert.True(result.IsSuccess);
         Assert.Equal("gpt-5.4", result.Deployment);
+    }
+
+    [Fact]
+    public async Task Test_connection_reports_actionable_error_when_key_ring_is_missing()
+    {
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            dbContext.FoundryConfigurations.Add(new FoundryConfiguration
+            {
+                Id = 1,
+                LlmProvider = "azure-foundry",
+                Endpoint = "https://example.openai.azure.com",
+                Deployment = "gpt-5.4",
+                ProtectedApiKey = "not-a-data-protection-payload"
+            });
+            await dbContext.SaveChangesAsync();
+        }
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsync(
+            "/api/v2/system/foundry-configuration/test",
+            null);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<TestConnectionResponse>();
+        Assert.NotNull(result);
+        Assert.False(result.IsConfigured);
+        Assert.Contains("重新输入并保存", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("key ring", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

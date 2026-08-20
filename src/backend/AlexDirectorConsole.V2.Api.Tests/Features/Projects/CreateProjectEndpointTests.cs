@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Features.Projects;
@@ -84,6 +86,50 @@ public sealed class CreateProjectEndpointTests(V2ApiFactory factory)
         Assert.Equal(0, await ProjectCountAsync());
     }
 
+    [Fact]
+    public async Task Assist_description_returns_agent_text_without_creating_project()
+    {
+        using var client = factory.CreateClient();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var agent = await dbContext.AgentDefinitions.SingleAsync(
+                item => item.Id == BuiltInAgents.ProjectDescriptionWriterId);
+            agent.SystemPrompt = "只写一句清晰的项目介绍。";
+            await dbContext.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync(
+            "/api/v2/projects/assist-description",
+            new { name = "天桥食堂", description = "都市悬疑短片" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<AssistDescriptionResponse>();
+        Assert.NotNull(result);
+        Assert.Equal("description", result.Field);
+        Assert.Equal("AI 优化：都市悬疑短片", result.Value);
+        Assert.Equal("MAF HarnessAgent", result.Runtime);
+        Assert.Equal(
+            "只写一句清晰的项目介绍。",
+            factory.LastProjectSettingsAssistRequest?.SystemInstructions);
+        Assert.Equal(0, await ProjectCountAsync());
+    }
+
+    [Theory]
+    [InlineData("", "已有描述")]
+    [InlineData("项目", "")]
+    public async Task Assist_description_requires_name_and_description(string name, string description)
+    {
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/v2/projects/assist-description",
+            new { name, description });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, await ProjectCountAsync());
+    }
+
     private async Task<int> ProjectCountAsync()
     {
         await using var scope = factory.Services.CreateAsyncScope();
@@ -98,4 +144,10 @@ public sealed class CreateProjectEndpointTests(V2ApiFactory factory)
         Guid? CurrentCreativeSettingsId,
         DateTimeOffset CreatedAtUtc,
         DateTimeOffset UpdatedAtUtc);
+
+    private sealed record AssistDescriptionResponse(
+        string Field,
+        string Value,
+        string Model,
+        string Runtime);
 }

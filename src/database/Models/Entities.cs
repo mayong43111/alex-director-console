@@ -330,6 +330,21 @@ public sealed class SkillDefinition
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }
 
+public sealed class AgentDefinition
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = string.Empty;
+    public string SystemPrompt { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class AgentSkill
+{
+    public Guid AgentId { get; set; }
+    public string SkillId { get; set; } = string.Empty;
+}
+
 public sealed class CopilotConversation
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -1,8 +1,9 @@
 import { Badge, Button, Tooltip } from "antd";
 import { useEffect, useState } from "react";
-import { ArrowLeft, Bot, LayoutDashboard, Plus, SendHorizontal, Settings, Sparkles, X } from "lucide-react";
+import { ArrowLeft, Bot, LayoutDashboard, Plus, SendHorizontal, Server, Settings, Sparkles, X } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { AppLayout } from "./AppLayout";
+import { SettingsLayout } from "./SettingsLayout";
 import { StandardWorkspaceLayout } from "./StandardWorkspaceLayout";
 import { TitledWorkspaceLayout } from "./TitledWorkspaceLayout";
 
@@ -11,14 +12,18 @@ export function ApplicationLayout() {
   const navigate = useNavigate();
   const inSettings = location.pathname.startsWith("/settings/");
   const returnTo = sessionStorage.getItem("alex-director-v2.lastProjectPath") ?? "/";
-  const workspaceTitle = inSettings
-    ? location.pathname.endsWith("/skills") ? "技能目录" : "服务器连接"
-    : "项目";
-  const workspaceDescription = location.pathname.endsWith("/skills")
-    ? "管理技能版本、工具权限与项目副本"
-    : inSettings
-      ? "项目只引用服务能力，不在项目内保存密钥"
-      : "从创意设定到分集交付的全部制作空间";
+  const workspaceTitle = location.pathname.endsWith("/agents")
+    ? "Agent 管理"
+    : location.pathname.endsWith("/skills")
+      ? "技能目录"
+      : inSettings ? "服务器连接" : "项目";
+  const workspaceDescription = location.pathname.endsWith("/agents")
+    ? "维护 Agent 名称、系统提示词与关联技能"
+    : location.pathname.endsWith("/skills")
+      ? "管理技能版本、工具权限与项目副本"
+      : inSettings
+        ? "项目只引用服务能力，不在项目内保存密钥"
+        : "从创意设定到分集交付的全部制作空间";
   const [isAgentOverlay, setIsAgentOverlay] = useState(
     () => window.matchMedia("(max-width: 1279px)").matches,
   );
@@ -44,7 +49,7 @@ export function ApplicationLayout() {
       projectName="Alex 导演台"
       projectHome="/"
       pathname={location.pathname}
-      compact={!inSettings}
+      compact
       actions={!inSettings ? (
         <Button
           type="primary"
@@ -55,7 +60,32 @@ export function ApplicationLayout() {
         </Button>
       ) : undefined}
     >
-      <Outlet />
+      {inSettings ? (
+        <SettingsLayout
+          pathname={location.pathname}
+          items={[
+            {
+              label: "服务器连接",
+              to: "/settings/services",
+              icon: <Server size={16} />,
+            },
+            {
+              label: "Agent 管理",
+              to: "/settings/agents",
+              icon: <Bot size={16} />,
+            },
+            {
+              label: "Agent 技能",
+              to: "/settings/skills",
+              icon: <Sparkles size={16} />,
+            },
+          ]}
+        >
+          <Outlet />
+        </SettingsLayout>
+      ) : (
+        <Outlet />
+      )}
     </TitledWorkspaceLayout>
   );
 
@@ -99,41 +129,49 @@ export function ApplicationLayout() {
         </>
       )}
     >
-      {inSettings ? titledWorkspace : (
-        <StandardWorkspaceLayout
-          navigationLabel="应用导航"
-          agentOverlay={isAgentOverlay}
-          onCloseAgent={() => setAgentOpen(false)}
-          navigation={(
-            <>
-              <nav className="director-rail-nav">
-                <Tooltip title="项目中心" placement="right">
-                  <Link className="director-rail-link active" to="/" aria-label="项目中心" aria-current="page">
-                    <LayoutDashboard size={19} strokeWidth={1.8} />
-                    <span>项目中心</span>
-                  </Link>
-                </Tooltip>
-              </nav>
-              <div className="director-rail-footer">
-                <Tooltip title="设置" placement="right">
-                  <Link className="director-rail-link" to="/settings/services" aria-label="设置">
-                    <Settings size={19} strokeWidth={1.8} />
-                    <span>设置</span>
-                  </Link>
-                </Tooltip>
-                <Tooltip title="服务正常" placement="right">
-                  <div className="director-rail-status" aria-label="服务正常">
-                    <Badge status="success" />
-                  </div>
-                </Tooltip>
-              </div>
-            </>
-          )}
-          agent={agentOpen ? <ApplicationAgentPanel onClose={() => setAgentOpen(false)} /> : undefined}
-        >
-          {titledWorkspace}
-        </StandardWorkspaceLayout>
-      )}
+      <StandardWorkspaceLayout
+        navigationLabel="应用导航"
+        agentOverlay={isAgentOverlay}
+        onCloseAgent={() => setAgentOpen(false)}
+        navigation={(
+          <>
+            <nav className="director-rail-nav">
+              <Tooltip title="项目中心" placement="right">
+                <Link
+                  className={`director-rail-link ${inSettings ? "" : "active"}`}
+                  to="/"
+                  aria-label="项目中心"
+                  aria-current={inSettings ? undefined : "page"}
+                >
+                  <LayoutDashboard size={19} strokeWidth={1.8} />
+                  <span>项目中心</span>
+                </Link>
+              </Tooltip>
+            </nav>
+            <div className="director-rail-footer">
+              <Tooltip title="设置" placement="right">
+                <Link
+                  className={`director-rail-link ${inSettings ? "active" : ""}`}
+                  to="/settings/services"
+                  aria-label="设置"
+                  aria-current={inSettings ? "page" : undefined}
+                >
+                  <Settings size={19} strokeWidth={1.8} />
+                  <span>设置</span>
+                </Link>
+              </Tooltip>
+              <Tooltip title="服务正常" placement="right">
+                <div className="director-rail-status" aria-label="服务正常">
+                  <Badge status="success" />
+                </div>
+              </Tooltip>
+            </div>
+          </>
+        )}
+        agent={agentOpen ? <ApplicationAgentPanel onClose={() => setAgentOpen(false)} /> : undefined}
+      >
+        {titledWorkspace}
+      </StandardWorkspaceLayout>
     </AppLayout>
   );
 }

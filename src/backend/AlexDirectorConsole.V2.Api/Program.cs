@@ -1,4 +1,5 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Copilot;
 using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
@@ -71,6 +72,7 @@ builder.Services.AddScoped<IVisualReferenceService, VisualReferenceService>();
 builder.Services.AddScoped<IVoiceProfileService, VoiceProfileService>();
 builder.Services.AddScoped<IShotFrameService, ShotFrameService>();
 builder.Services.AddScoped<IProjectSettingsAssistant, MafProjectSettingsAssistant>();
+builder.Services.AddScoped<IAgentTextInvoker, MafAgentTextInvoker>();
 builder.Services.AddScoped<IProjectSettingsToolService, ProjectSettingsToolService>();
 builder.Services.AddScoped<IStoryMaterialAnalyzer, MafStoryMaterialAnalyzer>();
 builder.Services.AddScoped<IAdaptationScriptWriter, MafAdaptationScriptWriter>();
@@ -114,6 +116,11 @@ builder.Services.AddScoped<ICommandHandler<TestComfyUiConnectionCommand, ComfyUi
 builder.Services.AddScoped<IQueryHandler<ListSkillsQuery, IReadOnlyList<SkillView>>, ListSkillsQueryHandler>();
 builder.Services.AddScoped<IQueryHandler<GetSkillQuery, SkillView?>, GetSkillQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateSkillCommand, SkillView?>, UpdateSkillCommandHandler>();
+builder.Services.AddScoped<IQueryHandler<ListAgentsQuery, IReadOnlyList<AgentView>>, ListAgentsQueryHandler>();
+builder.Services.AddScoped<IQueryHandler<GetAgentQuery, AgentView?>, GetAgentQueryHandler>();
+builder.Services.AddScoped<ICommandHandler<CreateAgentCommand, SaveAgentResult>, CreateAgentCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateAgentCommand, SaveAgentResult>, UpdateAgentCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<DeleteAgentCommand, bool>, DeleteAgentCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<GetCopilotConversationQuery, CopilotConversationView?>, GetCopilotConversationQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<SendCopilotMessageCommand, SendCopilotMessageResult>, SendCopilotMessageCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ResetCopilotConversationCommand, bool>, ResetCopilotConversationCommandHandler>();
@@ -146,6 +153,7 @@ app.MapProduction();
 app.MapFoundryConfiguration();
 app.MapComfyUiConfiguration();
 app.MapSkills();
+app.MapAgents();
 app.MapCopilot();
 app.Run();
 

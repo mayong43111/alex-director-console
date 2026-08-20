@@ -128,8 +128,7 @@ public sealed class AzureFoundryProjectCoverGenerator(
             throw new ProjectGenerationConfigurationException("请先配置 gpt-image-2 的 Endpoint 和 API Key。");
         }
 
-        var protector = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1");
-        var apiKey = protector.Unprotect(protectedApiKey);
+        var apiKey = LlmChatClientFactory.UnprotectApiKey(dataProtectionProvider, protectedApiKey);
         var baseEndpoint = endpoint.TrimEnd('/');
         if (baseEndpoint.EndsWith("/openai/v1", StringComparison.OrdinalIgnoreCase))
         {
@@ -467,7 +466,8 @@ public sealed record ProjectSettingsAssistRequest(
     string? Field,
     string? CurrentValue,
     string? Instruction,
-    JsonElement Context);
+    JsonElement Context,
+    string? SystemInstructions = null);
 
 public sealed record ProjectSettingsAssistView(
     string Field,
@@ -491,6 +491,7 @@ public sealed class MafProjectSettingsAssistant(
     private static readonly IReadOnlyDictionary<string, (string Label, int MaxLength)> Fields =
         new Dictionary<string, (string, int)>(StringComparer.Ordinal)
         {
+            ["description"] = ("项目描述", 4000),
             ["visualStyle"] = ("视觉风格", 200),
             ["protagonistSpecies"] = ("主角物种", 200),
             ["artDirection"] = ("美术方向", 2000),
@@ -519,6 +520,18 @@ public sealed class MafProjectSettingsAssistant(
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
 
+        var configuredInstructions = request.SystemInstructions?.Trim();
+        var instructions = string.IsNullOrWhiteSpace(configuredInstructions)
+            ? $$"""
+                你是影视项目设定编辑。根据完整项目上下文撰写“{{fieldDefinition.Label}}”。
+                当前内容为空时，从上下文生成可直接用于制作的内容；当前内容非空时，保留原意并提升明确性、一致性和可执行性。
+                不新增上下文无法支持的关键剧情事实。只返回字段正文，不要标题、解释、Markdown 围栏或 JSON。
+                字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
+                """
+            : $$"""
+                {{configuredInstructions}}
+                字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
+                """;
         var agent = LlmChatClientFactory
             .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
@@ -536,12 +549,7 @@ public sealed class MafProjectSettingsAssistant(
                     DisableAgentSkillsProvider = true,
                     ChatOptions = new ChatOptions
                     {
-                        Instructions = $$"""
-                            你是影视项目设定编辑。根据完整项目上下文撰写“{{fieldDefinition.Label}}”。
-                            当前内容为空时，从上下文生成可直接用于制作的内容；当前内容非空时，保留原意并提升明确性、一致性和可执行性。
-                            不新增上下文无法支持的关键剧情事实。只返回字段正文，不要标题、解释、Markdown 围栏或 JSON。
-                            字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
-                            """,
+                        Instructions = instructions,
                         MaxOutputTokens = 4_096
                     }
                 },

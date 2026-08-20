@@ -26,6 +26,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
     public DbSet<ComfyUiConfiguration> ComfyUiConfigurations => Set<ComfyUiConfiguration>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
+    public DbSet<AgentDefinition> AgentDefinitions => Set<AgentDefinition>();
+    public DbSet<AgentSkill> AgentSkills => Set<AgentSkill>();
     public DbSet<CopilotConversation> CopilotConversations => Set<CopilotConversation>();
     public DbSet<CopilotMessage> CopilotMessages => Set<CopilotMessage>();
 
@@ -398,6 +400,27 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Description).HasMaxLength(4000).IsRequired();
             entity.Property(item => item.Version).HasMaxLength(40).IsRequired();
             entity.Property(item => item.SourcePath).HasMaxLength(1000).IsRequired();
+        });
+
+        modelBuilder.Entity<AgentDefinition>(entity =>
+        {
+            entity.ToTable("AgentDefinitions");
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => item.Name).IsUnique();
+            entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.SystemPrompt).HasMaxLength(100000).IsRequired();
+        });
+
+        modelBuilder.Entity<AgentSkill>(entity =>
+        {
+            entity.ToTable("AgentSkills");
+            entity.HasKey(item => new { item.AgentId, item.SkillId });
+            entity.Property(item => item.SkillId).HasMaxLength(100);
+            entity.HasIndex(item => item.SkillId);
+            entity.HasOne<AgentDefinition>().WithMany().HasForeignKey(item => item.AgentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<SkillDefinition>().WithMany().HasForeignKey(item => item.SkillId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<CopilotConversation>(entity =>

@@ -290,11 +290,11 @@ public sealed class TestFoundryConnectionHandler(
             return new(false, "请先保存服务地址和所需密钥。", deployment, false);
         }
 
-        var apiKey = string.IsNullOrWhiteSpace(protectedApiKey)
-            ? "local-vllm"
-            : dataProtectionProvider.CreateProtector("FoundryApiKeys.v1").Unprotect(protectedApiKey);
         try
         {
+            var apiKey = string.IsNullOrWhiteSpace(protectedApiKey)
+                ? "local-vllm"
+                : LlmChatClientFactory.UnprotectApiKey(dataProtectionProvider, protectedApiKey);
             await connectionTester.TestAsync(
                 endpoint,
                 deployment,
@@ -306,6 +306,10 @@ public sealed class TestFoundryConnectionHandler(
                 deployment,
                 true);
         }
+            catch (ProjectGenerationConfigurationException error)
+            {
+                return new(false, error.Message, deployment, false);
+            }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             logger.LogWarning(

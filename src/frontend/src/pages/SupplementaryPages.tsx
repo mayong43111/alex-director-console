@@ -4,9 +4,20 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { Link, NavLink, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { ProTable, type ProColumns } from "@ant-design/pro-components";
-import { Button, Input, Modal, Popconfirm, Space, Tooltip } from "antd";
+import { Button, Input, Modal, Popconfirm, Select, Space, Tooltip } from "antd";
+import {
+  builtInAgentIds,
+  createAgent,
+  deleteAgent,
+  invokeAgent,
+  listAgents,
+  updateAgent,
+  type AgentInvocationResult,
+  type AgentRecord,
+} from "../api/agents";
+import { AgentTextArea, type AgentTextAreaStatus } from "../components/AgentTextArea";
 import {
   createProject,
   deleteProject,
@@ -35,8 +46,8 @@ import {
   ChevronDown,
   CircleAlert,
   Cloud,
-  Code2,
   ExternalLink,
+  FlaskConical,
   MoreHorizontal,
   Pause,
   Pencil,
@@ -105,6 +116,7 @@ export function ProjectCenterPage() {
   const [draftDescription, setDraftDescription] = useState("");
   const [editor, setEditor] = useState<{ mode: "create" | "edit"; project?: ProjectRecord } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [descriptionAgentStatus, setDescriptionAgentStatus] = useState<AgentTextAreaStatus>("idle");
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -131,6 +143,7 @@ export function ProjectCenterPage() {
     const openCreateDialog = () => {
       setDraftName("");
       setDraftDescription("");
+      setDescriptionAgentStatus("idle");
       setActionError(null);
       setEditor({ mode: "create" });
     };
@@ -169,6 +182,7 @@ export function ProjectCenterPage() {
   function editProject(project: ProjectRecord) {
     setDraftName(project.name);
     setDraftDescription(project.description ?? "");
+    setDescriptionAgentStatus("idle");
     setActionError(null);
     setEditor({ mode: "edit", project });
   }
@@ -202,7 +216,6 @@ export function ProjectCenterPage() {
       width: 260,
       render: (_, project) => (
         <div className="project-table-name">
-          <span className="project-monogram">{project.name.slice(0, 1)}</span>
           <strong>{project.name}</strong>
         </div>
       ),
@@ -305,7 +318,7 @@ export function ProjectCenterPage() {
       <Modal
         title={editor?.mode === "edit" ? "编辑项目" : "创建项目"}
         open={editor !== null}
-        onCancel={() => !saving && setEditor(null)}
+        onCancel={() => !saving && descriptionAgentStatus !== "loading" && setEditor(null)}
         footer={null}
         destroyOnHidden
       >
@@ -322,22 +335,27 @@ export function ProjectCenterPage() {
               autoFocus
             />
           </label>
-          <label htmlFor="new-project-description">
-            项目描述
-            <Input.TextArea
+          <div className="project-editor-field">
+            <label htmlFor="new-project-description">项目描述</label>
+            <AgentTextArea
               id="new-project-description"
+              agentId={builtInAgentIds.projectDescriptionWriter}
               value={draftDescription}
+              onChange={setDraftDescription}
+              context={{ projectName: draftName.trim() }}
+              invokeDisabled={!draftName.trim()}
+              onStatusChange={setDescriptionAgentStatus}
+              disabled={saving}
               maxLength={4000}
-              onChange={(event) => setDraftDescription(event.target.value)}
               placeholder="故事类型、制作目标或项目范围（可选）"
               rows={4}
               showCount
             />
-          </label>
+          </div>
           {actionError && <p className="project-action-error" role="alert"><CircleAlert size={14} />{actionError}</p>}
           <div className="project-editor-actions">
-            <Button onClick={() => setEditor(null)} disabled={saving}>取消</Button>
-            <Button type="primary" htmlType="submit" loading={saving} disabled={!draftName.trim()}>
+            <Button onClick={() => setEditor(null)} disabled={saving || descriptionAgentStatus === "loading"}>取消</Button>
+            <Button type="primary" htmlType="submit" loading={saving} disabled={!draftName.trim() || descriptionAgentStatus !== "idle"}>
               {editor?.mode === "edit" ? "保存修改" : "创建项目"}
             </Button>
           </div>
@@ -1012,38 +1030,13 @@ export function ProductionRunPage() {
 }
 
 function GlobalSettingsShell({
-  active,
   children,
 }: {
-  active: "services" | "skills";
   children: React.ReactNode;
 }) {
   return (
     <div className="global-settings">
-      <div className="global-settings-layout">
-        <aside>
-          <span className="eyebrow">全局设置</span>
-          <NavLink
-            className={active === "services" ? "active" : ""}
-            to="/settings/services"
-          >
-            <Server size={16} />
-            服务器连接
-          </NavLink>
-          <NavLink
-            className={active === "skills" ? "active" : ""}
-            to="/settings/skills"
-          >
-            <Sparkles size={16} />
-            Agent 技能
-          </NavLink>
-          <button>
-            <Code2 size={16} />
-            开发诊断
-          </button>
-        </aside>
-        <main>{children}</main>
-      </div>
+      {children}
     </div>
   );
 }
@@ -1156,7 +1149,7 @@ export function ServicesPage() {
     : Boolean(configuration?.apiKeyConfigured && endpoint);
 
   return (
-    <GlobalSettingsShell active="services">
+    <GlobalSettingsShell>
       {configured && (
         <div className="settings-page-toolbar">
           <span className="saved-state">
@@ -1560,7 +1553,7 @@ export function SkillsPage() {
   }
 
   return (
-    <GlobalSettingsShell active="skills">
+    <GlobalSettingsShell>
       <div className="settings-page-toolbar">
         <button className="primary-button" disabled title="Skill 导入将在项目副本阶段开放">
           <Plus size={14} />
@@ -1644,6 +1637,316 @@ export function SkillsPage() {
           <section className="skill-detail settings-empty">请选择一个 Skill。</section>
         )}
       </div>
+    </GlobalSettingsShell>
+  );
+}
+
+export function AgentsPage() {
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
+  const [skills, setSkills] = useState<SkillRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<AgentRecord | "create" | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftSystemPrompt, setDraftSystemPrompt] = useState("");
+  const [draftSkillIds, setDraftSkillIds] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [testingAgent, setTestingAgent] = useState<AgentRecord | null>(null);
+  const [testInput, setTestInput] = useState("");
+  const [testResult, setTestResult] = useState<AgentInvocationResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [testRunning, setTestRunning] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([listAgents(controller.signal), listSkills(controller.signal)])
+      .then(([loadedAgents, loadedSkills]) => {
+        setAgents(loadedAgents);
+        setSkills(loadedSkills);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Agent 数据加载失败。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  function openEditor(agent?: AgentRecord) {
+    setDraftName(agent?.name ?? "");
+    setDraftSystemPrompt(agent?.systemPrompt ?? "");
+    setDraftSkillIds(agent?.skillIds ?? []);
+    setError(null);
+    setEditor(agent ?? "create");
+  }
+
+  async function saveAgent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!draftName.trim() || !draftSystemPrompt.trim() || saving || !editor) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const input = {
+        name: draftName,
+        systemPrompt: draftSystemPrompt,
+        skillIds: draftSkillIds,
+      };
+      const saved = editor === "create"
+        ? await createAgent(input)
+        : await updateAgent(editor.id, input);
+      setAgents((current) => editor === "create"
+        ? [...current, saved].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"))
+        : current.map((agent) => agent.id === saved.id ? saved : agent));
+      setEditor(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Agent 保存失败。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeAgent(agent: AgentRecord) {
+    if (deletingId) return;
+    setDeletingId(agent.id);
+    setError(null);
+    try {
+      await deleteAgent(agent.id);
+      setAgents((current) => current.filter((item) => item.id !== agent.id));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Agent 删除失败。");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  function openAgentTest(agent: AgentRecord) {
+    setTestingAgent(agent);
+    setTestInput("");
+    setTestResult(null);
+    setTestError(null);
+  }
+
+  async function runAgentTest() {
+    if (!testingAgent || !testInput.trim() || testRunning) return;
+    setTestRunning(true);
+    setTestResult(null);
+    setTestError(null);
+    try {
+      setTestResult(await invokeAgent(testingAgent.id, {
+        input: testInput,
+        context: { source: "agent-management-test" },
+      }));
+    } catch (runError) {
+      setTestError(runError instanceof Error ? runError.message : "Agent 测试执行失败。");
+    } finally {
+      setTestRunning(false);
+    }
+  }
+
+  const skillNames = new Map(skills.map((skill) => [skill.id, skill.name]));
+  const columns: ProColumns<AgentRecord>[] = [
+    {
+      title: "名称",
+      dataIndex: "name",
+      width: 180,
+      render: (_, agent) => <strong className="agent-table-name">{agent.name}</strong>,
+    },
+    {
+      title: "系统提示词",
+      dataIndex: "systemPrompt",
+      width: 250,
+      ellipsis: true,
+      render: (_, agent) => <span className="agent-prompt-preview">{agent.systemPrompt}</span>,
+    },
+    {
+      title: "关联技能",
+      dataIndex: "skillIds",
+      width: 260,
+      render: (_, agent) => (
+        <span className="agent-skill-summary">
+          {agent.skillIds.length > 0
+            ? agent.skillIds.map((skillId) => skillNames.get(skillId) ?? skillId).join("、")
+            : "未关联技能"}
+        </span>
+      ),
+    },
+    {
+      title: "更新时间",
+      dataIndex: "updatedAtUtc",
+      width: 110,
+      render: (_, agent) => new Date(agent.updatedAtUtc).toLocaleDateString("zh-CN"),
+    },
+    {
+      title: "操作",
+      valueType: "option",
+      width: 128,
+      render: (_, agent) => (
+        <Space size={2}>
+          <Tooltip title="测试 Agent">
+            <Button
+              size="small"
+              type="text"
+              icon={<FlaskConical size={14} />}
+              onClick={() => openAgentTest(agent)}
+              aria-label={`测试 ${agent.name}`}
+            />
+          </Tooltip>
+          <Tooltip title="编辑 Agent">
+            <Button size="small" type="text" icon={<Pencil size={14} />} onClick={() => openEditor(agent)} />
+          </Tooltip>
+          <Popconfirm
+            title={`删除“${agent.name}”？`}
+            description="Agent 与技能的关联将一并删除。"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true, loading: deletingId === agent.id }}
+            onConfirm={() => removeAgent(agent)}
+          >
+            <Tooltip title="删除 Agent">
+              <Button size="small" type="text" danger icon={<Trash2 size={14} />} />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <GlobalSettingsShell>
+      <div className="settings-page-toolbar">
+        <Button type="primary" icon={<Plus size={14} />} onClick={() => openEditor()}>
+          新建 Agent
+        </Button>
+      </div>
+      {error && !editor && <p className="settings-feedback error">{error}</p>}
+      <ProTable<AgentRecord>
+        className="agent-table"
+        rowKey="id"
+        columns={columns}
+        dataSource={agents}
+        loading={loading}
+        size="small"
+        search={false}
+        options={false}
+        toolBarRender={false}
+        pagination={{
+          pageSize: 10,
+          showSizeChanger: false,
+          showTotal: () => null,
+          size: "small",
+        }}
+        locale={{ emptyText: error || "还没有 Agent，请创建第一个 Agent。" }}
+      />
+      <Modal
+        title={testingAgent ? `测试 Agent：${testingAgent.name}` : "测试 Agent"}
+        open={testingAgent !== null}
+        onCancel={() => !testRunning && setTestingAgent(null)}
+        footer={null}
+        destroyOnHidden
+        width={640}
+      >
+        <div className="agent-test-form">
+          <label htmlFor="agent-test-input">
+            输入内容
+            <Input.TextArea
+              id="agent-test-input"
+              value={testInput}
+              onChange={(event) => setTestInput(event.target.value)}
+              placeholder="输入要交给 Agent 处理的内容"
+              rows={5}
+              maxLength={100000}
+              disabled={testRunning}
+              autoFocus
+            />
+          </label>
+          {testError && <p className="project-action-error" role="alert"><CircleAlert size={14} />{testError}</p>}
+          {testResult && (
+            <section className="agent-test-result" aria-live="polite">
+              <header>
+                <strong>执行结果</strong>
+                <span>{testResult.model} · {testResult.runtime}</span>
+              </header>
+              <div>{testResult.value}</div>
+            </section>
+          )}
+          <div className="project-editor-actions">
+            <Button onClick={() => setTestingAgent(null)} disabled={testRunning}>关闭</Button>
+            <Button
+              type="primary"
+              icon={<Play size={14} />}
+              loading={testRunning}
+              disabled={!testInput.trim()}
+              onClick={runAgentTest}
+            >
+              执行测试
+            </Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal
+        title={editor === "create" ? "新建 Agent" : "编辑 Agent"}
+        open={editor !== null}
+        onCancel={() => !saving && setEditor(null)}
+        footer={null}
+        destroyOnHidden
+        width={680}
+      >
+        <form className="agent-editor-form" onSubmit={saveAgent}>
+          <label htmlFor="agent-name">
+            名称
+            <Input
+              id="agent-name"
+              value={draftName}
+              maxLength={200}
+              onChange={(event) => setDraftName(event.target.value)}
+              placeholder="输入 Agent 名称"
+              autoFocus
+            />
+          </label>
+          <label htmlFor="agent-system-prompt">
+            系统提示词
+            <Input.TextArea
+              id="agent-system-prompt"
+              value={draftSystemPrompt}
+              maxLength={100000}
+              onChange={(event) => setDraftSystemPrompt(event.target.value)}
+              placeholder="定义 Agent 的职责、约束和输出要求"
+              rows={9}
+              showCount
+            />
+          </label>
+          <label htmlFor="agent-skills">
+            关联技能
+            <Select
+              id="agent-skills"
+              mode="multiple"
+              value={draftSkillIds}
+              onChange={setDraftSkillIds}
+              placeholder="选择 Agent 可使用的技能"
+              options={skills.map((skill) => ({
+                value: skill.id,
+                label: `${skill.name}${skill.isEnabled ? "" : "（已禁用）"}`,
+              }))}
+              optionFilterProp="label"
+            />
+          </label>
+          {error && <p className="project-action-error" role="alert"><CircleAlert size={14} />{error}</p>}
+          <div className="project-editor-actions">
+            <Button onClick={() => setEditor(null)} disabled={saving}>取消</Button>
+            <Button
+              type="primary"
+              htmlType="submit"
+              loading={saving}
+              disabled={!draftName.trim() || !draftSystemPrompt.trim()}
+            >
+              保存 Agent
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </GlobalSettingsShell>
   );
 }

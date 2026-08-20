@@ -10,6 +10,7 @@ export interface ProjectRecord {
 interface ValidationProblem {
   title?: string
   detail?: string
+  error?: string
   errors?: Record<string, string[]>
 }
 
@@ -84,12 +85,36 @@ export async function deleteProject(
   }
 }
 
+export interface ProjectDescriptionAssistResult {
+  field: string
+  value: string
+  model: string
+  runtime: string
+}
+
+export async function assistProjectDescription(
+  input: { name: string; description: string },
+  signal?: AbortSignal,
+): Promise<ProjectDescriptionAssistResult> {
+  const response = await fetch('/api/v2/projects/assist-description', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(await readProjectError(response, '项目描述优化失败，请稍后重试。'))
+  }
+  return response.json() as Promise<ProjectDescriptionAssistResult>
+}
+
 async function readProjectError(response: Response, fallback: string): Promise<string> {
   const problem = await response.json().catch(() => null) as ValidationProblem | null
   const validationMessage = problem?.errors
     ? Object.values(problem.errors).flat().join(' ')
     : null
-  return validationMessage || problem?.detail || problem?.title || fallback
+  return validationMessage || problem?.detail || problem?.title || problem?.error || fallback
 }
 
 export interface ProductionEpisodeRecord {

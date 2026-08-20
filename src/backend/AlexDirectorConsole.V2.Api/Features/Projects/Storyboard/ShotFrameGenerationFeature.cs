@@ -109,8 +109,7 @@ public sealed class AzureFoundryShotFrameGenerator(
             throw new ProjectGenerationConfigurationException("请先配置 gpt-image-2 的 Endpoint 和 API Key。");
         }
 
-        var apiKey = dataProtectionProvider.CreateProtector("FoundryApiKeys.v1")
-            .Unprotect(protectedApiKey);
+        var apiKey = LlmChatClientFactory.UnprotectApiKey(dataProtectionProvider, protectedApiKey);
         var baseEndpoint = endpoint.TrimEnd('/');
         if (baseEndpoint.EndsWith("/openai/v1", StringComparison.OrdinalIgnoreCase))
         {
