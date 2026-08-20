@@ -49,8 +49,10 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(2, await dbContext.AgentDefinitions.CountAsync());
-        var link = Assert.Single(await dbContext.AgentSkills.ToListAsync());
+        Assert.Equal(3, await dbContext.AgentDefinitions.CountAsync());
+        var link = Assert.Single(await dbContext.AgentSkills
+            .Where(item => item.AgentId == created.Id)
+            .ToListAsync());
         Assert.Equal(created.Id, link.AgentId);
         Assert.Equal("storyboard-design", link.SkillId);
     }
@@ -97,8 +99,10 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v2/agents/{created.Id}")).StatusCode);
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(1, await dbContext.AgentDefinitions.CountAsync());
-        Assert.Equal(0, await dbContext.AgentSkills.CountAsync());
+        Assert.Equal(2, await dbContext.AgentDefinitions.CountAsync());
+        Assert.DoesNotContain(
+            await dbContext.AgentSkills.ToListAsync(),
+            link => link.AgentId == created.Id);
     }
 
     [Fact]

@@ -6,6 +6,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
+using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
@@ -37,7 +38,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IComfyUiVideoClient>();
             services.RemoveAll<IComfyUiWorkflowProvider>();
             services.RemoveAll<IHostedService>();
-            services.RemoveAll<IProjectCopilotAgent>();
+            services.RemoveAll<ISessionAgent>();
             services.RemoveAll<IProjectCoverGenerator>();
             services.RemoveAll<IShotFrameGenerator>();
             services.RemoveAll<ILocalVoiceDesigner>();
@@ -54,7 +55,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IComfyUiVideoClient>(provider =>
                 provider.GetRequiredService<TestComfyUiVideoClient>());
             services.AddSingleton<IComfyUiWorkflowProvider, TestComfyUiWorkflowProvider>();
-            services.AddScoped<IProjectCopilotAgent, TestProjectCopilotAgent>();
+            services.AddScoped<ISessionAgent, TestSessionAgent>();
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
             services.AddSingleton<IShotFrameGenerator, TestShotFrameGenerator>();
             services.AddSingleton<ILocalVoiceDesigner, TestLocalVoiceDesigner>();
@@ -117,17 +118,15 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     []));
     }
 
-    private sealed class TestProjectCopilotAgent : IProjectCopilotAgent
+    private sealed class TestSessionAgent : ISessionAgent
     {
-        public Task<CopilotAgentReply> ReplyAsync(
-            Guid projectId,
-            string projectName,
-            string page,
-            string episode,
-            IReadOnlyList<CopilotHistoryMessage> history,
+        public Task<SessionAgentReply> ReplyAsync(
+            AgentView agent,
+            SessionAgentContext context,
+            IReadOnlyList<SessionHistoryMessage> history,
             string message,
             CancellationToken cancellationToken) => Task.FromResult(
-                new CopilotAgentReply(
+                new SessionAgentReply(
                     $"收到：{message}（历史 {history.Count} 条）",
                     "gpt-5.4",
                     "MAF HarnessAgent"));

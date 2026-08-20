@@ -21,13 +21,18 @@ public sealed class SkillEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var skills = await response.Content.ReadFromJsonAsync<SkillResponse[]>();
         Assert.NotNull(skills);
-        Assert.Equal(5, skills.Length);
+        Assert.Equal(6, skills.Length);
         var storyboard = Assert.Single(skills, skill => skill.Id == "storyboard-design");
         Assert.Equal("分镜设计", storyboard.Name);
         Assert.Equal("2.1.0", storyboard.Version);
         Assert.True(storyboard.IsEnabled);
         Assert.Contains("write_storyboard", storyboard.AllowedTools);
         Assert.Contains("# 分镜设计", storyboard.Content, StringComparison.Ordinal);
+        var projectManagement = Assert.Single(skills, skill => skill.Id == "project-management");
+        Assert.Equal(
+            ["list_projects", "read_project", "create_project", "update_project"],
+            projectManagement.AllowedTools);
+        Assert.DoesNotContain("delete_project", projectManagement.AllowedTools);
     }
 
     [Fact]

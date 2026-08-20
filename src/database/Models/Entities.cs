@@ -345,6 +345,29 @@ public sealed class AgentSkill
     public string SkillId { get; set; } = string.Empty;
 }
 
+public sealed class Session
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AgentId { get; set; }
+    public string ScopeKey { get; set; } = string.Empty;
+    public Guid? ProjectId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Runtime { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class SessionMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid SessionId { get; set; }
+    public long Sequence { get; set; }
+    public string Role { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public string? Model { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+}
+
 public sealed class CopilotConversation
 {
     public Guid Id { get; set; } = Guid.NewGuid();

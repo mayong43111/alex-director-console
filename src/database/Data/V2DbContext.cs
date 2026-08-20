@@ -28,6 +28,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<AgentDefinition> AgentDefinitions => Set<AgentDefinition>();
     public DbSet<AgentSkill> AgentSkills => Set<AgentSkill>();
+    public DbSet<Session> Sessions => Set<Session>();
+    public DbSet<SessionMessage> SessionMessages => Set<SessionMessage>();
     public DbSet<CopilotConversation> CopilotConversations => Set<CopilotConversation>();
     public DbSet<CopilotMessage> CopilotMessages => Set<CopilotMessage>();
 
@@ -420,6 +422,34 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.HasOne<AgentDefinition>().WithMany().HasForeignKey(item => item.AgentId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasOne<SkillDefinition>().WithMany().HasForeignKey(item => item.SkillId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<Session>(entity =>
+        {
+            entity.ToTable("Sessions");
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.AgentId, item.ScopeKey }).IsUnique();
+            entity.HasIndex(item => item.ProjectId);
+            entity.Property(item => item.ScopeKey).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.Title).HasMaxLength(500).IsRequired();
+            entity.Property(item => item.Runtime).HasMaxLength(100).IsRequired();
+            entity.HasOne<AgentDefinition>().WithMany().HasForeignKey(item => item.AgentId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<SessionMessage>(entity =>
+        {
+            entity.ToTable("SessionMessages", table =>
+                table.HasCheckConstraint("CK_SessionMessages_Sequence", "Sequence > 0"));
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.SessionId, item.Sequence }).IsUnique();
+            entity.Property(item => item.Role).HasMaxLength(20).IsRequired();
+            entity.Property(item => item.Content).HasMaxLength(100000).IsRequired();
+            entity.Property(item => item.Model).HasMaxLength(100);
+            entity.HasOne<Session>().WithMany().HasForeignKey(item => item.SessionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

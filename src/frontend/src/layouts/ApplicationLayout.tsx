@@ -1,7 +1,9 @@
 import { Badge, Button, Tooltip } from "antd";
 import { useEffect, useState } from "react";
-import { ArrowLeft, Bot, LayoutDashboard, Plus, SendHorizontal, Server, Settings, Sparkles, X } from "lucide-react";
+import { ArrowLeft, Bot, LayoutDashboard, MessageSquareText, Plus, Server, Settings, Sparkles } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { assistantDirectorAgent } from "../api/sessions";
+import { AssistantDirectorPanel } from "../components/AssistantDirectorPanel";
 import { AppLayout } from "./AppLayout";
 import { SettingsLayout } from "./SettingsLayout";
 import { StandardWorkspaceLayout } from "./StandardWorkspaceLayout";
@@ -12,12 +14,16 @@ export function ApplicationLayout() {
   const navigate = useNavigate();
   const inSettings = location.pathname.startsWith("/settings/");
   const returnTo = sessionStorage.getItem("alex-director-v2.lastProjectPath") ?? "/";
-  const workspaceTitle = location.pathname.endsWith("/agents")
+  const workspaceTitle = location.pathname.endsWith("/sessions")
+    ? "Session 管理"
+    : location.pathname.endsWith("/agents")
     ? "Agent 管理"
     : location.pathname.endsWith("/skills")
       ? "技能目录"
       : inSettings ? "服务器连接" : "项目";
-  const workspaceDescription = location.pathname.endsWith("/agents")
+  const workspaceDescription = location.pathname.endsWith("/sessions")
+    ? "查看不同 Agent 与业务 scope 下独立保存的消息历史"
+    : location.pathname.endsWith("/agents")
     ? "维护 Agent 名称、系统提示词与关联技能"
     : location.pathname.endsWith("/skills")
       ? "管理技能版本、工具权限与项目副本"
@@ -78,6 +84,11 @@ export function ApplicationLayout() {
               label: "Agent 技能",
               to: "/settings/skills",
               icon: <Sparkles size={16} />,
+            },
+            {
+              label: "Session 管理",
+              to: "/settings/sessions",
+              icon: <MessageSquareText size={16} />,
             },
           ]}
         >
@@ -168,56 +179,23 @@ export function ApplicationLayout() {
             </div>
           </>
         )}
-        agent={agentOpen ? <ApplicationAgentPanel onClose={() => setAgentOpen(false)} /> : undefined}
+        agent={agentOpen ? (
+          <AssistantDirectorPanel
+            agent={assistantDirectorAgent}
+            session={{
+              scopeKey: "global:project-center:assistant-director",
+              title: "项目中心",
+              page: "项目中心",
+              context: [
+                { label: "页面", value: "项目中心" },
+              ],
+            }}
+            onClose={() => setAgentOpen(false)}
+          />
+        ) : undefined}
       >
         {titledWorkspace}
       </StandardWorkspaceLayout>
     </AppLayout>
-  );
-}
-
-function ApplicationAgentPanel({ onClose }: { onClose: () => void }) {
-  return (
-    <aside className="agent-panel">
-      <header className="agent-header">
-        <div>
-          <Bot size={18} />
-          <strong>Agent 副导演</strong>
-        </div>
-        <div className="agent-header-actions">
-          <button className="icon-button" onClick={onClose} aria-label="关闭 Agent">
-            <X size={17} />
-          </button>
-        </div>
-      </header>
-      <div className="context-block">
-        <span className="eyebrow">当前上下文</span>
-        <div className="context-tags">
-          <span>应用：Alex 导演台</span>
-          <span>页面：项目中心</span>
-        </div>
-      </div>
-      <div className="agent-content">
-        <div className="agent-empty">
-          <div className="agent-avatar"><Sparkles size={16} /></div>
-          <strong>选择项目后开始协作</strong>
-          <p>项目级对话、Skills 和生产上下文将在进入具体项目后加载。</p>
-        </div>
-      </div>
-      <form className="composer" onSubmit={(event) => event.preventDefault()}>
-        <div className="composer-context">
-          <span>项目中心</span>
-          <span>等待项目上下文</span>
-        </div>
-        <textarea placeholder="进入项目后可向副导演提问" disabled />
-        <div>
-          <small>需要先选择项目</small>
-          <button className="send-button" disabled>
-            <SendHorizontal size={14} />
-            发送
-          </button>
-        </div>
-      </form>
-    </aside>
   );
 }

@@ -12,6 +12,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Versions;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
+using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
@@ -62,7 +63,7 @@ builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddHostedService<ShotVideoWorker>();
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();
-builder.Services.AddScoped<IProjectCopilotAgent, MafProjectCopilotAgent>();
+builder.Services.AddScoped<ISessionAgent, MafSessionAgent>();
 builder.Services.AddHttpClient<IProjectCoverGenerator, AzureFoundryProjectCoverGenerator>(client =>
     client.Timeout = TimeSpan.FromMinutes(5));
 builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerator>(client =>
@@ -121,6 +122,11 @@ builder.Services.AddScoped<IQueryHandler<GetAgentQuery, AgentView?>, GetAgentQue
 builder.Services.AddScoped<ICommandHandler<CreateAgentCommand, SaveAgentResult>, CreateAgentCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateAgentCommand, SaveAgentResult>, UpdateAgentCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<DeleteAgentCommand, bool>, DeleteAgentCommandHandler>();
+builder.Services.AddScoped<IQueryHandler<ListSessionsQuery, IReadOnlyList<SessionSummaryView>>, ListSessionsQueryHandler>();
+builder.Services.AddScoped<IQueryHandler<GetSessionQuery, SessionView?>, GetSessionQueryHandler>();
+builder.Services.AddScoped<IQueryHandler<GetScopedSessionQuery, SessionView?>, GetSessionQueryHandler>();
+builder.Services.AddScoped<ICommandHandler<SendSessionMessageCommand, SendSessionMessageResult>, SendSessionMessageCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<ResetSessionCommand, bool>, ResetSessionCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<GetCopilotConversationQuery, CopilotConversationView?>, GetCopilotConversationQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<SendCopilotMessageCommand, SendCopilotMessageResult>, SendCopilotMessageCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ResetCopilotConversationCommand, bool>, ResetCopilotConversationCommandHandler>();
@@ -154,6 +160,7 @@ app.MapFoundryConfiguration();
 app.MapComfyUiConfiguration();
 app.MapSkills();
 app.MapAgents();
+app.MapSessions();
 app.MapCopilot();
 app.Run();
 

@@ -1,12 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import {
-  Badge,
-  Button,
-  Dropdown,
-  Tag,
-  Tooltip,
-  type MenuProps,
-} from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Badge, Button, Dropdown, Tag, Tooltip, type MenuProps } from "antd";
 import {
   Link,
   Outlet,
@@ -25,9 +18,7 @@ import {
   Film,
   Gauge,
   LayoutDashboard,
-  RotateCcw,
   Search,
-  SendHorizontal,
   SlidersHorizontal,
   Sparkles,
   X,
@@ -40,12 +31,8 @@ import {
   type ProjectRecord,
   type ProductionEpisodeRecord,
 } from "../api/projects";
-import {
-  getCopilotConversation,
-  resetCopilotConversation,
-  sendCopilotMessage,
-  type CopilotMessage,
-} from "../api/copilot";
+import { assistantDirectorAgent } from "../api/sessions";
+import { AssistantDirectorPanel } from "../components/AssistantDirectorPanel";
 import {
   AppLayout,
   StandardWorkspaceLayout,
@@ -115,7 +102,14 @@ function getWorkflow(
       label: "剧本",
       tabs: [
         { label: "改编方案", to: `${projectBase}/script/adaptation` },
-        ...(episodeId ? [{ label: "正式剧本", to: `${projectBase}/script/episodes/${episodeId}` }] : []),
+        ...(episodeId
+          ? [
+              {
+                label: "正式剧本",
+                to: `${projectBase}/script/episodes/${episodeId}`,
+              },
+            ]
+          : []),
       ],
     };
   }
@@ -123,14 +117,20 @@ function getWorkflow(
     return {
       label: "分镜",
       tabs: [],
-      next: { label: "查看生产运行", to: `${projectBase}/production/episodes/${episodeId}` },
+      next: {
+        label: "查看生产运行",
+        to: `${projectBase}/production/episodes/${episodeId}`,
+      },
     };
   }
   if (pathname.endsWith("/production") || pathname.includes("/production/")) {
     return {
       label: "生产",
       tabs: [],
-      next: { label: "进入成片审阅", to: `${projectBase}/review/episodes/${episodeId}` },
+      next: {
+        label: "进入成片审阅",
+        to: `${projectBase}/review/episodes/${episodeId}`,
+      },
     };
   }
   if (pathname.includes("/review")) {
@@ -145,7 +145,9 @@ export function AppShell() {
   const { projectId = "tianqiao" } = useParams();
   const mainCanvasRef = useRef<HTMLElement>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
-  const [productionEpisodes, setProductionEpisodes] = useState<ProductionEpisodeRecord[]>([]);
+  const [productionEpisodes, setProductionEpisodes] = useState<
+    ProductionEpisodeRecord[]
+  >([]);
   const [selectedEpisode, setSelectedEpisode] = useState("");
   const [projectName, setProjectName] = useState(() => {
     const navigationName = (location.state as { projectName?: string } | null)
@@ -156,7 +158,8 @@ export function AppShell() {
         `alex-director-v2.project.${projectId}`,
       );
       return cachedProject
-        ? ((JSON.parse(cachedProject) as { name?: string }).name ?? project.name)
+        ? ((JSON.parse(cachedProject) as { name?: string }).name ??
+            project.name)
         : project.name;
     } catch {
       return project.name;
@@ -174,18 +177,27 @@ export function AppShell() {
         );
       })
       .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof DOMException && error.name === "AbortError")
+          return;
         console.warn("项目信息加载失败", error);
       });
     return () => controller.abort();
   }, [projectId]);
   useEffect(() => {
     const syncProductionRunEpisode = (event: Event) => {
-      const episodeId = (event as CustomEvent<{ productionEpisodeId: string }>).detail.productionEpisodeId;
+      const episodeId = (event as CustomEvent<{ productionEpisodeId: string }>)
+        .detail.productionEpisodeId;
       setSelectedEpisode(episodeId);
     };
-    window.addEventListener("alex:production-run-episode", syncProductionRunEpisode);
-    return () => window.removeEventListener("alex:production-run-episode", syncProductionRunEpisode);
+    window.addEventListener(
+      "alex:production-run-episode",
+      syncProductionRunEpisode,
+    );
+    return () =>
+      window.removeEventListener(
+        "alex:production-run-episode",
+        syncProductionRunEpisode,
+      );
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -194,10 +206,14 @@ export function AppShell() {
         .then((items) => {
           setProductionEpisodes(items);
           setSelectedEpisode((current) =>
-            items.some((item) => item.id === current) ? current : (items[0]?.id ?? ""));
+            items.some((item) => item.id === current)
+              ? current
+              : (items[0]?.id ?? ""),
+          );
         })
         .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") return;
+          if (error instanceof DOMException && error.name === "AbortError")
+            return;
           console.warn("生产剧集列表加载失败", error);
         });
     };
@@ -205,11 +221,17 @@ export function AppShell() {
     window.addEventListener("alex:production-episodes-updated", loadEpisodes);
     return () => {
       controller.abort();
-      window.removeEventListener("alex:production-episodes-updated", loadEpisodes);
+      window.removeEventListener(
+        "alex:production-episodes-updated",
+        loadEpisodes,
+      );
     };
   }, [projectId]);
   useEffect(() => {
-    sessionStorage.setItem("alex-director-v2.lastProjectPath", location.pathname);
+    sessionStorage.setItem(
+      "alex-director-v2.lastProjectPath",
+      location.pathname,
+    );
     mainCanvasRef.current?.scrollTo({ top: 0, left: 0 });
   }, [location.pathname]);
   useEffect(() => {
@@ -217,26 +239,35 @@ export function AppShell() {
     listProjects(controller.signal)
       .then(setProjects)
       .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof DOMException && error.name === "AbortError")
+          return;
         console.warn("项目列表加载失败", error);
       });
     return () => controller.abort();
   }, []);
   useEffect(() => {
     const updateProject = (event: Event) => {
-      const detail = (event as CustomEvent<{ projectId: string; name: string }>).detail;
+      const detail = (event as CustomEvent<{ projectId: string; name: string }>)
+        .detail;
       if (detail.projectId !== projectId) return;
       setProjectName(detail.name);
-      setProjects((current) => current.map((item) =>
-        item.id === detail.projectId ? { ...item, name: detail.name } : item));
+      setProjects((current) =>
+        current.map((item) =>
+          item.id === detail.projectId ? { ...item, name: detail.name } : item,
+        ),
+      );
       const cacheKey = `alex-director-v2.project.${detail.projectId}`;
       const cached = sessionStorage.getItem(cacheKey);
       if (cached) {
-        sessionStorage.setItem(cacheKey, JSON.stringify({ ...JSON.parse(cached), name: detail.name }));
+        sessionStorage.setItem(
+          cacheKey,
+          JSON.stringify({ ...JSON.parse(cached), name: detail.name }),
+        );
       }
     };
     window.addEventListener("alex:project-updated", updateProject);
-    return () => window.removeEventListener("alex:project-updated", updateProject);
+    return () =>
+      window.removeEventListener("alex:project-updated", updateProject);
   }, [projectId]);
   const [isAgentOverlay, setIsAgentOverlay] = useState(
     () => window.matchMedia("(max-width: 1279px)").matches,
@@ -249,7 +280,9 @@ export function AppShell() {
   };
   useEffect(() => {
     const mobileQuery = window.matchMedia("(max-width: 1279px)");
-    const syncAgentVisibility = (event: MediaQueryListEvent | MediaQueryList) => {
+    const syncAgentVisibility = (
+      event: MediaQueryListEvent | MediaQueryList,
+    ) => {
       setIsAgentOverlay(event.matches);
       setAgentOpen(!event.matches);
     };
@@ -258,10 +291,13 @@ export function AppShell() {
     return () => mobileQuery.removeEventListener("change", syncAgentVisibility);
   }, []);
   const [queueOpen, setQueueOpen] = useState(false);
-  const routeEpisode = location.pathname.match(/(?:script|storyboard|production|review)\/episodes\/([^/]+)/)?.[1];
+  const routeEpisode = location.pathname.match(
+    /(?:script|storyboard|production|review)\/episodes\/([^/]+)/,
+  )?.[1];
   const currentEpisode = routeEpisode ?? selectedEpisode;
   const currentEpisodeData =
-    productionEpisodes.find((episode) => episode.id === currentEpisode) ?? productionEpisodes[0];
+    productionEpisodes.find((episode) => episode.id === currentEpisode) ??
+    productionEpisodes[0];
   const routingEpisode = currentEpisode;
   const projectBase = `/projects/${projectId}`;
   const workflow = getWorkflow(location.pathname, projectBase, routingEpisode);
@@ -269,10 +305,18 @@ export function AppShell() {
     ...item,
     to: item.to.replace("production-e01", routingEpisode),
   }));
-  const primaryNavigation = scopedNavigation.filter((item) => item.to !== "settings");
-  const settingsNavigation = scopedNavigation.find((item) => item.to === "settings");
-  const activeRoot = location.pathname.slice(projectBase.length + 1).split("/")[0];
-  const active = navigation.find((item) => item.to.split("/")[0] === activeRoot);
+  const primaryNavigation = scopedNavigation.filter(
+    (item) => item.to !== "settings",
+  );
+  const settingsNavigation = scopedNavigation.find(
+    (item) => item.to === "settings",
+  );
+  const activeRoot = location.pathname
+    .slice(projectBase.length + 1)
+    .split("/")[0];
+  const active = navigation.find(
+    (item) => item.to.split("/")[0] === activeRoot,
+  );
 
   const switchProject = (nextProject: ProjectRecord) => {
     setProjectName(nextProject.name);
@@ -318,33 +362,43 @@ export function AppShell() {
   return (
     <AppLayout
       agentOpen={agentOpen}
-      headerStart={(
+      headerStart={
         <>
-          <button className="director-brand" onClick={() => navigate("/")} aria-label="返回项目中心">
+          <button
+            className="director-brand"
+            onClick={() => navigate("/")}
+            aria-label="返回项目中心"
+          >
             <span className="brand-mark">A</span>
             <span>Alex 导演台</span>
           </button>
           <span className="director-header-divider" />
-        <Dropdown
-          menu={{ items: projectMenuItems, onClick: handleProjectMenuClick }}
-          trigger={["click"]}
-        >
-          <Button type="text" className="project-switcher">
-            <span className="project-menu-mark"><Clapperboard size={14} /></span>
-            <span className="project-switcher-name">{projectName}</span>
-            <ChevronDown size={14} />
-          </Button>
-        </Dropdown>
+          <Dropdown
+            menu={{ items: projectMenuItems, onClick: handleProjectMenuClick }}
+            trigger={["click"]}
+          >
+            <Button type="text" className="project-switcher">
+              <span className="project-menu-mark">
+                <Clapperboard size={14} />
+              </span>
+              <span className="project-switcher-name">{projectName}</span>
+              <ChevronDown size={14} />
+            </Button>
+          </Dropdown>
         </>
-      )}
-      headerActions={(
+      }
+      headerActions={
         <>
           <Button className="command-search" icon={<Search size={15} />}>
             搜索或执行命令 <kbd>⌘ K</kbd>
           </Button>
           <Badge className="header-notifications" count={3} size="small">
             <Tooltip title="任务通知">
-              <Button type="text" icon={<Bell size={17} />} aria-label="任务通知" />
+              <Button
+                type="text"
+                icon={<Bell size={17} />}
+                aria-label="任务通知"
+              />
             </Tooltip>
           </Badge>
           <Tooltip title={agentOpen ? "收起副导演" : "展开副导演"}>
@@ -358,66 +412,87 @@ export function AppShell() {
             />
           </Tooltip>
         </>
-      )}
+      }
     >
       <StandardWorkspaceLayout
         agentOverlay={isAgentOverlay}
         onCloseAgent={() => updateAgentOpen(false)}
-        navigation={(
+        navigation={
           <>
-          <nav className="director-rail-nav">
-            {primaryNavigation.map(({ label, icon: Icon, to }) => {
-              const target = `${projectBase}/${to}`;
-              const isActive = to.split("/")[0] === activeRoot;
-              return (
-                <Tooltip title={label} placement="right" key={target}>
+            <nav className="director-rail-nav">
+              {primaryNavigation.map(({ label, icon: Icon, to }) => {
+                const target = `${projectBase}/${to}`;
+                const isActive = to.split("/")[0] === activeRoot;
+                return (
+                  <Tooltip title={label} placement="right" key={target}>
+                    <Link
+                      to={target}
+                      className={`director-rail-link ${isActive ? "active" : ""}`}
+                      aria-label={label}
+                      aria-current={isActive ? "page" : undefined}
+                    >
+                      <Icon size={19} strokeWidth={1.8} />
+                      <span>{label}</span>
+                    </Link>
+                  </Tooltip>
+                );
+              })}
+            </nav>
+            <div className="director-rail-footer">
+              {settingsNavigation && (
+                <Tooltip title="项目设定" placement="right">
                   <Link
-                    to={target}
-                    className={`director-rail-link ${isActive ? "active" : ""}`}
-                    aria-label={label}
-                    aria-current={isActive ? "page" : undefined}
+                    to={`${projectBase}/${settingsNavigation.to}`}
+                    className={`director-rail-link ${activeRoot === "settings" ? "active" : ""}`}
+                    aria-label="项目设定"
+                    aria-current={
+                      activeRoot === "settings" ? "page" : undefined
+                    }
                   >
-                    <Icon size={19} strokeWidth={1.8} />
-                    <span>{label}</span>
+                    <settingsNavigation.icon size={19} strokeWidth={1.8} />
+                    <span>项目设定</span>
                   </Link>
                 </Tooltip>
-              );
-            })}
-          </nav>
-          <div className="director-rail-footer">
-            {settingsNavigation && (
-              <Tooltip title="项目设定" placement="right">
-                <Link
-                  to={`${projectBase}/${settingsNavigation.to}`}
-                  className={`director-rail-link ${activeRoot === "settings" ? "active" : ""}`}
-                  aria-label="项目设定"
-                  aria-current={activeRoot === "settings" ? "page" : undefined}
+              )}
+              <Tooltip title="服务正常 · 4 / 4" placement="right">
+                <div
+                  className="director-rail-status"
+                  aria-label="服务正常，4 / 4"
                 >
-                  <settingsNavigation.icon size={19} strokeWidth={1.8} />
-                  <span>项目设定</span>
-                </Link>
+                  <Badge status="success" />
+                </div>
               </Tooltip>
-            )}
-            <Tooltip title="服务正常 · 4 / 4" placement="right">
-              <div className="director-rail-status" aria-label="服务正常，4 / 4">
-                <Badge status="success" />
-              </div>
-            </Tooltip>
-          </div>
+            </div>
           </>
-        )}
-        agent={agentOpen ? (
-          <AgentPanel
-            key={projectId}
-            projectId={projectId}
-            projectName={projectName}
-            page={active?.label ?? "驾驶舱"}
-            episode={currentEpisodeData
-              ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
-              : "未创建"}
-            onClose={() => updateAgentOpen(false)}
-          />
-        ) : undefined}
+        }
+        agent={
+          agentOpen ? (
+            <AssistantDirectorPanel
+              key={projectId}
+              agent={assistantDirectorAgent}
+              session={{
+                scopeKey: `project:${projectId}:assistant-director`,
+                projectId,
+                title: `项目：${projectName}`,
+                page: active?.label ?? "驾驶舱",
+                episode: currentEpisodeData
+                  ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
+                  : "未创建",
+                context: [
+                  { label: "项目", value: projectName },
+                  { label: "页面", value: active?.label ?? "驾驶舱" },
+                  {
+                    label: "生产集",
+                    value: currentEpisodeData
+                      ? `E${String(currentEpisodeData.episodeNumber).padStart(2, "0")}`
+                      : "未创建",
+                  },
+                ],
+              }}
+              onClose={() => updateAgentOpen(false)}
+            />
+          ) : undefined
+        }
       >
         <TitledWorkspaceLayout
           title={workspaceTitle}
@@ -426,14 +501,14 @@ export function AppShell() {
           pathname={location.pathname}
           tabs={workflow?.tabs}
           contentRef={mainCanvasRef}
-          status={(
+          status={
             <>
               <span className="online-dot" />
               <span>工作区已同步</span>
             </>
-          )}
+          }
         >
-            <Outlet />
+          <Outlet />
         </TitledWorkspaceLayout>
         {queueOpen && workflow?.queue && (
           <BatchReviewDialog
@@ -446,7 +521,6 @@ export function AppShell() {
     </AppLayout>
   );
 }
-
 function BatchReviewDialog({
   title,
   stage,
@@ -501,197 +575,18 @@ function BatchReviewDialog({
         </div>
         <footer>
           <span>已选择 {selected.length} 项</span>
-          <button className="secondary-button" onClick={onClose}>取消</button>
-          <button className="primary-button" disabled={!selected.length} onClick={onClose}>
+          <button className="secondary-button" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="primary-button"
+            disabled={!selected.length}
+            onClick={onClose}
+          >
             确认批量处理
           </button>
         </footer>
       </section>
     </div>
-  );
-}
-
-function AgentPanel({
-  projectId,
-  projectName,
-  page,
-  episode,
-  onClose,
-}: {
-  projectId: string;
-  projectName: string;
-  page: string;
-  episode: string;
-  onClose?: () => void;
-}) {
-  const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState<CopilotMessage[]>([]);
-  const [runtime, setRuntime] = useState("MAF HarnessAgent");
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const scrollAnchor = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    getCopilotConversation(projectId, controller.signal)
-      .then((conversation) => {
-        setMessages(conversation.messages);
-        setRuntime(conversation.runtime);
-      })
-      .catch((loadError: unknown) => {
-        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
-        setError(loadError instanceof Error ? loadError.message : "副导演会话加载失败。");
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [projectId]);
-
-  useEffect(() => {
-    scrollAnchor.current?.scrollIntoView({ block: "end" });
-  }, [messages, sending]);
-
-  async function sendMessage(content: string) {
-    const trimmed = content.trim();
-    if (!trimmed || sending) return;
-
-    const pendingId = `pending-${Date.now()}`;
-    setSending(true);
-    setError(null);
-    setMessage("");
-    setMessages((current) => [
-      ...current,
-      {
-        id: pendingId,
-        sequence: current.length + 1,
-        role: "user",
-        content: trimmed,
-        model: null,
-        createdAtUtc: new Date().toISOString(),
-      },
-    ]);
-    try {
-      const conversation = await sendCopilotMessage(projectId, {
-        content: trimmed,
-        page,
-        episode,
-      });
-      setMessages(conversation.messages);
-      setRuntime(conversation.runtime);
-    } catch (sendError) {
-      setMessages((current) => current.filter((item) => item.id !== pendingId));
-      setMessage(trimmed);
-      setError(sendError instanceof Error ? sendError.message : "AI 副导演暂时无法回复。");
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function clearConversation() {
-    if (sending || messages.length === 0) return;
-    setError(null);
-    try {
-      await resetCopilotConversation(projectId);
-      setMessages([]);
-    } catch (resetError) {
-      setError(resetError instanceof Error ? resetError.message : "副导演会话清空失败。");
-    }
-  }
-
-  function submitMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void sendMessage(message);
-  }
-
-  return (
-    <aside className="agent-panel">
-      <header className="agent-header">
-        <div>
-          <Bot size={18} />
-          <strong>Agent 副导演</strong>
-          <span className="online-dot" />
-        </div>
-        <div className="agent-header-actions">
-          <button
-            className="icon-button"
-            onClick={clearConversation}
-            disabled={sending || messages.length === 0}
-            aria-label="清空副导演会话"
-            title="清空副导演会话"
-          >
-            <RotateCcw size={16} />
-          </button>
-          {onClose && (
-            <button className="icon-button" onClick={onClose} aria-label="关闭副导演">
-              <X size={17} />
-            </button>
-          )}
-        </div>
-      </header>
-      <div className="context-block">
-        <span className="eyebrow">当前上下文</span>
-        <div className="context-tags">
-          <span>项目：{projectName}</span>
-          <span>页面：{page}</span>
-          <span>生产集：{episode}</span>
-          <span>{runtime}</span>
-        </div>
-      </div>
-      <div className="agent-content">
-        {loading ? (
-          <div className="agent-loading"><span className="spinner" />正在加载会话...</div>
-        ) : messages.length === 0 ? (
-          <div className="agent-empty">
-            <div className="agent-avatar"><Sparkles size={16} /></div>
-            <strong>AI 副导演已就绪</strong>
-            <p>可以讨论当前项目、页面和生产集。Agent 会加载启用的 Skills，但不会虚构尚未执行的生产操作。</p>
-            <button onClick={() => void sendMessage("请总结当前上下文，并给出三个最值得优先处理的事项。")}>总结当前上下文</button>
-            <button onClick={() => void sendMessage("请根据当前项目给出下一步制作建议，不要声称已经执行。")}>建议下一步</button>
-          </div>
-        ) : (
-          <div className="agent-messages">
-            {messages.map((item) => (
-              <article className={`agent-message ${item.role}`} key={item.id}>
-                <header>{item.role === "user" ? "导演" : "副导演"}</header>
-                <p>{item.content}</p>
-                {item.model && <small>{item.model}</small>}
-              </article>
-            ))}
-            {sending && (
-              <div className="agent-thinking"><span className="spinner" />AI 副导演正在思考...</div>
-            )}
-          </div>
-        )}
-        {error && <p className="agent-error">{error}</p>}
-        <div ref={scrollAnchor} />
-      </div>
-      <form className="composer" onSubmit={submitMessage}>
-        <div className="composer-context">
-          <span>项目级对话</span>
-          <span>AI 副导演</span>
-        </div>
-        <textarea
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-          placeholder="向副导演提问…"
-          disabled={loading || sending}
-        />
-        <div>
-          <small>Shift + Enter 换行</small>
-          <button className="send-button" disabled={!message.trim() || loading || sending}>
-            <SendHorizontal size={14} />
-            发送
-          </button>
-        </div>
-      </form>
-    </aside>
   );
 }

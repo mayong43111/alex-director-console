@@ -47,5 +47,23 @@ public sealed class SkillCatalogSynchronizer(
             .Where(skill => skill.IsSystem && !catalogIds.Contains(skill.Id));
         dbContext.SkillDefinitions.RemoveRange(removedSystemSkills);
         await dbContext.SaveChangesAsync(cancellationToken);
+
+        const string projectManagementSkillId = "project-management";
+        if (catalogIds.Contains(projectManagementSkillId)
+            && await dbContext.AgentDefinitions.AnyAsync(
+                agent => agent.Id == BuiltInAgents.AssistantDirectorId,
+                cancellationToken)
+            && !await dbContext.AgentSkills.AnyAsync(
+                link => link.AgentId == BuiltInAgents.AssistantDirectorId
+                    && link.SkillId == projectManagementSkillId,
+                cancellationToken))
+        {
+            dbContext.AgentSkills.Add(new AgentSkill
+            {
+                AgentId = BuiltInAgents.AssistantDirectorId,
+                SkillId = projectManagementSkillId
+            });
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
     }
 }

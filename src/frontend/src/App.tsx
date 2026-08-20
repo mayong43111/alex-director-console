@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { AppShell } from './app/AppShell'
 import { ApplicationLayout } from './layouts'
 import { AgentsPage, DemoPage, ProjectCenterPage, ServicesPage, SkillsPage } from './pages/SupplementaryPages'
+import { SessionsPage } from './pages/SessionsPage'
 import {
   AssetsPage,
   ProductionPage,
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/settings/services" element={<ServicesPage />} />
         <Route path="/settings/agents" element={<AgentsPage />} />
         <Route path="/settings/skills" element={<SkillsPage />} />
+        <Route path="/settings/sessions" element={<SessionsPage />} />
       </Route>
       <Route path="/projects/:projectId" element={<AppShell />}>
         <Route path="overview" element={<Navigate to="../settings" replace />} />
