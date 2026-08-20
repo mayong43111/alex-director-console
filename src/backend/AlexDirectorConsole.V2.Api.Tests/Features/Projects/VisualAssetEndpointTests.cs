@@ -366,19 +366,46 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
             item.ConsumerAssetId == reference.AssetId && item.Role == "uses-settings"));
 
-        var retryResponse = await client.PostAsync(
+        const string revisionInstruction = "缩短牛角，披风改为深蓝色，保持四视图布局。";
+        var retryResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
-            null);
+            new { instruction = revisionInstruction, useCurrentReference = true });
         retryResponse.EnsureSuccessStatusCode();
         var retried = await retryResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
         Assert.NotNull(retried);
         Assert.Equal(reference.Version + 1, retried.Version);
+        Assert.Contains($"Revision instruction: {revisionInstruction}", retried.Prompt);
         var imageVersions = await dbContext.Assets
             .Where(item => item.Type == "visual-reference-image")
             .OrderBy(item => item.Version)
             .ToArrayAsync();
         Assert.Equal([1, 2], imageVersions.Select(item => item.Version));
         Assert.Single(imageVersions.Select(item => item.ResourceId).Distinct());
+        var retriedAsset = imageVersions[^1];
+        using var retriedMetadata = JsonDocument.Parse(retriedAsset.GenerationMetadataJson!);
+        Assert.True(retriedMetadata.RootElement.GetProperty("useCurrentReference").GetBoolean());
+        Assert.Equal(reference.AssetId, retriedMetadata.RootElement.GetProperty("basedOnReferenceAssetId").GetGuid());
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == retried.AssetId
+            && item.SourceAssetId == reference.AssetId
+            && item.Role == "uses-current-reference"));
+
+        using var upload = new MultipartFormDataContent();
+        using var uploadBytes = new ByteArrayContent(content);
+        uploadBytes.Headers.ContentType = new("image/png");
+        upload.Add(uploadBytes, "file", "director-reference.png");
+        var uploadResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/upload",
+            upload);
+        uploadResponse.EnsureSuccessStatusCode();
+        var uploaded = await uploadResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        Assert.NotNull(uploaded);
+        Assert.Equal(retried.Version + 1, uploaded.Version);
+        Assert.Equal(content, await client.GetByteArrayAsync(uploaded.ContentUrl));
+        var uploadedAsset = await dbContext.Assets.SingleAsync(item => item.Id == uploaded.AssetId);
+        using var uploadedMetadata = JsonDocument.Parse(uploadedAsset.GenerationMetadataJson!);
+        Assert.Equal("upload-visual-reference", uploadedMetadata.RootElement.GetProperty("operation").GetString());
+        Assert.Equal("director-reference.png", uploadedMetadata.RootElement.GetProperty("sourceFileName").GetString());
     }
 
     [Theory]

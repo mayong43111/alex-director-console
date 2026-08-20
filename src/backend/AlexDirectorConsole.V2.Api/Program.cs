@@ -99,6 +99,9 @@ builder.Services.AddScoped<IQueryHandler<GetProductionScriptPackageQuery, Produc
 builder.Services.AddScoped<ICommandHandler<GenerateAdaptationScriptCommand, AdaptationScriptView?>, GenerateAdaptationScriptCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<AppendAdaptationEpisodeCommand, AdaptationScriptView?>, AppendAdaptationEpisodeCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<RegenerateAdaptationEpisodeCommand, AdaptationScriptView?>, RegenerateAdaptationEpisodeCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateAdaptationEpisodeCommand, AdaptationScriptView?>, UpdateAdaptationEpisodeCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<DeleteAdaptationEpisodeCommand, AdaptationScriptView?>, DeleteAdaptationEpisodeCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<ClearAdaptationEpisodesCommand, AdaptationScriptView?>, ClearAdaptationEpisodesCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<ConfirmAdaptationScriptCommand, AdaptationScriptView?>, ConfirmAdaptationScriptCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<RegenerateProductionScriptCommand, ProductionScriptPackageView?>, RegenerateProductionScriptCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<ListVisualAssetsQuery, IReadOnlyList<VisualAssetView>>, ListVisualAssetsQueryHandler>();

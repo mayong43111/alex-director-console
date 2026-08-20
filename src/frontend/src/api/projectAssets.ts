@@ -153,12 +153,36 @@ export async function importStoryMaterialAssets(projectId: string): Promise<Visu
 export async function generateVisualReference(
   projectId: string,
   resourceId: string,
+  instruction?: string,
+  useCurrentReference = false,
 ): Promise<VisualReferenceImage> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/generate`,
-    { method: 'POST' },
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instruction: instruction?.trim() || null,
+        useCurrentReference,
+      }),
+    },
   )
   if (!response.ok) throw await readError(response, '参考图生成失败。')
+  return response.json() as Promise<VisualReferenceImage>
+}
+
+export async function uploadVisualReference(
+  projectId: string,
+  resourceId: string,
+  file: File,
+): Promise<VisualReferenceImage> {
+  const body = new FormData()
+  body.append('file', file)
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/upload`,
+    { method: 'POST', body },
+  )
+  if (!response.ok) throw await readError(response, '参考图上传失败。')
   return response.json() as Promise<VisualReferenceImage>
 }
 

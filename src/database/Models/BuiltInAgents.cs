@@ -25,4 +25,7 @@ public static class BuiltInAgents
 
     public static readonly Guid ImagePromptPrefixWriterId =
         Guid.Parse("b25d162a-691c-4382-a3f2-e430d04a43c8");
+
+    public static readonly Guid EpisodeOutlinePlannerId =
+        Guid.Parse("c1d4c535-5a7b-4d54-b88a-e93d273a5b15");
 }

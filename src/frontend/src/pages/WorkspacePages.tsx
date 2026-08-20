@@ -6,7 +6,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import { Image, Select, Tabs } from "antd";
+import { Image, InputNumber, Popconfirm, Select, Switch, Tabs } from "antd";
 import {
   Check,
   ChevronDown,
@@ -22,7 +22,9 @@ import {
   RefreshCw,
   Save,
   Search,
+  Settings,
   Sparkles,
+  Trash2,
   Upload,
   WandSparkles,
   X,
@@ -46,6 +48,7 @@ import {
   listVisualAssets,
   saveVoiceProfile,
   uploadAudioMaterial,
+  uploadVisualReference,
   updateVisualAsset,
   type AudioMaterial,
   type SaveVoiceProfileInput,
@@ -82,15 +85,18 @@ import {
   analyzeStoryMaterial,
   appendAdaptationEpisode,
   appendProjectSourceChapters,
-  confirmAdaptationScript,
+  clearAdaptationEpisodes,
   createProjectSource,
+  deleteAdaptationEpisode,
   generateAdaptationScript,
+  generateProductionScriptForEpisode,
   getAdaptationScript,
   getProductionScriptPackage,
   getStoryMaterialAnalysis,
   listProjectSources,
   regenerateAdaptationEpisode,
   regenerateProductionScript,
+  updateAdaptationEpisode,
   type AdaptationScript,
   type ProductionScriptPackage,
   type ProjectSource,
@@ -136,7 +142,7 @@ function EpisodeSelect({ value = "production-e01" }: { value?: string }) {
     "/projects/tianqiao";
   const changeEpisode = (episodeId: string) => {
     if (location.pathname.includes("/script/")) {
-      navigate(`${projectBase}/script/episodes/${episodeId}`);
+      navigate(`${projectBase}/script/${episodeId}/production`);
     } else if (location.pathname.includes("/storyboard")) {
       navigate(`${projectBase}/storyboard/episodes/${episodeId}`);
     } else if (location.pathname.includes("/review")) {
@@ -828,13 +834,23 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
 
 type SourceWorkspaceView = "source" | "analysis" | "script";
 
+type ScriptWorkspaceView = "adaptation" | "production";
+
+function getScriptWorkspacePath(
+  projectId: string,
+  resourceId: string,
+  view: ScriptWorkspaceView,
+) {
+  return `/projects/${projectId}/script/${resourceId}/${view}`;
+}
+
 function getSourceWorkspacePath(
   projectId: string,
   sourceId: string,
   view: SourceWorkspaceView,
 ) {
   if (view === "script") {
-    return `/projects/${projectId}/script/adaptation/${sourceId}`;
+    return getScriptWorkspacePath(projectId, sourceId, "adaptation");
   }
   return `/projects/${projectId}/story/${sourceId}/${view === "analysis" ? "material" : "source"}`;
 }
@@ -845,7 +861,9 @@ export function SourcePage() {
   const navigate = useNavigate();
   const workspaceView: SourceWorkspaceView = /\/story\/[^/]+\/material\/?$/.test(location.pathname)
     ? "analysis"
-    : location.pathname.includes("/script/adaptation") || location.pathname.includes("/script/draft")
+    : /\/script\/[^/]+\/adaptation\/?$/.test(location.pathname)
+      || location.pathname.includes("/script/adaptation")
+      || location.pathname.includes("/script/draft")
       ? "script"
       : "source";
   const requestedSourceId = sourceId ?? sourceEpisodeId;
@@ -868,7 +886,7 @@ export function SourcePage() {
   const [analysisErrorSourceId, setAnalysisErrorSourceId] = useState<string>();
   const [script, setScript] = useState<AdaptationScript | null>(null);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings | null>(null);
-  const [working, setWorking] = useState<"analysis" | "script" | "append" | "regenerate" | "confirm" | null>(null);
+  const [working, setWorking] = useState<"analysis" | "script" | "append" | "update" | "regenerate" | "delete" | "clear" | "confirm" | null>(null);
   const analysisControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -1036,16 +1054,24 @@ export function SourcePage() {
     }
   };
 
-  const requestScript = async () => {
+  const requestScript = async (
+    mode: AdaptationScript["mode"],
+    desiredEpisodeCount?: number,
+    instruction?: string,
+  ) => {
     if (!activeSource) return;
     setWorking("script");
     setError("");
     try {
       const result = await generateAdaptationScript(projectId, activeSource.id, {
-        instruction: "严格参考项目设定规划完整剧集，原文仅作为参考；每集建立清晰冲突、大小爆点和集尾追看动力。",
+        mode,
+        desiredEpisodeCount,
+        instruction: instruction ?? (mode === "rearranged"
+          ? "严格参考项目设定、原文章节和素材图谱重新编排；每集建立清晰冲突、大小爆点和集尾追看动力。"
+          : "按原文章节顺序建立改编方案，不重新编排，不分析大小爆点。"),
       });
       setScript(result);
-      navigate(`/projects/${projectId}/script/adaptation/${activeSource.id}`);
+      navigate(getScriptWorkspacePath(projectId, activeSource.id, "adaptation"));
     } catch (scriptError) {
       setError(scriptError instanceof Error ? scriptError.message : "改编大纲生成失败。");
     } finally {
@@ -1053,14 +1079,29 @@ export function SourcePage() {
     }
   };
 
-  const appendScriptEpisode = async () => {
+  const appendScriptEpisode = async (count: number, instruction?: string) => {
     if (!activeSource) return;
     setWorking("append");
     setError("");
     try {
-      setScript(await appendAdaptationEpisode(projectId, activeSource.id));
+      setScript(await appendAdaptationEpisode(projectId, activeSource.id, { count, instruction }));
     } catch (appendError) {
       setError(appendError instanceof Error ? appendError.message : "添加剧集失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const deleteScriptEpisode = async (episodeNumber: number) => {
+    if (!activeSource) return false;
+    setWorking("delete");
+    setError("");
+    try {
+      setScript(await deleteAdaptationEpisode(projectId, activeSource.id, episodeNumber));
+      return true;
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "删除剧集失败。");
+      return false;
     } finally {
       setWorking(null);
     }
@@ -1086,19 +1127,64 @@ export function SourcePage() {
     }
   };
 
-  const confirmScript = async () => {
-    if (!activeSource) return;
+  const updateScriptEpisode = async (
+    episodeNumber: number,
+    input: { title: string; logline: string; sceneSummaries: string[] },
+  ) => {
+    if (!activeSource) return false;
+    setWorking("update");
+    setError("");
+    try {
+      setScript(await updateAdaptationEpisode(projectId, activeSource.id, episodeNumber, input));
+      return true;
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "修改章节失败。");
+      return false;
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const clearScriptEpisodes = async () => {
+    if (!activeSource) return false;
+    setWorking("clear");
+    setError("");
+    try {
+      setScript(await clearAdaptationEpisodes(projectId, activeSource.id));
+      return true;
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "清空改编方案失败。");
+      return false;
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const generateEpisodeProductionScript = async (episodeNumber: number) => {
+    if (!activeSource) return false;
+    const existingProductionEpisodeId = script?.productionEpisodeMap?.[episodeNumber];
+    if (existingProductionEpisodeId) {
+      navigate(getScriptWorkspacePath(projectId, existingProductionEpisodeId, "production"));
+      return true;
+    }
     setWorking("confirm");
     setError("");
     try {
-      const confirmed = await confirmAdaptationScript(projectId, activeSource.id);
-      setScript(confirmed);
+      const updated = await generateProductionScriptForEpisode(
+        projectId,
+        activeSource.id,
+        episodeNumber,
+      );
+      setScript(updated);
       window.dispatchEvent(new Event("alex:production-episodes-updated"));
-      if (confirmed.productionEpisodeIds[0]) {
-        navigate(`/projects/${projectId}/script/episodes/${confirmed.productionEpisodeIds[0]}`);
+      const productionEpisodeId = updated.productionEpisodeMap?.[episodeNumber];
+      if (productionEpisodeId) {
+        navigate(getScriptWorkspacePath(projectId, productionEpisodeId, "production"));
       }
+      return true;
     } catch (confirmError) {
-      setError(confirmError instanceof Error ? confirmError.message : "正式剧本生成失败。");
+      setError(confirmError instanceof Error ? confirmError.message : "单集正式剧本生成失败。");
+      return false;
     } finally {
       setWorking(null);
     }
@@ -1116,10 +1202,12 @@ export function SourcePage() {
         />
       )}
       {workspaceView === "script" && (
-        <PageTitle title="改编方案" />
-      )}
-      {workspaceView === "script" && (
-        <ScriptStageTabs projectId={projectId} active="adaptation" />
+        <ScriptStageTabs
+          projectId={projectId}
+          active="adaptation"
+          sourceId={activeSource?.id}
+          productionEpisodeId={script?.productionEpisodeIds[0]}
+        />
       )}
       {sources.length > 0 && workspaceView !== "script" && (
         <Tabs
@@ -1252,15 +1340,20 @@ export function SourcePage() {
         />
       ) : (
         <AdaptationScriptWorkspace
+          key={script?.assetId ?? activeSource?.id}
           projectId={projectId}
+          source={activeSource}
           analysis={analysis}
           script={script}
           plannedEpisodeCount={projectSettings?.plannedEpisodeCount}
           working={working}
-          onGenerate={() => void requestScript()}
-          onAppend={() => void appendScriptEpisode()}
+          onGenerate={requestScript}
+          onAppend={appendScriptEpisode}
+          onUpdate={updateScriptEpisode}
           onRegenerate={regenerateScriptEpisode}
-          onConfirm={() => void confirmScript()}
+          onDelete={deleteScriptEpisode}
+          onClear={clearScriptEpisodes}
+          onGenerateProductionScript={generateEpisodeProductionScript}
         />
       )}
       {importOpen && (
@@ -1340,50 +1433,203 @@ function StoryMaterialWorkspace({
   );
 }
 
+function AdaptationSettingsDialog({
+  selectedMode,
+  sourceChapterCount,
+  plannedEpisodeCount,
+  modeChanged,
+  saveDisabled,
+  onModeChange,
+  onClose,
+  onSave,
+}: {
+  selectedMode: AdaptationScript["mode"];
+  sourceChapterCount: number;
+  plannedEpisodeCount?: number;
+  modeChanged: boolean;
+  saveDisabled: boolean;
+  onModeChange: (mode: AdaptationScript["mode"]) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const hasFixedEpisodeCount = plannedEpisodeCount !== undefined && plannedEpisodeCount >= 1;
+  const outcome = selectedMode === "source-chapters"
+    ? `将沿用现有 ${sourceChapterCount} 个原文章节，一章对应一集。`
+    : `将由大纲编排助手按单集时长重新组织章节，首批最多生成 6 集${hasFixedEpisodeCount ? `，项目计划共 ${plannedEpisodeCount} 集` : ""}。`;
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div
+        className="dialog adaptation-settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="adaptation-settings-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="adaptation-settings-header">
+          <span className="adaptation-settings-icon"><Settings size={17} /></span>
+          <div className="adaptation-settings-identity">
+            <span className="eyebrow">改编方案 / 基础设置</span>
+            <h2 id="adaptation-settings-title">章节编排设置</h2>
+            <p>决定原文进入剧集规划时采用的章节结构。</p>
+          </div>
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            aria-label="关闭章节编排设置"
+            title="关闭"
+            onClick={onClose}
+          >
+            <X size={15} />
+          </button>
+        </header>
+        <section className="adaptation-settings-body">
+          <div className="adaptation-mode-control">
+            <div>
+              <strong>重新排版章节</strong>
+              <p>开启后按单集时长重新组织章节；关闭后直接沿用原文章节。</p>
+            </div>
+            <Switch
+              checked={selectedMode === "rearranged"}
+              aria-label="重新排版章节"
+              onChange={(checked) => onModeChange(checked ? "rearranged" : "source-chapters")}
+            />
+          </div>
+          <div className={`adaptation-mode-outcome ${modeChanged ? "warning" : ""}`}>
+            {modeChanged ? <CircleAlert size={15} /> : <Check size={15} />}
+            <div>
+              <span>{modeChanged ? "将创建新版本" : "保存结果"}</span>
+              <p>{modeChanged
+                ? "保存后会创建新的改编方案版本；已有正式剧本不会删除，原方案仍可恢复。"
+                : outcome}</p>
+            </div>
+          </div>
+        </section>
+        <footer className="adaptation-settings-footer">
+          <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+          <button className="primary-button" type="button" disabled={saveDisabled} onClick={onSave}>
+            <Save size={13} />保存设置
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function AdaptationScriptWorkspace({
   projectId,
+  source,
   analysis,
   script,
   plannedEpisodeCount,
   working,
   onGenerate,
   onAppend,
+  onUpdate,
   onRegenerate,
-  onConfirm,
+  onDelete,
+  onClear,
+  onGenerateProductionScript,
 }: {
   projectId: string;
+  source?: ProjectSource;
   analysis: StoryMaterialAnalysis | null;
   script: AdaptationScript | null;
   plannedEpisodeCount?: number;
-  working: "analysis" | "script" | "append" | "regenerate" | "confirm" | null;
-  onGenerate: () => void;
-  onAppend: () => void;
+  working: "analysis" | "script" | "append" | "update" | "regenerate" | "delete" | "clear" | "confirm" | null;
+  onGenerate: (
+    mode: AdaptationScript["mode"],
+    desiredEpisodeCount?: number,
+    instruction?: string,
+  ) => Promise<void>;
+  onAppend: (count: number, instruction?: string) => Promise<void>;
+  onUpdate: (
+    episodeNumber: number,
+    input: { title: string; logline: string; sceneSummaries: string[] },
+  ) => Promise<boolean>;
   onRegenerate: (episodeNumber: number, instruction: string) => Promise<boolean>;
-  onConfirm: () => void;
+  onDelete: (episodeNumber: number) => Promise<boolean>;
+  onClear: () => Promise<boolean>;
+  onGenerateProductionScript: (episodeNumber: number) => Promise<boolean>;
 }) {
   const [activeEpisodeNumber, setActiveEpisodeNumber] = useState(1);
+  const [editEpisodeNumber, setEditEpisodeNumber] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editLogline, setEditLogline] = useState("");
+  const [editSceneSummaries, setEditSceneSummaries] = useState<string[]>([]);
   const [regenerateEpisodeNumber, setRegenerateEpisodeNumber] = useState<number | null>(null);
   const [regenerateInstruction, setRegenerateInstruction] = useState("");
+  const [appendOpen, setAppendOpen] = useState(false);
+  const [appendCount, setAppendCount] = useState(1);
+  const [appendInstruction, setAppendInstruction] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsConfirmation, setSettingsConfirmation] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<AdaptationScript["mode"]>(
+    script?.mode ?? "rearranged",
+  );
   const hasFixedEpisodeCount = plannedEpisodeCount !== undefined && plannedEpisodeCount >= 1;
+  const initialBatchCount = hasFixedEpisodeCount
+    ? Math.min(plannedEpisodeCount, 6)
+    : undefined;
+  const maxAppendCount = 6;
 
-  if (!analysis) {
-    return (
-      <div className="source-empty-state development-empty-state">
-        <span className="eyebrow">顺序门槛</span>
-        <h2>先完成素材分析</h2>
-        <p>剧本改写必须锁定一版素材图谱，不能从尚未分析的原文直接生成正式资产。</p>
-      </div>
-    );
-  }
   if (!script) {
     return (
-      <div className="source-empty-state development-empty-state">
-        <span className="eyebrow">改编草案 / 来源 v{analysis.sourceVersion}</span>
-        <h2>{hasFixedEpisodeCount ? `按项目设定规划 ${plannedEpisodeCount} 集` : "按剧本内容规划"}</h2>
-        <p>模型会从素材图谱提取原故事主线，按网剧节奏删减支线、合并事件并补充必要连接，输出新的主线和分集大纲。此阶段不写正式对白和镜头。</p>
-        <button className="primary-button" type="button" disabled={working !== null || analysis.isStale} onClick={onGenerate}>
-          <WandSparkles size={14} />{working === "script" ? "生成中" : analysis.isStale ? "请先分析新增章节" : `生成${hasFixedEpisodeCount ? `${plannedEpisodeCount}集` : "完整"}草案`}
-        </button>
+      <div className="development-workspace script-draft-workspace adaptation-setup-workspace">
+        <div className="adaptation-mode-toolbar">
+          <div className="adaptation-mode-summary">
+            <span>未设置</span>
+            <button
+              className="secondary-button icon-button"
+              type="button"
+              aria-label="编辑章节编排设置"
+              title="编辑章节编排设置"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings size={13} />
+            </button>
+          </div>
+        </div>
+        {settingsOpen && (
+          <AdaptationSettingsDialog
+            selectedMode={selectedMode}
+            sourceChapterCount={source?.chapterCount ?? 0}
+            plannedEpisodeCount={plannedEpisodeCount}
+            modeChanged={false}
+            saveDisabled={working !== null || (selectedMode === "rearranged" && (!analysis || analysis.isStale))}
+            onModeChange={setSelectedMode}
+            onClose={() => setSettingsOpen(false)}
+            onSave={() => setSettingsConfirmation(true)}
+          />
+        )}
+        {settingsConfirmation && (
+          <div className="modal-backdrop adaptation-settings-confirmation" onMouseDown={() => setSettingsConfirmation(false)}>
+            <div className="dialog" role="alertdialog" aria-modal="true" aria-label="确认保存章节编排设置" onMouseDown={(event) => event.stopPropagation()}>
+              <span className="eyebrow">危险操作</span>
+              <h2>保存后会生成当前方案</h2>
+              <p>系统会按所选编排方式生成第一个改编方案版本。后续可修改、删除或从版本记录恢复。</p>
+              <div>
+                <button className="secondary-button" type="button" onClick={() => setSettingsConfirmation(false)}>取消</button>
+                <button
+                  className="primary-button danger-confirm-button"
+                  type="button"
+                  disabled={working !== null}
+                  onClick={async () => {
+                    await onGenerate(
+                      selectedMode,
+                      selectedMode === "rearranged" ? initialBatchCount : undefined,
+                      "保存章节编排基础设置，并生成首个方案版本。",
+                    );
+                    setSettingsConfirmation(false);
+                    setSettingsOpen(false);
+                  }}
+                >
+                  <CircleAlert size={13} />{working === "script" ? "保存中" : "确认保存并生成"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1407,36 +1653,83 @@ function AdaptationScriptWorkspace({
       ...item,
       sceneIndex: Math.round(item.position * Math.max(0, activeEpisode.scenes.length - 1)),
     })) : [];
+  const modeDirty = selectedMode !== script.mode;
 
   return (
-    <div className="development-workspace script-draft-workspace">
-      <header>
-        <div>
-          <span className="eyebrow">改编大纲 / v{script.version} / 原文 v{script.sourceVersion}</span>
-          <h2>{script.title}</h2>
+    <div className={`development-workspace script-draft-workspace ${script.mode === "source-chapters" ? "source-chapter-adaptation" : ""}`}>
+      <div className="adaptation-mode-toolbar">
+        <div className="adaptation-mode-summary">
+          <span>{script.mode === "source-chapters" ? "按原章节改编" : "重新排版章节"}</span>
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            disabled={working !== null}
+            aria-label="编辑章节编排设置"
+            title="编辑章节编排设置"
+            onClick={() => {
+              setSelectedMode(script.mode);
+              setSettingsOpen(true);
+            }}
+          >
+            <Settings size={13} />
+          </button>
         </div>
         <div className="button-group">
           <VersionPicker compact projectId={projectId} assetId={script.assetId} label="改编方案版本" />
-          {script.status === "draft" && (
-            <>
-              <button className="secondary-button" type="button" disabled={working !== null} onClick={onGenerate}>
-                <WandSparkles size={13} />{working === "script" ? "重新生成中" : `按设定重新生成${hasFixedEpisodeCount ? ` ${plannedEpisodeCount} 集` : "全部"}`}
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            disabled={working !== null || (script.mode === "rearranged" && (!analysis || analysis.isStale))}
+            aria-label="按当前故事更新方案"
+            title="按当前故事更新方案"
+            onClick={() => void onGenerate(
+              script.mode,
+              script.mode === "rearranged" ? initialBatchCount : undefined,
+              "基于现有方案和当前故事生成新版本。",
+            )}
+          >
+            <RefreshCw size={13} />
+          </button>
+          {script.episodes.length > 0 && (
+            <Popconfirm
+              title="清空全部章节"
+              description="当前方案会保存为空版本，之后仍可继续生成新章节。"
+              okText="清空"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              disabled={working !== null}
+              onConfirm={async () => {
+                if (await onClear()) setActiveEpisodeNumber(1);
+              }}
+            >
+              <button
+                className="secondary-button icon-button danger-button"
+                type="button"
+                disabled={working !== null}
+                aria-label="清空全部章节"
+                title="清空全部章节"
+              >
+                <Trash2 size={13} />
               </button>
-              <button className="secondary-button" type="button" disabled={working !== null || script.episodes.length >= 6} onClick={onAppend}>
-                <Plus size={13} />{working === "append" ? "添加中" : "添加剧集"}
-              </button>
-              <button className="primary-button" type="button" disabled={working !== null} onClick={onConfirm}>
-                <Check size={13} />{working === "confirm" ? "正式剧本生成中" : "生成正式剧本"}
-              </button>
-            </>
+            </Popconfirm>
+          )}
+          {script.mode === "rearranged" && (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={working !== null || !analysis || analysis.isStale}
+              onClick={() => {
+                setAppendCount(1);
+                setAppendInstruction("");
+                setAppendOpen(true);
+              }}
+            >
+              <Plus size={13} />生成新章节
+            </button>
           )}
         </div>
-      </header>
+      </div>
       {script.hasNewerSourceVersion && <div className="development-warning">原文已有新版本，但此草案仍锁定原文 v{script.sourceVersion}，内容未被自动修改。</div>}
-      <section className="adaptation-mainline">
-        <span>主线改编策略</span>
-        <p>{script.approach}</p>
-      </section>
       <div className="script-draft-layout">
         <aside className="script-episode-directory">
           <header><strong>剧集目录</strong><span>{script.episodes.length}</span></header>
@@ -1450,12 +1743,36 @@ function AdaptationScriptWorkspace({
               >
                 <span>E{String(episode.proposalNumber).padStart(2, "0")}</span>
                 <strong>{episode.title}</strong>
-                <small>{episode.scenes.length} 个节点 · {episode.targetSeconds}s</small>
+                <small>{script.mode === "source-chapters"
+                  ? `原文第 ${episode.sourceChapterNumbers.join("、")} 章`
+                  : `${episode.scenes.length} 个节点 · ${episode.targetSeconds}s`}</small>
               </button>
             ))}
           </div>
         </aside>
         <section className="script-draft-main">
+          {!activeEpisode && (
+            <div className="adaptation-empty-plan">
+              <h3>方案中还没有章节</h3>
+              <p>{script.mode === "rearranged"
+                ? "可以继续让大纲编排助手生成新章节。"
+                : "可以按当前基础设置重新载入原文章节。"}</p>
+              {script.mode === "rearranged" && (
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={working !== null || !analysis || analysis.isStale}
+                  onClick={() => {
+                    setAppendCount(1);
+                    setAppendInstruction("");
+                    setAppendOpen(true);
+                  }}
+                >
+                  <Plus size={13} />生成新章节
+                </button>
+              )}
+            </div>
+          )}
           {activeEpisode && (
             <div className="script-proposal-list single-episode">
               <section>
@@ -1463,20 +1780,79 @@ function AdaptationScriptWorkspace({
                   <span>E{String(activeEpisode.proposalNumber).padStart(2, "0")}</span>
                   <div><h3>{activeEpisode.title}</h3></div>
                   <div className="episode-draft-actions">
-                    <small>{activeEpisode.targetSeconds}s</small>
+                    {script.mode === "rearranged" && <small>{activeEpisode.targetSeconds}s</small>}
+                    <button
+                      className={`${script.productionEpisodeMap?.[activeEpisode.proposalNumber] ? "secondary-button" : "primary-button"} icon-button production-script-button`}
+                      type="button"
+                      disabled={working !== null}
+                      aria-label={working === "confirm"
+                        ? "正在生成正式剧本"
+                        : script.productionEpisodeMap?.[activeEpisode.proposalNumber]
+                          ? "查看正式剧本"
+                          : "生成正式剧本"}
+                      title={script.productionEpisodeMap?.[activeEpisode.proposalNumber]
+                        ? "查看正式剧本"
+                        : "生成正式剧本"}
+                      onClick={() => void onGenerateProductionScript(activeEpisode.proposalNumber)}
+                    >
+                      {script.productionEpisodeMap?.[activeEpisode.proposalNumber] ? <Eye size={13} /> : <Check size={13} />}
+                    </button>
                     <button
                       className="secondary-button icon-button"
                       type="button"
                       disabled={working !== null}
-                      aria-label="重新生成本集"
-                      title="重新生成本集"
+                      aria-label="手工修改本章"
+                      title="手工修改本章"
                       onClick={() => {
-                        setRegenerateInstruction("");
-                        setRegenerateEpisodeNumber(activeEpisode.proposalNumber);
+                        setEditTitle(activeEpisode.title);
+                        setEditLogline(activeEpisode.logline);
+                        setEditSceneSummaries(activeEpisode.scenes.map((scene) => scene.summary));
+                        setEditEpisodeNumber(activeEpisode.proposalNumber);
                       }}
                     >
-                      <RefreshCw size={14} />
+                      <Edit3 size={14} />
                     </button>
+                    {script.mode === "rearranged" && (
+                      <button
+                        className="secondary-button icon-button"
+                        type="button"
+                        disabled={working !== null}
+                        aria-label="按意见重写本集"
+                        title="按意见重写本集"
+                        onClick={() => {
+                          setRegenerateInstruction("");
+                          setRegenerateEpisodeNumber(activeEpisode.proposalNumber);
+                        }}
+                      >
+                        <RefreshCw size={14} />
+                      </button>
+                    )}
+                    <Popconfirm
+                      title={`删除 E${String(activeEpisode.proposalNumber).padStart(2, "0")}`}
+                      description="删除后其余章节会自动重新编号，并保存为新版本。"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      disabled={working !== null}
+                      onConfirm={async () => {
+                        if (await onDelete(activeEpisode.proposalNumber)) {
+                          setActiveEpisodeNumber(Math.min(
+                            activeEpisode.proposalNumber,
+                            script.episodes.length - 1,
+                          ));
+                        }
+                      }}
+                    >
+                      <button
+                        className="secondary-button icon-button danger-button"
+                        type="button"
+                        disabled={working !== null}
+                        aria-label="删除本章"
+                        title="删除本章"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </Popconfirm>
                   </div>
                 </header>
                 <div>
@@ -1484,10 +1860,10 @@ function AdaptationScriptWorkspace({
                     <Fragment key={scene.sceneNumber}>
                       <article>
                         <b>{String(scene.sceneNumber).padStart(2, "0")}</b>
-                        <div><strong>{scene.heading}</strong><p>{scene.summary}</p><small>主线作用：{scene.storyFunction}</small></div>
-                        <div><span>{scene.characters.join(" · ")}</span><small>{scene.props.length ? `道具线索：${scene.props.join(" · ")}` : "无关键道具"}</small></div>
+                        <div><strong>{scene.heading}</strong><p>{scene.summary}</p>{script.mode === "rearranged" && <small>主线作用：{scene.storyFunction}</small>}</div>
+                        {script.mode === "rearranged" && <div><span>{scene.characters.join(" · ")}</span><small>{scene.props.length ? `道具线索：${scene.props.join(" · ")}` : "无关键道具"}</small></div>}
                       </article>
-                      {activeEpisodeHooks
+                      {script.mode === "rearranged" && activeEpisodeHooks
                         .filter((item) => item.sceneIndex === sceneIndex)
                         .map((item, hookIndex) => (
                           <div className={`episode-hook-marker ${item.tone}`} key={`${item.tone}-${hookIndex}-${item.hook}`}>
@@ -1503,6 +1879,142 @@ function AdaptationScriptWorkspace({
           )}
         </section>
       </div>
+      {settingsOpen && script && (
+        <AdaptationSettingsDialog
+          selectedMode={selectedMode}
+          sourceChapterCount={source?.chapterCount ?? 0}
+          plannedEpisodeCount={plannedEpisodeCount}
+          modeChanged={modeDirty}
+          saveDisabled={!modeDirty || working !== null || (selectedMode === "rearranged" && (!analysis || analysis.isStale))}
+          onModeChange={setSelectedMode}
+          onClose={() => setSettingsOpen(false)}
+          onSave={() => setSettingsConfirmation(true)}
+        />
+      )}
+      {settingsConfirmation && script && (
+        <div className="modal-backdrop adaptation-settings-confirmation" onMouseDown={() => setSettingsConfirmation(false)}>
+          <div className="dialog" role="alertdialog" aria-modal="true" aria-label="确认保存章节编排设置" onMouseDown={(event) => event.stopPropagation()}>
+            <span className="eyebrow">危险操作</span>
+            <h2>保存后会重建当前方案</h2>
+            <p>切换编排方式会生成新的改编方案版本，并解除既有正式剧本与新方案的章节关联；已有正式剧本不会删除。当前方案可从版本记录恢复。</p>
+            <div>
+              <button className="secondary-button" type="button" onClick={() => setSettingsConfirmation(false)}>取消</button>
+              <button
+                className="primary-button danger-confirm-button"
+                type="button"
+                disabled={working !== null}
+                onClick={async () => {
+                  await onGenerate(
+                    selectedMode,
+                    selectedMode === "rearranged" ? initialBatchCount : undefined,
+                    "保存章节编排基础设置，并按新设置生成方案。",
+                  );
+                  setSettingsConfirmation(false);
+                  setSettingsOpen(false);
+                }}
+              >
+                <CircleAlert size={13} />{working === "script" ? "保存中" : "确认保存并重建"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {editEpisodeNumber !== null && (
+        <div className="modal-backdrop" onMouseDown={() => setEditEpisodeNumber(null)}>
+          <form
+            className="dialog episode-edit-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (await onUpdate(editEpisodeNumber, {
+                title: editTitle.trim(),
+                logline: editLogline.trim(),
+                sceneSummaries: editSceneSummaries.map((item) => item.trim()),
+              })) {
+                setEditEpisodeNumber(null);
+              }
+            }}
+          >
+            <header className="episode-edit-dialog-header">
+              <div><span className="eyebrow">E{String(editEpisodeNumber).padStart(2, "0")} / 手工修改</span><h2>修改章节方案</h2></div>
+              <button className="text-button icon-button" type="button" aria-label="关闭章节编辑" onClick={() => setEditEpisodeNumber(null)}><X size={15} /></button>
+            </header>
+            <div className="episode-edit-dialog-body">
+              <label>
+                <span>章节标题</span>
+                <input autoFocus required value={editTitle} onChange={(event) => setEditTitle(event.target.value)} />
+              </label>
+              <label>
+                <span>章节概要</span>
+                <textarea required value={editLogline} onChange={(event) => setEditLogline(event.target.value)} />
+              </label>
+              {editSceneSummaries.map((summary, index) => (
+                <label key={index}>
+                  <span>剧情节点 {String(index + 1).padStart(2, "0")}</span>
+                  <textarea
+                    required
+                    value={summary}
+                    onChange={(event) => setEditSceneSummaries((items) => items.map((item, itemIndex) =>
+                      itemIndex === index ? event.target.value : item))}
+                  />
+                </label>
+              ))}
+            </div>
+            <footer className="episode-edit-dialog-footer">
+              <button className="secondary-button" type="button" disabled={working === "update"} onClick={() => setEditEpisodeNumber(null)}>取消</button>
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={working === "update" || !editTitle.trim() || !editLogline.trim() || editSceneSummaries.some((item) => !item.trim())}
+              >
+                <Save size={13} />{working === "update" ? "保存中" : "保存修改"}
+              </button>
+            </footer>
+          </form>
+        </div>
+      )}
+      {appendOpen && (
+        <div className="modal-backdrop" onMouseDown={() => setAppendOpen(false)}>
+          <form
+            className="dialog episode-regenerate-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={async (event) => {
+              event.preventDefault();
+              await onAppend(appendCount, appendInstruction.trim() || undefined);
+              setAppendOpen(false);
+            }}
+          >
+            <span className="eyebrow">继续编排 / 当前 {script.episodes.length} 集</span>
+            <h2>生成下一批剧集大纲</h2>
+            <p>助手会读取原文、素材图谱与当前方案，从下一集继续编排，不改写已有剧集。每批最多生成 6 集。</p>
+            <label>
+              <span>本批集数</span>
+              <InputNumber
+                autoFocus
+                min={1}
+                max={maxAppendCount}
+                precision={0}
+                value={appendCount}
+                onChange={(value) => setAppendCount(value ?? 1)}
+              />
+            </label>
+            <label>
+              <span>补充要求（可选）</span>
+              <textarea
+                value={appendInstruction}
+                onChange={(event) => setAppendInstruction(event.target.value)}
+                placeholder="例如：下一批加快推进，突出配角背叛，并在最后一集留下身份悬念。"
+              />
+            </label>
+            <div>
+              <button className="secondary-button" type="button" disabled={working === "append"} onClick={() => setAppendOpen(false)}>取消</button>
+              <button className="primary-button" type="submit" disabled={working === "append"}>
+                <Plus size={13} />{working === "append" ? "生成中" : `生成 ${appendCount} 集`}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {regenerateEpisodeNumber !== null && (
         <div className="modal-backdrop">
           <form
@@ -1615,32 +2127,32 @@ export function OutlinePage() {
 function ScriptStageTabs({
   projectId,
   active,
+  sourceId,
+  productionEpisodeId,
 }: {
   projectId: string;
   active: "adaptation" | "production";
+  sourceId?: string;
+  productionEpisodeId?: string;
 }) {
   const navigate = useNavigate();
   return (
-    <div className="story-stage-tabs" role="tablist" aria-label="剧本开发视图">
-      <button
-        className={active === "adaptation" ? "active" : ""}
-        type="button"
-        role="tab"
-        aria-selected={active === "adaptation"}
-        onClick={() => navigate(`/projects/${projectId}/script/adaptation`)}
-      >
-        <span>01</span><strong>改编方案</strong>
-      </button>
-      <button
-        className={active === "production" ? "active" : ""}
-        type="button"
-        role="tab"
-        aria-selected={active === "production"}
-        onClick={() => navigate(`/projects/${projectId}/script`)}
-      >
-        <span>02</span><strong>正式剧本</strong>
-      </button>
-    </div>
+    <Tabs
+      className="script-view-tabs"
+      size="small"
+      activeKey={active}
+      items={[
+        { key: "adaptation", label: "改编方案", disabled: !sourceId },
+        { key: "production", label: "正式剧本", disabled: !productionEpisodeId },
+      ]}
+      onChange={(key) => {
+        if (key === "adaptation" && sourceId) {
+          navigate(getScriptWorkspacePath(projectId, sourceId, "adaptation"));
+        } else if (key === "production" && productionEpisodeId) {
+          navigate(getScriptWorkspacePath(projectId, productionEpisodeId, "production"));
+        }
+      }}
+    />
   );
 }
 
@@ -1661,7 +2173,7 @@ export function ScriptLandingPage() {
   }, [projectId]);
 
   if (episodes?.[0]) {
-    return <Navigate to={`/projects/${projectId}/script/episodes/${episodes[0].id}`} replace />;
+    return <Navigate to={getScriptWorkspacePath(projectId, episodes[0].id, "production")} replace />;
   }
 
   return (
@@ -1959,23 +2471,22 @@ function AudioAssetsPage({ projectId }: { projectId: string }) {
 
   return (
     <div className="page full-height-page asset-bible-page">
-      <PageTitle
-        eyebrow="项目共享资产"
-        title="音频素材"
-        description="角色参考音、对白、环境声与音乐统一作为可追踪素材管理"
-        action={
-          <button className="primary-button" onClick={() => setUploadOpen(true)}>
-            <Upload size={14} />上传音频
-          </button>
-        }
-      />
-      {error && <div className="settings-error asset-error">{error}</div>}
       <AssetTabs assetType="audio" counts={{ audio: materials.length }} />
-      <div className="asset-workspace audio-asset-workspace">
-        <section className="asset-list-panel">
-          <div className="table-tools">
+      <div className="asset-bible-workspace">
+        <header className="asset-bible-toolbar">
+          <div className="asset-bible-context"><strong>音频素材</strong><span>{materials.length}</span></div>
+          <div className="asset-bible-search">
             <label><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索音频" /></label>
           </div>
+          <div className="asset-bible-actions">
+            <button className="primary-button" onClick={() => setUploadOpen(true)}>
+              <Upload size={14} />上传音频
+            </button>
+          </div>
+        </header>
+        {error && <div className="settings-error asset-error">{error}</div>}
+        <div className="asset-workspace audio-asset-workspace">
+          <section className="asset-list-panel">
           {visible.map((material) => (
             <button
               className={selected?.assetId === material.assetId ? "asset-row active" : "asset-row"}
@@ -1989,9 +2500,9 @@ function AudioAssetsPage({ projectId }: { projectId: string }) {
           ))}
           {!loading && visible.length === 0 && <div className="asset-list-empty"><strong>尚无音频素材</strong><p>上传音频，或在人物资产中生成角色参考音。</p></div>}
           {loading && <div className="asset-list-empty">正在读取音频素材...</div>}
-        </section>
-        {selected ? (
-          <section className="asset-detail audio-asset-detail">
+          </section>
+          {selected ? (
+            <section className="asset-detail audio-asset-detail">
             <header className="asset-detail-header">
               <div className="asset-detail-identity"><span className="eyebrow">AUDIO · {selected.source} · v{selected.version}</span><h2>{selected.name}</h2><p>{selected.fileName}</p></div>
             </header>
@@ -2007,10 +2518,11 @@ function AudioAssetsPage({ projectId }: { projectId: string }) {
               <div><dt>用途</dt><dd>{selected.kind === "voice-reference" ? "角色音色基准与后续克隆参考" : "对白、环境声、音乐或制作参考"}</dd></div>
               <div><dt>更新时间</dt><dd>{new Date(selected.updatedAtUtc).toLocaleString()}</dd></div>
             </dl>
-          </section>
-        ) : (
-          <section className="asset-detail asset-detail-empty"><AudioLines size={28} /><h2>尚无音频素材</h2><p>角色参考音生成后也会自动出现在这里。</p></section>
-        )}
+            </section>
+          ) : (
+            <section className="asset-detail asset-detail-empty"><AudioLines size={28} /><h2>尚无音频素材</h2><p>角色参考音生成后也会自动出现在这里。</p></section>
+          )}
+        </div>
       </div>
       {uploadOpen && (
         <div className="modal-backdrop" onMouseDown={() => setUploadOpen(false)}>
@@ -2040,9 +2552,13 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
   const [selectedId, setSelectedId] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState<"import" | "save" | "reference" | null>(null);
+  const [working, setWorking] = useState<"import" | "save" | "reference" | "upload-reference" | null>(null);
   const [error, setError] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
+  const [referenceFeedbackOpen, setReferenceFeedbackOpen] = useState(false);
+  const [referenceFeedback, setReferenceFeedback] = useState("");
+  const [useCurrentReference, setUseCurrentReference] = useState(true);
+  const referenceUploadInput = useRef<HTMLInputElement>(null);
   const [editingAsset, setEditingAsset] = useState<VisualAsset | null>(null);
   const [editor, setEditor] = useState<AssetEditorState>(emptyAssetEditor);
   const [promptCopied, setPromptCopied] = useState(false);
@@ -2130,16 +2646,23 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     }
   };
 
-  const generateReference = async () => {
+  const generateReference = async (instruction?: string, basedOnCurrent = false) => {
     if (!selected) return;
     setWorking("reference");
     setError("");
     try {
-      const referenceImage = await generateVisualReference(projectId, selected.resourceId);
+      const referenceImage = await generateVisualReference(
+        projectId,
+        selected.resourceId,
+        instruction,
+        basedOnCurrent,
+      );
       setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
         ? { ...item, referenceImage }
         : item));
       setPromptCopied(false);
+      setReferenceFeedbackOpen(false);
+      setReferenceFeedback("");
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "参考图生成失败。");
     } finally {
@@ -2147,14 +2670,41 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     }
   };
 
+  const uploadReference = async (file: File) => {
+    if (!selected) return;
+    setWorking("upload-reference");
+    setError("");
+    try {
+      const referenceImage = await uploadVisualReference(projectId, selected.resourceId, file);
+      setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
+        ? { ...item, referenceImage }
+        : item));
+      setPromptCopied(false);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "参考图上传失败。");
+    } finally {
+      setWorking(null);
+      if (referenceUploadInput.current) referenceUploadInput.current.value = "";
+    }
+  };
+
   return (
     <div className="page full-height-page asset-bible-page">
-      <PageTitle
-        eyebrow="项目共享资产"
-        title="资产圣经"
-        description="人物、场景、道具的视觉定义、设定图与参考统一在资产内版本化管理"
-        action={
-          <div className="button-group">
+      <AssetTabs assetType={assetType} counts={counts} />
+      <div className="asset-bible-workspace">
+        <header className="asset-bible-toolbar">
+          <div className="asset-bible-context"><strong>{kindConfig.label}资产</strong><span>{kindAssets.length}</span></div>
+          <div className="asset-bible-search">
+            <label>
+              <Search size={14} />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={`搜索${kindConfig.label}`}
+              />
+            </label>
+          </div>
+          <div className="asset-bible-actions">
             <button
               className="secondary-button"
               onClick={importMaterials}
@@ -2167,22 +2717,10 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
               <Plus size={14} />新建{kindConfig.singular}
             </button>
           </div>
-        }
-      />
-      {error && <div className="settings-error asset-error">{error}</div>}
-      <AssetTabs assetType={assetType} counts={counts} />
-      <div className="asset-workspace">
-        <section className="asset-list-panel">
-          <div className="table-tools">
-            <label>
-              <Search size={14} />
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={`搜索${kindConfig.label}`}
-              />
-            </label>
-          </div>
+        </header>
+        {error && <div className="settings-error asset-error">{error}</div>}
+        <div className="asset-workspace">
+          <section className="asset-list-panel">
           {visibleAssets.map((asset, index) => (
             <button
               className={selected?.resourceId === asset.resourceId ? "asset-row active" : "asset-row"}
@@ -2211,70 +2749,94 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
             </div>
           )}
           {loading && <div className="asset-list-empty">正在读取资产...</div>}
-        </section>
-        {selected ? (
-          <section className="asset-detail">
+          </section>
+          {selected ? (
+            <section className="asset-detail">
             <header className="asset-detail-header">
               <div className="asset-detail-identity">
                 <span className="eyebrow">{kindConfig.label} · v{selected.version} · {selected.status === "draft" ? "草稿" : selected.status}</span>
-                <h2>{selected.name}</h2>
-                <p>{selected.summary || "尚未填写叙事定义"}</p>
+                <h2 title={selected.name}>{selected.name}</h2>
               </div>
               <div className="asset-detail-actions">
-                <button className="secondary-button" onClick={() => openEdit(selected)}>
-                  <Edit3 size={14} />编辑并保存新版本
+                <button
+                  className="secondary-button asset-edit-button"
+                  onClick={() => openEdit(selected)}
+                  title="编辑并保存新版本"
+                >
+                  <Edit3 size={14} /><span>编辑</span>
                 </button>
-                <VersionPicker projectId={projectId} assetId={selected.assetId} label={`${kindConfig.singular}版本`} />
+                <VersionPicker projectId={projectId} assetId={selected.assetId} label={`${kindConfig.singular}版本`} compact />
+                <input
+                  ref={referenceUploadInput}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void uploadReference(file);
+                  }}
+                />
+                <button
+                  className="secondary-button asset-reference-upload-button"
+                  type="button"
+                  disabled={working !== null}
+                  title="上传参考图（PNG、JPEG 或 WebP，最大 10 MB）"
+                  aria-label="上传参考图"
+                  onClick={() => referenceUploadInput.current?.click()}
+                >
+                  <Upload size={14} />
+                </button>
+                <button
+                  className="primary-button asset-reference-generate-button"
+                  onClick={() => {
+                    if (selected.referenceImage) {
+                      setReferenceFeedback("");
+                      setUseCurrentReference(true);
+                      setReferenceFeedbackOpen(true);
+                    } else {
+                      void generateReference();
+                    }
+                  }}
+                  disabled={working !== null}
+                  title={`${assetReferenceSpecs[selected.kind].title} · 1024 × 1024 · 纯白背景`}
+                  aria-label={working === "reference"
+                    ? "正在生成设定图"
+                    : selected.referenceImage ? "重新生成设定图" : "生成设定图"}
+                >
+                  <RefreshCw size={13} />
+                  <span>{working === "reference"
+                    ? "生成中"
+                    : selected.referenceImage ? "重生成" : "生成设定图"}</span>
+                </button>
               </div>
             </header>
             <dl className="detail-grid">
-              <div>
+              <div className="asset-detail-summary">
                 <dt>叙事定义</dt>
-                <dd>{selected.summary || "未填写"}</dd>
+                <dd title={selected.summary || undefined}>{selected.summary || "未填写"}</dd>
               </div>
               <div>
                 <dt>视觉定义</dt>
                 <dd>{selected.visualDescription || "未填写"}</dd>
               </div>
               <div>
-                <dt>必须保留</dt>
-                <dd>{selected.mustKeep.join("、") || "未填写"}</dd>
-              </div>
-              <div>
-                <dt>禁止项</dt>
-                <dd>{selected.avoid.join("、") || "未填写"}</dd>
-              </div>
-              <div>
                 <dt>故事引用</dt>
                 <dd>{selected.storyReferences.join("、") || "尚未关联"}</dd>
               </div>
-              <div>
-                <dt>来源</dt>
-                <dd>{selected.sourceAssetId ? "素材图谱" : "手动创建"}</dd>
-              </div>
+              {selected.mustKeep.length > 0 && (
+                <div>
+                  <dt>必须保留</dt>
+                  <dd>{selected.mustKeep.join("、")}</dd>
+                </div>
+              )}
+              {selected.avoid.length > 0 && (
+                <div>
+                  <dt>禁止项</dt>
+                  <dd>{selected.avoid.join("、")}</dd>
+                </div>
+              )}
             </dl>
             <div className="asset-reference-workbench">
-              <header className="asset-reference-header">
-                <div>
-                  <span className="eyebrow">PRODUCTION DESIGN</span>
-                  <strong>{assetReferenceSpecs[selected.kind].title}</strong>
-                  <p>{assetReferenceSpecs[selected.kind].layout}</p>
-                </div>
-                <div className="asset-reference-actions">
-                  <span>1024 × 1024</span>
-                  <span>纯白背景</span>
-                  <button
-                    className="primary-button"
-                    onClick={generateReference}
-                    disabled={working !== null}
-                  >
-                    <RefreshCw size={13} />
-                    {working === "reference"
-                      ? "正在生成"
-                      : selected.referenceImage ? "重试生成" : "生成设定图"}
-                  </button>
-                </div>
-              </header>
               <div className="asset-reference-body">
                 {selected.referenceImage ? (
                   <div className="asset-reference-canvas" title="预览设定图">
@@ -2327,16 +2889,63 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                 character={selected}
               />
             )}
-          </section>
-        ) : (
-          <section className="asset-detail asset-detail-empty">
+            </section>
+          ) : (
+            <section className="asset-detail asset-detail-empty">
             <ImagePlus size={28} />
             <h2>{loading ? "正在读取资产" : `尚无${kindConfig.label}资产`}</h2>
             <p>资产会统一包含视觉定义、设定图、参考与故事引用。</p>
             {!loading && <button className="primary-button" onClick={openCreate}><Plus size={14} />新建{kindConfig.singular}</button>}
-          </section>
-        )}
+            </section>
+          )}
+        </div>
       </div>
+      {referenceFeedbackOpen && selected && (
+        <div className="modal-backdrop" onMouseDown={() => working !== "reference" && setReferenceFeedbackOpen(false)}>
+          <form
+            className="dialog asset-reference-feedback-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (referenceFeedback.trim()) void generateReference(referenceFeedback.trim(), useCurrentReference);
+            }}
+          >
+            <span className="eyebrow">{kindConfig.label}设定图 / 重新生成</span>
+            <h2>输入本轮修改意见</h2>
+            <p>将基于当前资产定义重新生成一个新版本，现有图片和历史版本会保留。</p>
+            <div className="asset-reference-basis">
+              <div>
+                <strong>基于当前参考图修改</strong>
+                <span>{useCurrentReference ? "保持当前主体、造型和构图连续性" : "仅按资产定义与本轮意见重新绘制"}</span>
+              </div>
+              <Switch
+                checked={useCurrentReference}
+                onChange={setUseCurrentReference}
+                disabled={working === "reference"}
+                aria-label="基于当前参考图修改"
+              />
+            </div>
+            <label>
+              <span>修改意见</span>
+              <textarea
+                autoFocus
+                required
+                maxLength={2000}
+                rows={5}
+                value={referenceFeedback}
+                onChange={(event) => setReferenceFeedback(event.target.value)}
+                placeholder="例如：牛角更短，披风改为深蓝色；保持服装结构与四视图布局不变。"
+              />
+            </label>
+            <div>
+              <button className="secondary-button" type="button" disabled={working === "reference"} onClick={() => setReferenceFeedbackOpen(false)}>取消</button>
+              <button className="primary-button" type="submit" disabled={working === "reference" || !referenceFeedback.trim()}>
+                <RefreshCw size={13} />{working === "reference" ? "生成中" : "按意见重新生成"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {editorOpen && (
         <div
           className="modal-backdrop"
@@ -2448,14 +3057,18 @@ export function ScriptPage() {
   if (!scriptPackage || scriptPackage.productionEpisodeId !== productionEpisodeId) {
     return (
       <div className="page full-height-page">
-        <ScriptStageTabs projectId={projectId} active="production" />
+        <ScriptStageTabs
+          projectId={projectId}
+          active="production"
+          productionEpisodeId={productionEpisodeId}
+        />
         <div className="production-episode-switcher">
           <span>正式剧本</span>
           <Select
             aria-label="切换正式剧本生产集"
             value={productionEpisodeId || undefined}
             disabled={productionEpisodes.length === 0}
-            onChange={(episodeId) => navigate(`/projects/${projectId}/script/episodes/${episodeId}`)}
+            onChange={(episodeId) => navigate(getScriptWorkspacePath(projectId, episodeId, "production"))}
             options={productionEpisodes.map((episode) => ({
               value: episode.id,
               label: `E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.title}`,
@@ -2528,40 +3141,42 @@ export function ScriptPage() {
 
   return (
     <div className="page full-height-page production-script-page">
-      <header className="production-script-header">
-        <div>
-          <span className="eyebrow">{scriptPackage.isLegacyOutline ? "历史大纲快照" : "正式剧本"} / E{String(scriptPackage.episodeNumber).padStart(2, "0")} / v{scriptPackage.version}</span>
-          <h1>{scriptPackage.title}</h1>
-          <p>{scriptPackage.targetSeconds ?? episode.targetSeconds} 秒 · {episode.scenes.length} 场</p>
-        </div>
-        <div className="production-script-header-actions">
-          <VersionPicker compact projectId={projectId} assetId={scriptPackage.assetId} label="正式剧本版本" />
-          <button type="button" className="primary-button" disabled={regenerating} onClick={handleRegenerate}>
-            <RefreshCw size={13} />{regenerating ? "重新生成中" : "重新生成正式剧本"}
-          </button>
-        </div>
-      </header>
-      <ScriptStageTabs projectId={projectId} active="production" />
-      <div className="production-episode-switcher">
-        <span>正式剧本</span>
-        <Select
-          aria-label="切换正式剧本生产集"
-          value={productionEpisodeId}
-          onChange={(episodeId) => navigate(`/projects/${projectId}/script/episodes/${episodeId}`)}
-          options={productionEpisodes.map((episode) => ({
-            value: episode.id,
-            label: `E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.title}`,
-          }))}
-        />
-      </div>
-      {regenerateError && <div className="settings-error">{regenerateError}</div>}
-      {scriptPackage.isLegacyOutline && (
-        <div className="production-legacy-notice">
-          <strong>这份版本保存的是历史改编大纲，不是正式影视剧本。</strong>
-          <span>剧情节点和对白意图仅供追溯。点击“重新生成正式剧本”后，会在同一资源下创建包含动作、真实对白和摄影骨架的新版本。</span>
-        </div>
-      )}
-      <div className="production-script-shell">
+      <ScriptStageTabs
+        projectId={projectId}
+        active="production"
+        sourceId={scriptPackage.sourceResourceId}
+        productionEpisodeId={productionEpisodeId}
+      />
+      <div className="production-script-workspace">
+        <header className="production-script-toolbar">
+          <div className="production-script-context">
+            <span>{scriptPackage.isLegacyOutline ? "历史大纲" : "正式剧本"}</span>
+            <Select
+              aria-label="切换正式剧本生产集"
+              value={productionEpisodeId}
+              onChange={(episodeId) => navigate(getScriptWorkspacePath(projectId, episodeId, "production"))}
+              options={productionEpisodes.map((episode) => ({
+                value: episode.id,
+                label: `E${String(episode.episodeNumber).padStart(2, "0")} · ${episode.title}`,
+              }))}
+            />
+            <small>v{scriptPackage.version} · {scriptPackage.targetSeconds ?? episode.targetSeconds} 秒 · {episode.scenes.length} 场</small>
+          </div>
+          <div className="production-script-header-actions">
+            <VersionPicker compact projectId={projectId} assetId={scriptPackage.assetId} label="正式剧本版本" />
+            <button type="button" className="primary-button" disabled={regenerating} onClick={handleRegenerate}>
+              <RefreshCw size={13} />{regenerating ? "重新生成中" : "重新生成正式剧本"}
+            </button>
+          </div>
+        </header>
+        {regenerateError && <div className="settings-error production-script-message">{regenerateError}</div>}
+        {scriptPackage.isLegacyOutline && (
+          <div className="production-legacy-notice">
+            <strong>这份版本保存的是历史改编大纲，不是正式影视剧本。</strong>
+            <span>剧情节点和对白意图仅供追溯。点击“重新生成正式剧本”后，会在同一资源下创建包含动作、真实对白和摄影骨架的新版本。</span>
+          </div>
+        )}
+        <div className="production-script-shell">
         <aside className="production-scene-list">
           <header><strong>场次</strong><span>{episode.scenes.length}</span></header>
           <nav aria-label="场次目录">
@@ -2590,77 +3205,96 @@ export function ScriptPage() {
         </aside>
         {activeScene && (
           <article className="production-script-editor">
-            <header>
-              <span>S{String(activeScene.sceneNumber).padStart(2, "0")}</span>
-              <div><h2>{activeScene.heading}</h2><p>{activeScene.storyFunction}</p></div>
+            <header className="production-scene-header">
+              <div className="production-scene-heading">
+                <div className="production-scene-kicker">
+                  <span>S{String(activeScene.sceneNumber).padStart(2, "0")}</span>
+                  <small>第 {activeScene.sceneNumber} / {episode.scenes.length} 场</small>
+                </div>
+                <h2>{activeScene.heading}</h2>
+                <p>{activeScene.storyFunction}</p>
+              </div>
+              <div className="production-scene-facts" aria-label="场次摘要">
+                <div><span>时长</span><strong>{activeSceneShots.length > 0 ? `${sceneDurationSeconds.toFixed(1)}s` : "—"}</strong></div>
+                <div><span>镜头</span><strong>{activeSceneShots.length > 0 ? `${activeSceneShots.length} 镜` : "—"}</strong></div>
+                <div><span>人物</span><strong>{activeScene.characters.length}</strong></div>
+                <div><span>道具</span><strong>{activeScene.props.length}</strong></div>
+              </div>
+              <div className="production-scene-assets">
+                <div><span>人物</span><p>{activeScene.characters.join(" · ") || "无明确人物"}</p></div>
+                <div><span>道具</span><p>{activeScene.props.join(" · ") || "无关键道具"}</p></div>
+              </div>
             </header>
-            <section className="production-plan-overview" aria-label="场次拍摄指标">
-              <div><span>计划时长</span><strong>{activeSceneShots.length > 0 ? `${sceneDurationSeconds.toFixed(1)}s` : "—"}</strong></div>
-              <div><span>镜头数量</span><strong>{activeSceneShots.length > 0 ? `${activeSceneShots.length} 镜` : "—"}</strong></div>
-              <div><span>节奏设计</span><strong>{rhythmLabel}</strong><small>{averageShotSeconds > 0 ? `平均 ${averageShotSeconds.toFixed(1)}s / 镜` : "重新生成方案后补齐"}</small></div>
-              <div><span>视觉对比</span><strong>{shotSizeChange}</strong><small>{activeScene?.visualContrast?.trim() || (activeSceneShots.length > 0 ? `${shotSizeCount} 种景别 · ${cameraMovementCount} 种运镜` : "重新生成方案后补齐")}</small></div>
-            </section>
-            {activeSceneShots.length > 0 && (
-              <section className="production-rhythm-track" aria-label="镜头节奏时间轴">
-                <header><span>0s</span><strong>镜头节奏</strong><span>{sceneDurationSeconds.toFixed(1)}s</span></header>
-                <div>
-                  {activeSceneShots.map((shot) => (
-                    <button
-                      type="button"
-                      style={{ flexGrow: shot.durationSeconds }}
-                      title={`S${String(activeScene.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} · ${shot.durationSeconds}s · ${shot.shotSize}`}
-                      onClick={() => navigate(`/projects/${projectId}/storyboard/episodes/${productionEpisodeId}`)}
-                      key={shot.shotNumber}
-                    >
-                      <span>{String(shot.shotNumber).padStart(2, "0")}</span>
-                      <small>{shot.durationSeconds}s</small>
-                    </button>
+            <section className="production-script-document">
+              <header className="production-section-heading">
+                <div><span>01</span><div><h3>剧本正文</h3><p>动作与对白</p></div></div>
+              </header>
+              <div className="production-action-block">
+                <span>{scriptPackage.isLegacyOutline ? "剧情节点" : "动作"}</span>
+                <p>{scriptPackage.isLegacyOutline ? activeScene.summary : activeScene.action}</p>
+              </div>
+              {activeSceneHooks.length > 0 && (
+                <div className="production-story-beats">
+                  {activeSceneHooks.map((item, index) => (
+                    <div className={item.tone} key={`${item.tone}-${index}-${item.hook}`}>
+                      <span><i />{item.tone === "small" ? "小爆点" : "大爆点"}</span>
+                      <p>{item.hook}</p>
+                    </div>
                   ))}
                 </div>
-              </section>
-            )}
-            {activeSceneHooks.length > 0 && (
-              <div className="production-scene-hooks">
-                {activeSceneHooks.map((item, index) => (
-                  <div className={item.tone} key={`${item.tone}-${index}-${item.hook}`}>
-                    <span><i />{item.tone === "small" ? "小爆点" : "大爆点"}</span>
-                    <p>{item.hook}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-            <section className="production-script-block primary">
-              <span>{scriptPackage.isLegacyOutline ? "剧情节点" : "动作"}</span>
-              <p>{scriptPackage.isLegacyOutline ? activeScene.summary : activeScene.action}</p>
+              )}
+              {scriptPackage.isLegacyOutline ? (
+                <div className="production-dialogue-intent">
+                  <span>对白意图</span>
+                  <p>{activeScene.dialogueIntent || "旧版大纲未记录对白意图。"}</p>
+                </div>
+              ) : (
+                <div className="production-screenplay-dialogues">
+                  <header><span>对白</span><small>{activeScene.dialogues.length} 组</small></header>
+                  {activeScene.dialogues.length > 0 ? activeScene.dialogues.map((dialogue, index) => (
+                    <div className="screenplay-dialogue" key={`${dialogue.character}-${index}`}>
+                      <div className="screenplay-dialogue-cue">
+                        <strong>{dialogue.character}</strong>
+                        {dialogue.parenthetical && <small>（{dialogue.parenthetical}）</small>}
+                      </div>
+                      <div className="screenplay-dialogue-lines">
+                        {dialogue.lines.map((line, lineIndex) => <p key={lineIndex}>{line}</p>)}
+                      </div>
+                    </div>
+                  )) : <p>本场无对白。</p>}
+                </div>
+              )}
             </section>
-            {scriptPackage.isLegacyOutline ? (
-              <section className="production-script-block production-dialogue-intent">
-                <span>对白意图</span>
-                <p>{activeScene.dialogueIntent || "旧版大纲未记录对白意图。"}</p>
-              </section>
-            ) : (
-              <section className="production-screenplay-dialogues">
-                <span>对白</span>
-                {activeScene.dialogues.length > 0 ? activeScene.dialogues.map((dialogue, index) => (
-                  <div className="screenplay-dialogue" key={`${dialogue.character}-${index}`}>
-                    <div className="screenplay-dialogue-cue">
-                      <strong>{dialogue.character}</strong>
-                      {dialogue.parenthetical && <small>（{dialogue.parenthetical}）</small>}
-                    </div>
-                    <div className="screenplay-dialogue-lines">
-                      {dialogue.lines.map((line, lineIndex) => <p key={lineIndex}>{line}</p>)}
-                    </div>
-                  </div>
-                )) : <p>本场无对白。</p>}
-              </section>
-            )}
-            <section className="production-shot-plan">
-              <header>
-                <div><span>镜头计划</span><strong>{activeSceneShots.length > 0 ? `${activeSceneShots.length} 个执行镜头` : "尚未生成分镜"}</strong></div>
+            <section className="production-execution-plan">
+              <header className="production-section-heading production-execution-heading">
+                <div><span>02</span><div><h3>制作规划</h3><p>节奏、视觉与执行镜头</p></div></div>
                 <button type="button" onClick={() => navigate(activeSceneShots.length > 0 ? `/projects/${projectId}/storyboard/episodes/${productionEpisodeId}` : `/projects/${projectId}/script`)}>
                   {activeSceneShots.length > 0 ? "进入分镜" : "返回方案"}
                 </button>
               </header>
+              <div className="production-direction-grid">
+                <div><span>节奏设计</span><strong>{rhythmLabel}</strong><small>{averageShotSeconds > 0 ? `平均 ${averageShotSeconds.toFixed(1)}s / 镜` : "重新生成方案后补齐"}</small></div>
+                <div><span>视觉对比</span><strong>{shotSizeChange}</strong><small>{activeScene?.visualContrast?.trim() || (activeSceneShots.length > 0 ? `${shotSizeCount} 种景别 · ${cameraMovementCount} 种运镜` : "重新生成方案后补齐")}</small></div>
+              </div>
+              {activeSceneShots.length > 0 && (
+                <div className="production-rhythm-track" aria-label="镜头节奏时间轴">
+                  <header><span>0s</span><strong>镜头节奏</strong><span>{sceneDurationSeconds.toFixed(1)}s</span></header>
+                  <div>
+                    {activeSceneShots.map((shot) => (
+                      <button
+                        type="button"
+                        style={{ flexGrow: shot.durationSeconds }}
+                        title={`S${String(activeScene.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} · ${shot.durationSeconds}s · ${shot.shotSize}`}
+                        onClick={() => navigate(`/projects/${projectId}/storyboard/episodes/${productionEpisodeId}`)}
+                        key={shot.shotNumber}
+                      >
+                        <span>{String(shot.shotNumber).padStart(2, "0")}</span>
+                        <small>{shot.durationSeconds}s</small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {activeSceneShots.length > 0 ? (
                 <div className="production-shot-list">
                   {activeSceneShots.map((shot) => (
@@ -2692,12 +3326,9 @@ export function ScriptPage() {
                 </div>
               )}
             </section>
-            <footer className="production-scene-meta">
-              <div><span>人物</span><p>{activeScene.characters.join(" · ") || "无明确人物"}</p></div>
-              <div><span>道具</span><p>{activeScene.props.join(" · ") || "无关键道具"}</p></div>
-            </footer>
           </article>
         )}
+        </div>
       </div>
     </div>
   );

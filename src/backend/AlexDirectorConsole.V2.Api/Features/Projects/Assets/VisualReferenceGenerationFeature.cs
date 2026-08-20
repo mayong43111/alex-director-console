@@ -1,9 +1,11 @@
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
+using SkiaSharp;
 
 namespace AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 
@@ -18,6 +20,10 @@ public sealed record VisualReferenceImageView(
     string Prompt,
     string? RevisedPrompt,
     DateTimeOffset CreatedAtUtc);
+
+public sealed record GenerateVisualReferenceRequest(
+    string? Instruction,
+    bool UseCurrentReference = false);
 
 internal static class VisualReferenceQueries
 {
@@ -72,22 +78,41 @@ public interface IVisualReferenceService
     Task<VisualReferenceImageView> GenerateAsync(
         Guid projectId,
         Guid subjectResourceId,
+        string? instruction,
+        bool useCurrentReference,
+        CancellationToken cancellationToken);
+
+    Task<VisualReferenceImageView> UploadAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        string fileName,
+        string contentType,
+        byte[] bytes,
         CancellationToken cancellationToken);
 }
 
 public sealed class VisualReferenceService(
     V2DbContext dbContext,
     IProjectCoverGenerator generator,
+    IShotFrameGenerator referenceEditor,
     TimeProvider timeProvider) : IVisualReferenceService
 {
     public const string AssetType = "visual-reference-image";
     public const string Purpose = "generation-reference";
+    public const long MaxUploadBytes = 10 * 1024 * 1024;
+    private static readonly HashSet<string> UploadContentTypes =
+        ["image/png", "image/jpeg", "image/webp"];
 
     public async Task<VisualReferenceImageView> GenerateAsync(
         Guid projectId,
         Guid subjectResourceId,
+        string? instruction,
+        bool useCurrentReference,
         CancellationToken cancellationToken)
     {
+        instruction = instruction?.Trim();
+        if (instruction?.Length > 2000)
+            throw new InvalidOperationException("本轮修改意见不能超过 2000 个字符。");
         var subject = await (
             from state in dbContext.ResourceStates.AsNoTracking()
             join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
@@ -117,13 +142,53 @@ public sealed class VisualReferenceService(
             ProjectSettingsDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
 
-        var prompt = BuildPrompt(settings, document);
+        var prompt = BuildPrompt(settings, document, instruction);
         const int referenceSize = 1024;
         const string modelSize = "1024x1024";
-        var generated = await generator.GenerateAsync(
-            prompt,
-            modelSize,
-            cancellationToken);
+        Asset? currentReference = null;
+        GeneratedProjectCover generated;
+        if (useCurrentReference)
+        {
+            currentReference = await (
+                from reference in dbContext.VisualReferences.AsNoTracking()
+                join referenceAsset in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals referenceAsset.Id
+                join resourceState in dbContext.ResourceStates.AsNoTracking() on referenceAsset.ResourceId equals resourceState.ResourceId
+                where reference.ProjectId == projectId
+                    && reference.SubjectResourceId == subjectResourceId
+                    && reference.Purpose == Purpose
+                    && referenceAsset.Type == AssetType
+                    && referenceAsset.BlobContent != null
+                    && resourceState.ProjectId == projectId
+                    && resourceState.ResourceType == AssetType
+                    && resourceState.CurrentAssetId == referenceAsset.Id
+                select referenceAsset)
+                .SingleOrDefaultAsync(cancellationToken)
+                ?? throw new InvalidOperationException("当前资产还没有可用于修改的参考图。");
+            var edited = await referenceEditor.GenerateAsync(
+                prompt,
+                modelSize,
+                [new ShotFrameReference(
+                    currentReference.BlobContent!,
+                    currentReference.ContentType ?? "image/png",
+                    currentReference.FileName ?? "current-reference.png",
+                    document.Kind,
+                    document.Name,
+                    currentReference.Id,
+                    currentReference.ResourceId,
+                    currentReference.Version)],
+                cancellationToken);
+            generated = new(
+                edited.Bytes,
+                edited.ContentType,
+                edited.Extension,
+                edited.Deployment,
+                edited.Quality,
+                edited.RevisedPrompt);
+        }
+        else
+        {
+            generated = await generator.GenerateAsync(prompt, modelSize, cancellationToken);
+        }
         if (generated.Bytes.Length == 0)
         {
             throw new InvalidOperationException("图片模型返回了空文件。");
@@ -174,6 +239,9 @@ public sealed class VisualReferenceService(
                 deployment = generated.Deployment,
                 quality = generated.Quality,
                 prompt,
+                instruction,
+                useCurrentReference,
+                basedOnReferenceAssetId = currentReference?.Id,
                 parameters = new
                 {
                     deployment = generated.Deployment,
@@ -184,10 +252,13 @@ public sealed class VisualReferenceService(
                     outputHeight = referenceSize
                 },
                 references = new[]
-                {
-                    GenerationProvenance.Reference(subject, "reference-for"),
-                    GenerationProvenance.Reference(settingsAsset, "uses-settings")
-                },
+                    {
+                        GenerationProvenance.Reference(subject, "reference-for"),
+                        GenerationProvenance.Reference(settingsAsset, "uses-settings")
+                    }
+                    .Concat(currentReference is null
+                        ? []
+                        : [GenerationProvenance.Reference(currentReference, "uses-current-reference")]),
                 projectStyle = new
                 {
                     settings.VisualStyle,
@@ -252,6 +323,133 @@ public sealed class VisualReferenceService(
             IsRequired = true,
             CreatedAtUtc = now
         });
+        if (currentReference is not null)
+        {
+            dbContext.AssetDependencies.Add(new AssetDependency
+            {
+                ProjectId = projectId,
+                ConsumerAssetId = image.Id,
+                SourceAssetId = currentReference.Id,
+                Role = "uses-current-reference",
+                IsRequired = true,
+                CreatedAtUtc = now
+            });
+        }
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return ToView(image, subjectResourceId, document.Kind, document.Name);
+    }
+
+    public async Task<VisualReferenceImageView> UploadAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        string fileName,
+        string contentType,
+        byte[] bytes,
+        CancellationToken cancellationToken)
+    {
+        if (bytes.Length == 0) throw new InvalidOperationException("请选择图片文件。");
+        if (bytes.LongLength > MaxUploadBytes) throw new InvalidOperationException("参考图不能超过 10 MB。");
+        if (!UploadContentTypes.Contains(contentType))
+            throw new InvalidOperationException("仅支持 PNG、JPEG 或 WebP 图片。");
+        using var bitmap = SKBitmap.Decode(bytes)
+            ?? throw new InvalidOperationException("上传文件不是有效图片。");
+        var subject = await (
+            from resourceState in dbContext.ResourceStates.AsNoTracking()
+            join subjectAsset in dbContext.Assets.AsNoTracking() on resourceState.CurrentAssetId equals subjectAsset.Id
+            where resourceState.ProjectId == projectId
+                && resourceState.ResourceId == subjectResourceId
+                && resourceState.ResourceType == VisualAssetDefaults.AssetType
+                && resourceState.LifecycleStatus != "retired"
+            select subjectAsset)
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new KeyNotFoundException("视觉资产不存在或已退休。");
+        var document = VisualAssetMapper.ReadDocument(subject);
+        var previous = await (
+            from reference in dbContext.VisualReferences.AsNoTracking()
+            join referenceAsset in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals referenceAsset.Id
+            where reference.ProjectId == projectId
+                && reference.SubjectResourceId == subjectResourceId
+                && reference.Purpose == Purpose
+                && referenceAsset.Type == AssetType
+            orderby referenceAsset.Version descending
+            select referenceAsset)
+            .FirstOrDefaultAsync(cancellationToken);
+        var resourceId = previous?.ResourceId ?? Guid.NewGuid();
+        var version = (previous?.Version ?? 0) + 1;
+        var number = previous?.Number
+            ?? (await dbContext.Assets.Where(item => item.ProjectId == projectId)
+                .Select(item => (int?)item.Number).MaxAsync(cancellationToken) ?? 0) + 1;
+        var now = timeProvider.GetUtcNow();
+        var extension = contentType switch
+        {
+            "image/jpeg" => ".jpg",
+            "image/webp" => ".webp",
+            _ => ".png"
+        };
+        var image = new Asset
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            Version = version,
+            Number = number,
+            Type = AssetType,
+            Name = $"{document.Name}参考图",
+            BlobKey = $"visual-references/{projectId:N}/{subjectResourceId:N}/v{version}{extension}",
+            BlobContent = bytes,
+            FileName = $"{document.Name}-上传参考图-v{version}{extension}",
+            ContentType = contentType,
+            SizeBytes = bytes.LongLength,
+            GenerationMetadataJson = JsonSerializer.Serialize(new
+            {
+                operation = "upload-visual-reference",
+                sourceFileName = Path.GetFileName(fileName),
+                subjectAssetId = subject.Id,
+                subjectResourceId,
+                subjectType = document.Kind,
+                sourceWidth = bitmap.Width,
+                sourceHeight = bitmap.Height,
+                references = new[] { GenerationProvenance.Reference(subject, "reference-for") }
+            }, VisualAssetDefaults.JsonOptions),
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(image);
+        var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == resourceId
+                && item.ResourceType == AssetType,
+            cancellationToken);
+        state ??= new ResourceState
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            ResourceType = AssetType
+        };
+        if (state.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(state);
+        state.CurrentAssetId = image.Id;
+        state.LifecycleStatus = "active";
+        state.UpdatedAtUtc = now;
+        dbContext.VisualReferences.Add(new VisualReference
+        {
+            ProjectId = projectId,
+            ImageAssetId = image.Id,
+            SubjectResourceId = subjectResourceId,
+            SubjectType = document.Kind,
+            Purpose = Purpose,
+            Source = "upload",
+            ReviewStatus = "active",
+            InheritsFromAssetId = previous?.Id,
+            CreatedAtUtc = now
+        });
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = projectId,
+            ConsumerAssetId = image.Id,
+            SourceAssetId = subject.Id,
+            Role = "reference-for",
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToView(image, subjectResourceId, document.Kind, document.Name);
     }
@@ -299,7 +497,8 @@ public sealed class VisualReferenceService(
 
     private static string BuildPrompt(
         ProjectSettingsDocument settings,
-        VisualAssetDocument document) => $$"""
+        VisualAssetDocument document,
+        string? instruction) => $$"""
         Create one production reference image for the {{document.Kind}} "{{document.Name}}".
         Project: {{settings.ProjectName}}
         Visual style: {{settings.VisualStyle}}
@@ -320,6 +519,7 @@ public sealed class VisualReferenceService(
         }}}
         Keep identity, costume, architecture, materials, scale, and colors explicit and reusable across shots.
         Do not render titles, labels, captions, arrows, dimension marks, logos, watermarks, UI, panel borders, or readable text.
+        {{(string.IsNullOrWhiteSpace(instruction) ? string.Empty : $"Revision instruction: {instruction}")}}
         """;
 }
 
@@ -330,12 +530,18 @@ public static class VisualReferenceEndpoints
         group.MapPost("/{resourceId:guid}/reference/generate", async (
             Guid projectId,
             Guid resourceId,
+            GenerateVisualReferenceRequest? request,
             IVisualReferenceService service,
             CancellationToken cancellationToken) =>
         {
             try
             {
-                return Results.Ok(await service.GenerateAsync(projectId, resourceId, cancellationToken));
+                return Results.Ok(await service.GenerateAsync(
+                    projectId,
+                    resourceId,
+                    request?.Instruction,
+                    request?.UseCurrentReference ?? false,
+                    cancellationToken));
             }
             catch (KeyNotFoundException)
             {
@@ -357,6 +563,43 @@ public static class VisualReferenceEndpoints
                     statusCode: StatusCodes.Status502BadGateway);
             }
         });
+
+        group.MapPost("/{resourceId:guid}/reference/upload", async (
+            Guid projectId,
+            Guid resourceId,
+            HttpRequest request,
+            IVisualReferenceService service,
+            CancellationToken cancellationToken) =>
+        {
+            if (!request.HasFormContentType)
+                return Results.BadRequest(new { error = "请使用 multipart/form-data 上传参考图。" });
+            var form = await request.ReadFormAsync(cancellationToken);
+            var file = form.Files.GetFile("file");
+            if (file is null) return Results.BadRequest(new { error = "请选择图片文件。" });
+            if (file.Length > VisualReferenceService.MaxUploadBytes)
+                return Results.BadRequest(new { error = "参考图不能超过 10 MB。" });
+            await using var stream = file.OpenReadStream();
+            await using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer, cancellationToken);
+            try
+            {
+                return Results.Ok(await service.UploadAsync(
+                    projectId,
+                    resourceId,
+                    file.FileName,
+                    file.ContentType,
+                    buffer.ToArray(),
+                    cancellationToken));
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
+            }
+        }).DisableAntiforgery();
         group.MapGet("/references/{assetId:guid}/content", async (
             Guid projectId,
             Guid assetId,

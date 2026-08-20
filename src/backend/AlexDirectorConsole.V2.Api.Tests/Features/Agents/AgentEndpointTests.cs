@@ -49,7 +49,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(9, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(10, await dbContext.AgentDefinitions.CountAsync());
         var link = Assert.Single(await dbContext.AgentSkills
             .Where(item => item.AgentId == created.Id)
             .ToListAsync());
@@ -99,7 +99,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v2/agents/{created.Id}")).StatusCode);
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(8, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(9, await dbContext.AgentDefinitions.CountAsync());
         Assert.DoesNotContain(
             await dbContext.AgentSkills.ToListAsync(),
             link => link.AgentId == created.Id);
@@ -130,6 +130,21 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal("原始项目描述", invocation.Input);
         Assert.Equal("三个火枪手", invocation.Context.GetProperty("projectName").GetString());
         Assert.Equal(4000, invocation.MaxLength);
+    }
+
+    [Fact]
+    public async Task Episode_outline_planner_is_seeded_with_batch_and_rewrite_rules()
+    {
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/api/v2/agents/{BuiltInAgents.EpisodeOutlinePlannerId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var agent = await response.Content.ReadFromJsonAsync<AgentResponse>();
+        Assert.NotNull(agent);
+        Assert.Equal("剧集大纲编排助手", agent.Name);
+        Assert.Contains("1 至 6 集", agent.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("重写单集时只返回目标集", agent.SystemPrompt, StringComparison.Ordinal);
     }
 
     public static TheoryData<Guid, string, string> ProjectSettingsTextAgentCases => new()

@@ -58,7 +58,7 @@ function getWorkflow(
     const next = sourceId && view === "source"
       ? { label: "分析素材图谱", to: `${projectBase}/story/${sourceId}/material` }
       : sourceId && view === "material"
-        ? { label: "建立改编方案", to: `${projectBase}/script/adaptation/${sourceId}` }
+        ? { label: "建立改编方案", to: `${projectBase}/script/${sourceId}/adaptation` }
         : undefined;
     return {
       label: view === "material" ? "素材图谱" : view === "source" ? "原文资料" : "故事",
@@ -69,28 +69,17 @@ function getWorkflow(
   if (pathname.includes("/assets/")) {
     return {
       label: "项目共享资产",
-      tabs: [
-        { label: "人物", to: `${projectBase}/assets/characters` },
-        { label: "场景", to: `${projectBase}/assets/scenes` },
-        { label: "道具", to: `${projectBase}/assets/props` },
-        { label: "音频", to: `${projectBase}/assets/audio` },
-      ],
+      tabs: [],
     };
   }
   if (pathname.endsWith("/script") || pathname.includes("/script/")) {
+    const [, view] = pathname
+      .slice(`${projectBase}/script`.length)
+      .split("/")
+      .filter(Boolean);
     return {
-      label: "剧本",
-      tabs: [
-        { label: "改编方案", to: `${projectBase}/script/adaptation` },
-        ...(episodeId
-          ? [
-              {
-                label: "正式剧本",
-                to: `${projectBase}/script/episodes/${episodeId}`,
-              },
-            ]
-          : []),
-      ],
+      label: view === "adaptation" ? "改编方案" : view === "production" ? "正式剧本" : "剧本",
+      tabs: [],
     };
   }
   if (pathname.includes("/storyboard")) {
@@ -267,9 +256,10 @@ export function AppShell() {
     return () => mobileQuery.removeEventListener("change", syncAgentVisibility);
   }, []);
   const [queueOpen, setQueueOpen] = useState(false);
-  const routeEpisode = location.pathname.match(
-    /(?:script|storyboard|production|review)\/episodes\/([^/]+)/,
-  )?.[1];
+  const routeEpisode = location.pathname.match(/\/script\/([^/]+)\/production\/?$/)?.[1]
+    ?? location.pathname.match(
+      /(?:script|storyboard|production|review)\/episodes\/([^/]+)/,
+    )?.[1];
   const currentEpisode = routeEpisode ?? selectedEpisode;
   const currentEpisodeData =
     productionEpisodes.find((episode) => episode.id === currentEpisode) ??
@@ -280,10 +270,7 @@ export function AppShell() {
   const activeRoot = location.pathname
     .slice(projectBase.length + 1)
     .split("/")[0];
-  const activeNavigationKey = activeRoot === "assets"
-    && location.pathname.startsWith(`${projectBase}/assets/audio`)
-    ? "audio"
-    : activeRoot;
+  const activeNavigationKey = activeRoot;
   const active = projectNavigation.find(
     (item) => item.key === activeNavigationKey,
   );

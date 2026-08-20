@@ -213,6 +213,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
     {
         public Task<AdaptationScriptResult> WriteAsync(
             ProjectSettingsView projectSettings,
+            ProjectSourceView source,
             StoryMaterialAnalysisView analysis,
             int? desiredEpisodeCount,
             string? instruction,

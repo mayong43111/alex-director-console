@@ -130,6 +130,8 @@ export interface AdaptationScript {
   model: string
   runtime: string
   updatedAtUtc: string
+  mode: 'source-chapters' | 'rearranged'
+  productionEpisodeMap: Record<string, string>
 }
 
 export interface ScreenplayDialogueDraft {
@@ -167,6 +169,7 @@ export interface ProductionScriptPackage {
   assetId: string
   resourceId: string
   version: number
+  sourceResourceId: string
   productionEpisodeId: string
   episodeNumber: number
   title: string
@@ -274,7 +277,11 @@ export async function getAdaptationScript(
 export async function generateAdaptationScript(
   projectId: string,
   sourceId: string,
-  input: { desiredEpisodeCount?: number; instruction?: string },
+  input: {
+    mode: AdaptationScript['mode']
+    desiredEpisodeCount?: number
+    instruction?: string
+  },
 ): Promise<AdaptationScript> {
   const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/script-draft`, {
     method: 'POST',
@@ -288,7 +295,7 @@ export async function generateAdaptationScript(
 export async function appendAdaptationEpisode(
   projectId: string,
   sourceId: string,
-  input: { instruction?: string } = {},
+  input: { count?: number; instruction?: string } = {},
 ): Promise<AdaptationScript> {
   const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes`, {
     method: 'POST',
@@ -317,6 +324,49 @@ export async function regenerateAdaptationEpisode(
   return response.json() as Promise<AdaptationScript>
 }
 
+export async function updateAdaptationEpisode(
+  projectId: string,
+  sourceId: string,
+  episodeNumber: number,
+  input: { title: string; logline: string; sceneSummaries: string[] },
+): Promise<AdaptationScript> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  )
+  if (!response.ok) throw await readError(response, '修改章节失败。')
+  return response.json() as Promise<AdaptationScript>
+}
+
+export async function deleteAdaptationEpisode(
+  projectId: string,
+  sourceId: string,
+  episodeNumber: number,
+): Promise<AdaptationScript> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) throw await readError(response, '删除剧集失败。')
+  return response.json() as Promise<AdaptationScript>
+}
+
+export async function clearAdaptationEpisodes(
+  projectId: string,
+  sourceId: string,
+): Promise<AdaptationScript> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) throw await readError(response, '清空改编方案失败。')
+  return response.json() as Promise<AdaptationScript>
+}
+
 export async function confirmAdaptationScript(
   projectId: string,
   sourceId: string,
@@ -325,6 +375,19 @@ export async function confirmAdaptationScript(
     method: 'POST',
   })
   if (!response.ok) throw await readError(response, '正式剧本生成失败。')
+  return response.json() as Promise<AdaptationScript>
+}
+
+export async function generateProductionScriptForEpisode(
+  projectId: string,
+  sourceId: string,
+  episodeNumber: number,
+): Promise<AdaptationScript> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}/production-script`,
+    { method: 'POST' },
+  )
+  if (!response.ok) throw await readError(response, '单集正式剧本生成失败。')
   return response.json() as Promise<AdaptationScript>
 }
 
