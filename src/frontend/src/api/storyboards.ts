@@ -26,10 +26,22 @@ export interface StoryboardShot {
   linkedAssets: StoryboardLinkedAsset[]
   imagePrompt: StoryboardMediaPrompt | null
   videoPrompt: StoryboardMediaPrompt | null
+  dialogueAudio: StoryboardDialogueAudio | null
   production: ShotProduction | null
   videoProduction: ShotVideoProduction | null
   status: string
   updatedAtUtc: string
+}
+
+export interface StoryboardDialogueAudio {
+  assetId: string
+  shotResourceId: string
+  version: number
+  contentUrl: string
+  text: string
+  voiceName: string
+  durationSeconds: number
+  createdAtUtc: string
 }
 
 export type StoryboardShotTextField =

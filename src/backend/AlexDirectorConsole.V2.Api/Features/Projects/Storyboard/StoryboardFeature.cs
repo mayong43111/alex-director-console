@@ -89,6 +89,7 @@ public sealed record StoryboardShotView(
     IReadOnlyList<StoryboardLinkedAssetView> LinkedAssets,
     StoryboardMediaPromptView? ImagePrompt,
     StoryboardMediaPromptView? VideoPrompt,
+    StoryboardDialogueAudioView? DialogueAudio,
     ShotProductionView? Production,
     ShotVideoProductionView? VideoProduction,
     string Status,
@@ -225,7 +226,9 @@ public sealed class GetStoryboardQueryHandler(V2DbContext dbContext)
 public sealed class GenerateStoryboardCommandHandler(
     V2DbContext dbContext,
     IStoryboardDesigner designer,
-    TimeProvider timeProvider)
+    IStoryboardDialogueAudioService dialogueAudioService,
+    TimeProvider timeProvider,
+    ILogger<GenerateStoryboardCommandHandler> logger)
     : ICommandHandler<GenerateStoryboardCommand, StoryboardView?>
 {
     public async Task<StoryboardView?> HandleAsync(
@@ -415,6 +418,17 @@ public sealed class GenerateStoryboardCommandHandler(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        var dialogueResult = await dialogueAudioService.GenerateMissingAsync(
+            command.ProjectId,
+            command.ProductionEpisodeId,
+            cancellationToken);
+        if (dialogueResult.Failed > 0)
+        {
+            logger.LogWarning(
+                "Storyboard dialogue TTS completed with {FailureCount} failures: {Errors}",
+                dialogueResult.Failed,
+                string.Join(" | ", dialogueResult.Errors));
+        }
         return await StoryboardQueries.GetAsync(
             dbContext,
             command.ProjectId,
@@ -649,6 +663,11 @@ internal static class StoryboardQueries
             shotResourceIdsByAssetId,
             StoryboardMediaPromptService.VideoKind,
             cancellationToken);
+        var dialogueAudios = await StoryboardDialogueAudioQueries.GetCurrentByShotAsync(
+            dbContext,
+            projectId,
+            shotResourceIdsByAssetId,
+            cancellationToken);
         var shots = new List<StoryboardShotView>();
         foreach (var definition in definitions)
         {
@@ -696,6 +715,7 @@ internal static class StoryboardQueries
                 linkedAssets,
                 imagePrompts.GetValueOrDefault(definition.ShotResourceId),
                 videoPrompts.GetValueOrDefault(definition.ShotResourceId),
+                dialogueAudios.GetValueOrDefault(definition.ShotResourceId),
                 production,
                 videoProduction,
                 state.LifecycleStatus,
