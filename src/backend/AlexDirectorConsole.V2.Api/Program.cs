@@ -59,6 +59,7 @@ builder.Services.AddSingleton<IComfyUiVideoClient, ComfyUiVideoClient>();
 builder.Services.AddSingleton<IComfyUiWorkflowProvider, PackagedComfyUiWorkflowProvider>();
 builder.Services.AddSingleton<IComfyUiImageClient, ComfyUiImageClient>();
 builder.Services.AddSingleton<IComfyUiImageWorkflowProvider, PackagedComfyUiImageWorkflowProvider>();
+builder.Services.AddScoped<IShotVideoPromptAgent, MafShotVideoPromptAgent>();
 builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddScoped<IStoryboardMediaPromptService, StoryboardMediaPromptService>();
 builder.Services.AddScoped<IStoryboardMediaBatchService, StoryboardMediaBatchService>();

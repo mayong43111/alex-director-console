@@ -3,7 +3,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -302,6 +305,8 @@ public sealed class ShotVideoService(
     IComfyUiVideoClient client,
     IComfyUiWorkflowProvider workflowProvider,
     IComfyUiConnectionTester connectionTester,
+    IShotVideoPromptAgent promptAgent,
+    IVoiceProfileService voiceProfileService,
     TimeProvider timeProvider,
     ILogger<ShotVideoService> logger) : IShotVideoService
 {
@@ -320,7 +325,13 @@ public sealed class ShotVideoService(
         var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
         if (context is null) return null;
         var workflow = await workflowProvider.ReadAsync(cancellationToken);
-        var prompt = BuildPrompt(context.Shot, instruction);
+        var draft = await promptAgent.GenerateAsync(BuildAgentInput(context, instruction), cancellationToken);
+        var prompt = BuildPrompt(context.Shot, draft);
+        return BuildPreview(context, prompt, workflow);
+    }
+
+    private static ShotVideoPreview BuildPreview(ShotVideoContext context, string prompt, string workflow)
+    {
         var frameCount = CalculateFrameCount(context.Definition.DurationSeconds, FramesPerSecond);
         var width = NormalizeDimension(context.Settings.OutputWidth);
         var height = NormalizeDimension(context.Settings.OutputHeight);
@@ -331,6 +342,8 @@ public sealed class ShotVideoService(
             settingsAssetId = context.SettingsAsset.Id,
             firstFrameAssetId = context.FirstFrame.Id,
             lastFrameAssetId = context.LastFrame?.Id,
+            characterAssetIds = context.Characters.Select(item => item.AssetId),
+            voiceProfileAssetIds = context.Characters.Select(item => item.VoiceProfileAssetId),
             prompt,
             width,
             height,
@@ -360,10 +373,11 @@ public sealed class ShotVideoService(
         string? instruction,
         CancellationToken cancellationToken)
     {
-        var preview = await PreviewAsync(projectId, episodeId, shotResourceId, instruction, cancellationToken);
-        if (preview is null) return null;
-        if (!string.Equals(prompt, preview.Prompt, StringComparison.Ordinal)
-            || !string.Equals(previewHash, preview.PreviewHash, StringComparison.Ordinal))
+        var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
+        if (context is null) return null;
+        var workflow = await workflowProvider.ReadAsync(cancellationToken);
+        var preview = BuildPreview(context, prompt, workflow);
+        if (!string.Equals(previewHash, preview.PreviewHash, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("镜头、项目设定、关键帧或 workflow 已变化，请重新预览。");
         }
@@ -397,9 +411,6 @@ public sealed class ShotVideoService(
             return await ShotVideoQueries.GetAsync(dbContext, projectId, episodeId, shotResourceId, cancellationToken);
         }
 
-        var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken)
-            ?? throw new InvalidOperationException("镜头不存在。");
-        var workflow = await workflowProvider.ReadAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var spec = new ShotVideoRunSpec(
             RunType,
@@ -762,7 +773,23 @@ public sealed class ShotVideoService(
                 "last-frame-for-shot",
                 cancellationToken)
             : null;
-        return new(definition, shotAsset, settingsAsset, shot, settings, firstFrame, lastFrame);
+        var linkedAssetIds = await StoryboardQueries.GetLinkedAssetIdsAsync(
+            dbContext, definition, cancellationToken);
+        var linkedAssets = await dbContext.Assets.AsNoTracking()
+            .Where(item => linkedAssetIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        var characters = new List<ShotVideoPromptCharacterContext>();
+        foreach (var asset in linkedAssets)
+        {
+            var document = VisualAssetMapper.ReadDocument(asset);
+            if (document.Kind != "character") continue;
+            var voice = await voiceProfileService.GetAsync(projectId, asset.ResourceId, cancellationToken);
+            characters.Add(new(
+                asset.Id, asset.ResourceId, document.Name, document.Summary,
+                document.VisualDescription, document.MustKeep, document.Avoid,
+                voice?.AssetId, voice?.Name, voice?.DesignPrompt, voice?.Language, voice?.Seed));
+        }
+        return new(definition, shotAsset, settingsAsset, shot, settings, firstFrame, lastFrame, characters);
     }
 
     private async Task<Asset?> ResolveCurrentFrameAsync(
@@ -793,15 +820,80 @@ public sealed class ShotVideoService(
         return currentFrames.OrderByDescending(asset => asset.UpdatedAtUtc).FirstOrDefault();
     }
 
-    private static string BuildPrompt(StoryboardShotDocument shot, string? instruction) => $$"""
-        Create one continuous cinematic take lasting {{shot.DurationSeconds:0.###}} seconds.
-        Start state: {{(string.IsNullOrWhiteSpace(shot.FirstFrameDescription) ? shot.VisualDescription : shot.FirstFrameDescription)}}
-        Subject actions and timing: {{shot.CutDescription}}
-        Camera: {{shot.ShotSize}}, {{shot.CameraAngle}}, {{shot.CameraMovement}}. Composition: {{shot.Composition}}.
-        End state: {{(string.IsNullOrWhiteSpace(shot.LastFrameDescription) ? "Let the described action settle naturally without forcing a return to the first-frame pose." : shot.LastFrameDescription)}}
-        User revision instruction: {{(string.IsNullOrWhiteSpace(instruction) ? "No additional revision instruction." : instruction.Trim())}}
-        Preserve the supplied character identities, costumes, environment, materials, lighting direction, camera axis, and visual continuity. Keep living subjects naturally alive between the stated actions. Do not invent new story actions, people, props, cuts, transitions, or sudden camera motion. no subtitles, no captions, no titles, no text overlays, no new or changing text
+    private static ShotVideoPromptAgentInput BuildAgentInput(ShotVideoContext context, string? instruction) => new(
+        context.Settings.ProjectName,
+        context.Settings.VisualStyle,
+        context.Settings.ArtDirection,
+        context.Settings.CameraLanguage,
+        context.Settings.SoundStrategy,
+        context.Shot.DurationSeconds,
+        context.Shot.ShotSize,
+        context.Shot.CameraAngle,
+        context.Shot.CameraMovement,
+        context.Shot.Composition,
+        context.Shot.VisualDescription,
+        context.Shot.Action,
+        context.Shot.Dialogue,
+        context.Shot.Sound,
+        context.Shot.FirstFrameDescription,
+        context.Shot.LastFrameDescription,
+        context.Shot.CutDescription,
+        context.Characters,
+        string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim());
+
+    private static string BuildPrompt(
+        StoryboardShotDocument shot,
+        ShotVideoPromptDraft draft) => $$"""
+        Create one continuous {{shot.DurationSeconds:0.###}}-second cinematic take.
+
+        VISUAL: {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}}
+        CAMERA: Preserve the supplied first frame's exact framing and camera axis.
+        CONTINUITY: {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}}
+
+        AUDIO TIMELINE: {{BuildDialogueTimeline(shot)}}
+        VOICE: {{draft.VoicePerformancePrompt}}
+        AMBIENCE: {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
+
+        IMAGE RESULT: A clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays. Treat every token in this prompt as an instruction only and never render prompt wording in the image.
         """;
+
+    private static string BuildDialogueTimeline(StoryboardShotDocument shot)
+    {
+        if (string.IsNullOrWhiteSpace(shot.Dialogue))
+            return "No human voice for the entire clip. All faces remain naturally closed-mouth.";
+        var speechEnd = Math.Min(3, Math.Max(2, shot.DurationSeconds * .375));
+        return $"From 0.2 to {speechEnd:0.#} seconds, the host says exactly once in Mandarin Chinese: \"{shot.Dialogue}\" "
+            + $"At {speechEnd:0.#} seconds the sentence is complete. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds there is absolute vocal silence: no extra syllables, words, repetition, humming, or vocalization. The host's lips remain closed after the sentence.";
+    }
+
+    private static string RemoveWrittenContentInstructions(string value)
+    {
+        var forbiddenTerms = new[]
+        {
+            "subtitle", "caption", "text", "word", "glyph", "title",
+            "logo", "watermark", "interface", "speech bubble"
+        };
+        return RemoveControlSentences(value, forbiddenTerms, "Preserve identity, wardrobe, lighting, spatial relationships, and camera axis.");
+    }
+
+    private static string RemoveVisualControlInstructions(string value) => RemoveControlSentences(
+        value,
+        [
+            "speak", "speech", "voice", "dialogue", "deliver", "direct address",
+            "mouth", "lip", "word", "text", "subtitle", "caption"
+        ],
+        "Maintain restrained natural body motion while simple scene icons appear sequentially around the host.");
+
+    private static string RemoveControlSentences(
+        string value,
+        IReadOnlyList<string> forbiddenTerms,
+        string fallback)
+    {
+        var result = string.Join(" ", Regex.Split(value, @"(?<=[.!?])\s+")
+            .Where(sentence => !forbiddenTerms.Any(term =>
+                sentence.Contains(term, StringComparison.OrdinalIgnoreCase))));
+        return string.IsNullOrWhiteSpace(result) ? fallback : result;
+    }
 
     private static int CalculateFrameCount(double durationSeconds, int fps)
     {
@@ -833,7 +925,8 @@ public sealed class ShotVideoService(
         StoryboardShotDocument Shot,
         ProjectSettingsDocument Settings,
         Asset FirstFrame,
-        Asset? LastFrame);
+        Asset? LastFrame,
+        IReadOnlyList<ShotVideoPromptCharacterContext> Characters);
 }
 
 internal static class ShotVideoQueries

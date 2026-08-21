@@ -4507,12 +4507,6 @@ export function StoryboardShotPage() {
             <div><span className="eyebrow">声音</span><EditableShotText field="sound" value={shot.sound} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
           </div>
         </section>
-        <section className="shot-prompt-stage" aria-label="图片提示词">
-          <header><span className="eyebrow">图片提示词</span><strong>{shot.imagePrompt ? `v${shot.imagePrompt.version}` : "未生成"}</strong></header>
-          {shot.imagePrompt
-            ? <textarea readOnly rows={7} value={shot.imagePrompt.prompt} />
-            : <p>先生成提示词，再按提示词生成首帧或首尾帧。</p>}
-        </section>
         {shot.hooks?.length > 0 && (
           <section className="shot-hook-details" aria-label="本镜头爆点">
             <header><span className="eyebrow">本镜头落实的爆点</span><strong>{shot.hooks.length} 项</strong></header>
@@ -4607,7 +4601,7 @@ export function StoryboardShotPage() {
               {video && <NavLink className="secondary-button" to={`/projects/${projectId}/production/runs/${video.runId}`}>查看运行</NavLink>}
             </div>
           </header>
-          {shot.videoPrompt && (
+          {shot.videoPrompt && !video?.url && (
             <details className="shot-saved-prompt" open={!video?.url}>
               <summary>当前视频提示词 · v{shot.videoPrompt.version}</summary>
               <textarea readOnly rows={8} value={shot.videoPrompt.prompt} />
@@ -5111,6 +5105,7 @@ export function ReviewPage() {
   const [activeShotId, setActiveShotId] = useState("");
   const [playIntent, setPlayIntent] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [videoAspectRatio, setVideoAspectRatio] = useState("9 / 16");
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
@@ -5289,7 +5284,7 @@ export function ReviewPage() {
       {!error && activeItem && (
         <div className="review-layout">
           <section className="player-panel">
-            <div className="review-video-frame">
+            <div className="review-video-frame" style={{ aspectRatio: videoAspectRatio }}>
               <video
                 key={activeItem.shot.resourceId}
                 ref={videoRef}
@@ -5297,6 +5292,10 @@ export function ReviewPage() {
                 preload="auto"
                 poster={activeItem.shot.production?.outputUrl ?? undefined}
                 src={activeItem.video.url}
+                onLoadedMetadata={(event) => {
+                  const { videoWidth, videoHeight } = event.currentTarget;
+                  if (videoWidth > 0 && videoHeight > 0) setVideoAspectRatio(`${videoWidth} / ${videoHeight}`);
+                }}
                 onPlay={() => setPlayIntent(true)}
                 onPause={(event) => {
                   if (!event.currentTarget.ended) setPlayIntent(false);
@@ -5354,7 +5353,7 @@ export function ReviewPage() {
                     onClick={() => selectShot(item.shot.resourceId, true)}
                     key={item.shot.resourceId}
                   >
-                    <span className="review-shot-thumbnail">
+                    <span className="review-shot-thumbnail" style={{ aspectRatio: videoAspectRatio }}>
                       {item.shot.production?.outputUrl && <img src={item.shot.production.outputUrl} alt="" />}
                     </span>
                     <strong>{code}</strong>

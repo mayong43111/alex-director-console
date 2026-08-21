@@ -39,6 +39,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     [Fact]
     public async Task Local_comfyui_video_normalizes_project_resolution_and_allows_missing_last_frame()
     {
+        const string spokenDialogue = "达达尼昂：巴黎，我来了。";
         using var client = factory.CreateClient();
         var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
         (await client.PostAsync(
@@ -54,14 +55,69 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         await using (var scope = factory.Services.CreateAsyncScope())
         {
             var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var shotAsset = await dbContext.Assets.SingleAsync(item => item.Id == shot.AssetId);
+            var shotDocument = JsonNode.Parse(shotAsset.DocumentJson!)!.AsObject();
+            shotDocument["dialogue"] = spokenDialogue;
+            shotAsset.DocumentJson = shotDocument.ToJsonString();
             var project = await dbContext.Projects.SingleAsync(item => item.Id == projectId);
             var nextNumber = await dbContext.Assets.MaxAsync(item => item.Number) + 1;
-            var settings = new Asset
+            var linkedAssetIds = await dbContext.ShotAssetLinks
+                .Where(item => item.ProjectId == projectId && item.ShotResourceId == shot.ResourceId)
+                .Select(item => item.AssetId)
+                .ToArrayAsync();
+            if (linkedAssetIds.Length == 0)
+            {
+                linkedAssetIds = await dbContext.AssetDependencies
+                    .Where(item => item.ProjectId == projectId
+                        && item.ConsumerAssetId == shot.AssetId
+                        && item.Role.StartsWith("uses-"))
+                    .Select(item => item.SourceAssetId)
+                    .ToArrayAsync();
+            }
+            var linkedAssets = await dbContext.Assets
+                .Where(item => linkedAssetIds.Contains(item.Id))
+                .ToListAsync();
+            var character = linkedAssets.Single(item =>
+                JsonNode.Parse(item.DocumentJson!)?["kind"]?.GetValue<string>() == "character");
+            var voiceProfile = new Asset
             {
                 ProjectId = projectId,
                 ResourceId = Guid.NewGuid(),
                 Version = 1,
                 Number = nextNumber,
+                Type = "voice-profile",
+                Name = "达达尼昂青年音色",
+                DocumentJson = JsonSerializer.Serialize(new
+                {
+                    characterResourceId = character.ResourceId,
+                    name = "达达尼昂青年音色",
+                    designPrompt = "清亮的青年男声，坚定但略带初入巴黎的紧张感",
+                    sampleText = "巴黎，我来了。",
+                    language = "zh-CN",
+                    seed = 2718,
+                    provider = "local-qwen3-tts",
+                    model = "qwen3-tts-1.7b-voice-design"
+                }),
+                ContentType = "application/json",
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            };
+            dbContext.Assets.Add(voiceProfile);
+            dbContext.ResourceStates.Add(new ResourceState
+            {
+                ProjectId = projectId,
+                ResourceId = voiceProfile.ResourceId,
+                ResourceType = "voice-profile",
+                CurrentAssetId = voiceProfile.Id,
+                LifecycleStatus = "active",
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            var settings = new Asset
+            {
+                ProjectId = projectId,
+                ResourceId = Guid.NewGuid(),
+                Version = 1,
+                Number = nextNumber + 1,
                 Type = "creative-settings",
                 Name = "测试项目设定",
                 DocumentJson = JsonSerializer.Serialize(new
@@ -106,7 +162,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                 ProductionEpisodeId = productionEpisodeId,
                 ResourceId = Guid.NewGuid(),
                 Version = 1,
-                Number = nextNumber + 1,
+                Number = nextNumber + 2,
                 Type = ShotFrameService.AssetType,
                 Name = "测试首帧",
                 BlobKey = $"test/{Guid.NewGuid():N}.png",
@@ -142,7 +198,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                 ProductionEpisodeId = productionEpisodeId,
                 ResourceId = Guid.NewGuid(),
                 Version = 1,
-                Number = nextNumber + 2,
+                Number = nextNumber + 3,
                 Type = ShotFrameService.AssetType,
                 Name = "历史尾帧",
                 BlobKey = $"test/{Guid.NewGuid():N}.png",
@@ -189,7 +245,20 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal((864, 480), (preview.Width, preview.Height));
         Assert.Null(preview.LastFrameAssetId);
         Assert.Equal(24, preview.Fps);
-        Assert.Contains(videoInstruction, preview.Prompt);
+        Assert.DoesNotContain(videoInstruction, preview.Prompt);
+        Assert.Equal(videoInstruction, factory.LastShotVideoPromptAgentInput?.Instruction);
+        Assert.Contains("says exactly once in Mandarin Chinese", preview.Prompt);
+        Assert.Contains("absolute vocal silence", preview.Prompt);
+        Assert.Contains("completely blank lower third", preview.Prompt);
+        Assert.Contains("no readable glyphs anywhere", preview.Prompt);
+        Assert.DoesNotContain("subtitle", preview.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("字幕", preview.Prompt, StringComparison.Ordinal);
+        Assert.Contains(spokenDialogue, preview.Prompt);
+        var agentCharacter = Assert.Single(factory.LastShotVideoPromptAgentInput?.Characters ?? []);
+        Assert.Equal("达达尼昂青年音色", agentCharacter.VoiceName);
+        Assert.Equal("清亮的青年男声，坚定但略带初入巴黎的紧张感", agentCharacter.VoiceDesignPrompt);
+        Assert.Equal("zh-CN", agentCharacter.VoiceLanguage);
+        Assert.Equal(2718, agentCharacter.VoiceSeed);
 
         var promptResponse = await client.PostAsJsonAsync(
             $"{route}/prompt",
@@ -203,8 +272,10 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
         Assert.Equal(savedPrompt.AssetId, storyboardWithPrompt?.Shots.Single(item => item.ResourceId == shot.ResourceId).VideoPrompt?.AssetId);
 
+        var callsBeforeStart = factory.ShotVideoPromptAgentCallCount;
         var startResponse = await client.PostAsync($"{route}/generate", null);
         Assert.Equal(HttpStatusCode.Accepted, startResponse.StatusCode);
+        Assert.Equal(callsBeforeStart, factory.ShotVideoPromptAgentCallCount);
         var started = await startResponse.Content.ReadFromJsonAsync<ShotVideoProductionView>();
         Assert.NotNull(started);
 

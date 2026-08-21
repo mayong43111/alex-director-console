@@ -49,6 +49,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IAdaptationScriptWriter>();
             services.RemoveAll<IStoryboardDesigner>();
             services.RemoveAll<IStoryboardShotTextRewriter>();
+            services.RemoveAll<IShotVideoPromptAgent>();
             services.AddDbContext<V2DbContext>(options =>
                 options.UseSqlite($"Data Source={databasePath};Pooling=False"));
             services.AddSingleton<IFoundryConnectionTester, SuccessfulFoundryConnectionTester>();
@@ -73,6 +74,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IAdaptationScriptWriter, TestAdaptationScriptWriter>();
             services.AddSingleton<IStoryboardDesigner, TestStoryboardDesigner>();
             services.AddSingleton<IStoryboardShotTextRewriter, TestStoryboardShotTextRewriter>();
+            services.AddSingleton<TestShotVideoPromptAgent>();
+            services.AddSingleton<IShotVideoPromptAgent>(provider =>
+                provider.GetRequiredService<TestShotVideoPromptAgent>());
         });
     }
 
@@ -86,6 +90,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         Services.GetRequiredService<TestShotFrameGenerator>().Reset();
         Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
         Services.GetRequiredService<TestAgentTextInvoker>().Reset();
+        Services.GetRequiredService<TestShotVideoPromptAgent>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
         await skillSynchronizer.SynchronizeAsync();
     }
@@ -424,6 +429,31 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                 "Test Harness"));
     }
 
+    private sealed class TestShotVideoPromptAgent : IShotVideoPromptAgent
+    {
+        public ShotVideoPromptAgentInput? LastInput { get; private set; }
+        public int CallCount { get; private set; }
+
+        public void Reset()
+        {
+            LastInput = null;
+            CallCount = 0;
+        }
+
+        public Task<ShotVideoPromptDraft> GenerateAsync(
+            ShotVideoPromptAgentInput input,
+            CancellationToken cancellationToken)
+        {
+            LastInput = input;
+            CallCount++;
+            return Task.FromResult(new ShotVideoPromptDraft(
+                "Hold the fixed framing while the host presents the wallet and simple scene icons appear in sequence.",
+                "Use the linked character voice profile, natural Mandarin articulation, and exact lip sync.",
+                "Use restrained natural production sound below the voice.",
+                "Preserve identities, wardrobe, lighting, spatial relationships, and camera axis."));
+        }
+    }
+
     private sealed class TestProjectSettingsAssistant : IProjectSettingsAssistant
     {
         public ProjectSettingsAssistRequest? LastRequest { get; private set; }
@@ -466,6 +496,12 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
 
     public AgentTextInvocation? LastAgentTextInvocation =>
         Services.GetRequiredService<TestAgentTextInvoker>().LastInvocation;
+
+    public ShotVideoPromptAgentInput? LastShotVideoPromptAgentInput =>
+        Services.GetRequiredService<TestShotVideoPromptAgent>().LastInput;
+
+    public int ShotVideoPromptAgentCallCount =>
+        Services.GetRequiredService<TestShotVideoPromptAgent>().CallCount;
 }
 
 public sealed class TestComfyUiVideoClient : IComfyUiVideoClient
