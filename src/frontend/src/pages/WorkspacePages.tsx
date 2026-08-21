@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleAlert,
   Copy,
+  Download,
   Edit3,
   Eye,
   AudioLines,
@@ -4757,83 +4758,276 @@ export function ReferencesPage() {
 }
 
 export function ReviewPage() {
-  const { productionEpisodeId } = useParams();
-  const episode =
-    episodes.find((item) => item.id === productionEpisodeId) ?? episodes[0];
-  const [playing, setPlaying] = useState(false);
-  return (
-    <div className="page">
-      <PageTitle
-        eyebrow={`审阅交付 / ${episode.code}`}
-        title="成片审阅"
-        description={`Final ${episode.code} v2 · 00:01:38 · 3 条开放批注`}
-        action={
-          <div className="button-group">
-            <EpisodeSelect value={productionEpisodeId} />
-            <button className="primary-button">导出本集</button>
-          </div>
+  const { projectId = "", productionEpisodeId = "" } = useParams();
+  const navigate = useNavigate();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [productionEpisodes, setProductionEpisodes] = useState<ProductionEpisodeRecord[]>([]);
+  const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
+  const [videos, setVideos] = useState<Record<string, ShotVideoProduction | null>>({});
+  const [activeShotId, setActiveShotId] = useState("");
+  const [playIntent, setPlayIntent] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportResult, setExportResult] = useState<{ url: string; fileName: string } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listProductionEpisodes(projectId, controller.signal)
+      .then((items) => {
+        setProductionEpisodes(items);
+        if (!productionEpisodeId && items[0]) {
+          navigate(`/projects/${projectId}/review/episodes/${items[0].id}`, { replace: true });
         }
-      />
-      <div className="review-layout">
-        <section className="player-panel">
-          <div className="video-frame">
-            <div className="video-scene">
-              <span>ALEX DIRECTOR · {episode.code} REVIEW</span>
-              <strong>天桥食堂</strong>
-              <p>凌晨 05:12 · 二楼</p>
-            </div>
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "生产剧集加载失败。");
+        setLoaded(true);
+      });
+    return () => controller.abort();
+  }, [navigate, productionEpisodeId, projectId]);
+
+  useEffect(() => {
+    if (!productionEpisodeId) return;
+    const controller = new AbortController();
+    getStoryboard(projectId, productionEpisodeId, controller.signal)
+      .then(async (loadedStoryboard) => {
+        if (!loadedStoryboard) throw new Error("当前剧集还没有分镜，无法开始审阅。");
+        const shotVideos = await Promise.all(loadedStoryboard.shots.map(async (shot) => [
+          shot.resourceId,
+          await getShotVideo(projectId, productionEpisodeId, shot.resourceId, controller.signal),
+        ] as const));
+        if (controller.signal.aborted) return;
+        const loadedVideos = Object.fromEntries(shotVideos);
+        const firstPlayable = loadedStoryboard.shots.find((shot) => loadedVideos[shot.resourceId]?.url);
+        setStoryboard(loadedStoryboard);
+        setVideos(loadedVideos);
+        setActiveShotId(firstPlayable?.resourceId ?? "");
+        setError("");
+        setElapsedSeconds(0);
+        setLoaded(true);
+      })
+      .catch((loadError: unknown) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "审阅数据加载失败。");
+        setLoaded(true);
+      });
+    return () => controller.abort();
+  }, [productionEpisodeId, projectId]);
+
+  const currentStoryboard = storyboard?.productionEpisodeId === productionEpisodeId ? storyboard : null;
+  const reviewShots = (currentStoryboard?.shots ?? [])
+    .map((shot) => ({ shot, video: videos[shot.resourceId] }))
+    .filter((item): item is typeof item & { video: ShotVideoProduction & { url: string } } => Boolean(item.video?.url));
+  const activeIndex = reviewShots.findIndex((item) => item.shot.resourceId === activeShotId);
+  const activeItem = activeIndex >= 0 ? reviewShots[activeIndex] : reviewShots[0];
+  const totalDurationSeconds = reviewShots.reduce((total, item) => total + item.shot.durationSeconds, 0);
+  const activeOffsetSeconds = activeIndex > 0
+    ? reviewShots.slice(0, activeIndex).reduce((total, item) => total + item.shot.durationSeconds, 0)
+    : 0;
+  const progress = totalDurationSeconds > 0 ? Math.min(100, (elapsedSeconds / totalDurationSeconds) * 100) : 0;
+  const activeCode = activeItem
+    ? `S${String(activeItem.shot.sceneNumber).padStart(2, "0")}-${String(activeItem.shot.shotNumber).padStart(2, "0")}`
+    : "";
+  const episode = productionEpisodes.find((item) => item.id === productionEpisodeId);
+
+  const changeEpisode = (episodeId: string) => {
+    setLoaded(false);
+    setError("");
+    setStoryboard(null);
+    setVideos({});
+    setPlayIntent(false);
+    setExportResult((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    navigate(`/projects/${projectId}/review/episodes/${episodeId}`);
+  };
+
+  useEffect(() => {
+    if (!playIntent || !activeItem) return;
+    void videoRef.current?.play().catch(() => setPlayIntent(false));
+  }, [activeItem, playIntent]);
+
+  const selectShot = (shotResourceId: string, shouldPlay = false) => {
+    const index = reviewShots.findIndex((item) => item.shot.resourceId === shotResourceId);
+    const offset = index > 0
+      ? reviewShots.slice(0, index).reduce((total, item) => total + item.shot.durationSeconds, 0)
+      : 0;
+    setActiveShotId(shotResourceId);
+    setElapsedSeconds(offset);
+    setPlayIntent(shouldPlay);
+  };
+
+  const playNext = () => {
+    const next = reviewShots[activeIndex + 1];
+    if (!next) {
+      setPlayIntent(false);
+      setElapsedSeconds(totalDurationSeconds);
+      return;
+    }
+    selectShot(next.shot.resourceId, true);
+  };
+
+  const exportEpisode = async () => {
+    if (!episode || reviewShots.length === 0) return;
+    setExporting(true);
+    setExportProgress(0);
+    setError("");
+    setExportResult((current) => {
+      if (current) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    try {
+      const { exportEpisodeVideo } = await import("../features/review/exportEpisodeVideo");
+      const blob = await exportEpisodeVideo(
+        reviewShots.map((item) => ({ url: item.video.url })),
+        setExportProgress,
+      );
+      setExportResult({
+        url: URL.createObjectURL(blob),
+        fileName: `E${String(episode.episodeNumber).padStart(2, "0")}-${episode.title}.mp4`,
+      });
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : "成片导出失败。");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="page review-page">
+      <div className="review-toolbar">
+        <div className="button-group">
+            <label className="select-control review-episode-select">
+              <span>剧集</span>
+              <select
+                value={productionEpisodeId}
+                onChange={(event) => changeEpisode(event.target.value)}
+              >
+                {productionEpisodes.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    E{String(item.episodeNumber).padStart(2, "0")} · {item.title}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={13} />
+            </label>
             <button
-              className="play-button"
-              onClick={() => setPlaying(!playing)}
+              className="primary-button"
+              type="button"
+              disabled={exporting || reviewShots.length === 0}
+              onClick={() => void exportEpisode()}
             >
-              {playing ? "Ⅱ" : <Play size={22} fill="currentColor" />}
+              <Download size={14} />
+              {exporting ? `正在生成 ${exportProgress}%` : exportResult ? "重新生成" : "生成成片"}
             </button>
-          </div>
-          <div className="timeline">
-            <span>00:00</span>
-            <div>
-              <i style={{ width: playing ? "62%" : "28%" }} />
-              <b style={{ left: playing ? "62%" : "28%" }} />
-              <em style={{ left: "51%" }}>批注</em>
-            </div>
-            <span>01:38</span>
-          </div>
-          <div className="shot-strip">
-            {reviewDemoShots.map((shot, index) => (
-              <button className={index === 2 ? "active" : ""} key={shot.id}>
-                <span className={`mini-frame frame-${index % 4}`} />
-                <strong>{shot.id}</strong>
-              </button>
-            ))}
-          </div>
-        </section>
-        <aside className="comments-panel">
-          <header>
-            <strong>批注</strong>
-            <button className="primary-button">
-              <Plus size={13} />
-              添加
-            </button>
-          </header>
-          {[
-            ["00:24", "节奏偏慢，提前切到文件袋特写", "open"],
-            ["00:51", "周岚最后两个字不清楚", "planned"],
-            ["01:12", "这里的环境声可以更冷一些", "open"],
-          ].map((item) => (
-            <button className="comment-row" key={item[0]}>
-              <span>{item[0]}</span>
-              <div>
-                <strong>{item[1]}</strong>
-                <small>{item[2]}</small>
-              </div>
-            </button>
-          ))}
-        </aside>
+            {exportResult && (
+              <a className="primary-button" href={exportResult.url} download={exportResult.fileName}>
+                <Download size={14} />
+                下载成片
+              </a>
+            )}
+        </div>
       </div>
+      {error && <div className="source-empty-state development-empty-state"><CircleAlert size={22} /><strong>{error}</strong></div>}
+      {!error && !loaded && <div className="source-empty-state development-empty-state"><RefreshCw className="spin" size={22} /><strong>正在加载审阅视频...</strong></div>}
+      {!error && loaded && reviewShots.length === 0 && (
+        <div className="source-empty-state development-empty-state">
+          <CircleAlert size={22} />
+          <strong>当前剧集还没有已生成的视频</strong>
+          <span>请先进入分镜镜头生成视频，再回到这里连续审阅。</span>
+        </div>
+      )}
+      {!error && activeItem && (
+        <div className="review-layout">
+          <section className="player-panel">
+            <div className="review-video-frame">
+              <video
+                key={activeItem.shot.resourceId}
+                ref={videoRef}
+                controls
+                preload="auto"
+                poster={activeItem.shot.production?.outputUrl ?? undefined}
+                src={activeItem.video.url}
+                onPlay={() => setPlayIntent(true)}
+                onPause={(event) => {
+                  if (!event.currentTarget.ended) setPlayIntent(false);
+                }}
+                onTimeUpdate={(event) => setElapsedSeconds(activeOffsetSeconds + event.currentTarget.currentTime)}
+                onEnded={playNext}
+              />
+            </div>
+            <div className="review-now-playing">
+              <div>
+                <strong>{activeCode}</strong>
+                <span>{activeItem.shot.visualDescription}</span>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => navigate(`/projects/${projectId}/storyboard/episodes/${productionEpisodeId}/shots/${activeItem.shot.resourceId}`)}
+              >
+                <RefreshCw size={13} />
+                进入镜头重新生成
+              </button>
+            </div>
+            <div className="review-timebar">
+              <span>{formatReviewTime(elapsedSeconds)}</span>
+              <div className="review-timebar-track">
+                <i style={{ width: `${progress}%` }} />
+                <b style={{ left: `${progress}%` }} />
+              </div>
+              <span>{formatReviewTime(totalDurationSeconds)}</span>
+            </div>
+            <div className="review-shot-progress" aria-label="镜头进度">
+              {reviewShots.map((item) => {
+                const code = `S${String(item.shot.sceneNumber).padStart(2, "0")}-${String(item.shot.shotNumber).padStart(2, "0")}`;
+                return (
+                  <button
+                    className={item.shot.resourceId === activeItem.shot.resourceId ? "active" : ""}
+                    style={{ flexGrow: Math.max(1, item.shot.durationSeconds) }}
+                    type="button"
+                    title={`${code} · ${item.shot.durationSeconds.toFixed(1)} 秒`}
+                    onClick={() => selectShot(item.shot.resourceId)}
+                    key={item.shot.resourceId}
+                  >
+                    <span>{code}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="review-shot-list">
+              {reviewShots.map((item) => {
+                const code = `S${String(item.shot.sceneNumber).padStart(2, "0")}-${String(item.shot.shotNumber).padStart(2, "0")}`;
+                return (
+                  <button
+                    className={item.shot.resourceId === activeItem.shot.resourceId ? "active" : ""}
+                    type="button"
+                    onClick={() => selectShot(item.shot.resourceId, true)}
+                    key={item.shot.resourceId}
+                  >
+                    <span className="review-shot-thumbnail">
+                      {item.shot.production?.outputUrl && <img src={item.shot.production.outputUrl} alt="" />}
+                    </span>
+                    <strong>{code}</strong>
+                    <small>{formatReviewTime(item.shot.durationSeconds)}</small>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
 
-const reviewDemoShots = Array.from({ length: 7 }, (_, index) => ({
-  id: `S0${Math.floor(index / 4) + 1}-${String((index % 4) + 1).padStart(2, "0")}`,
-}));
+function formatReviewTime(seconds: number) {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  const minutes = Math.floor(safeSeconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(safeSeconds % 60).padStart(2, "0")}`;
+}

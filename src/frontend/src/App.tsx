@@ -7,6 +7,7 @@ import {
   AssetsPage,
   ProductionPage,
   ProductionRunPage,
+  ReviewPage,
   ScriptLandingPage,
   ScriptPage,
   SettingsPage,
@@ -76,8 +77,8 @@ export default function App() {
         <Route path="production" element={<ProductionPage />} />
         <Route path="production/episodes/:productionEpisodeId?" element={<ProductionPage />} />
         <Route path="production/runs/:runId" element={<ProductionRunPage />} />
-        <Route path="review" element={<DemoPage title="审阅交付" />} />
-        <Route path="review/episodes/:productionEpisodeId?" element={<DemoPage title="审阅交付" />} />
+        <Route path="review" element={<ReviewPage />} />
+        <Route path="review/episodes/:productionEpisodeId?" element={<ReviewPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/projects/tianqiao/overview" replace />} />
     </Routes>
