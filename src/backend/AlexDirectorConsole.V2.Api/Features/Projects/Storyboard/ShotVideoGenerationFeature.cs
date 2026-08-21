@@ -34,7 +34,7 @@ public sealed record ShotVideoProductionView(
     DateTimeOffset CreatedAtUtc,
     string? Error);
 
-public sealed record StartShotVideoRequest(string? ConfirmedPrompt, string? PreviewHash);
+public sealed record StartShotVideoRequest(string? ConfirmedPrompt, string? PreviewHash, string? Instruction);
 
 internal sealed record ShotVideoRunSpec(
     string Mode,
@@ -292,8 +292,8 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
 
 public interface IShotVideoService
 {
-    Task<ShotVideoPreview?> PreviewAsync(Guid projectId, Guid episodeId, Guid shotResourceId, CancellationToken cancellationToken);
-    Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, CancellationToken cancellationToken);
+    Task<ShotVideoPreview?> PreviewAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string? instruction, CancellationToken cancellationToken);
+    Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, string? instruction, CancellationToken cancellationToken);
     Task<bool> ProcessNextAsync(CancellationToken cancellationToken);
 }
 
@@ -314,12 +314,13 @@ public sealed class ShotVideoService(
         Guid projectId,
         Guid episodeId,
         Guid shotResourceId,
+        string? instruction,
         CancellationToken cancellationToken)
     {
         var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
         if (context is null) return null;
         var workflow = await workflowProvider.ReadAsync(cancellationToken);
-        var prompt = BuildPrompt(context.Shot);
+        var prompt = BuildPrompt(context.Shot, instruction);
         var frameCount = CalculateFrameCount(context.Definition.DurationSeconds, FramesPerSecond);
         var width = NormalizeDimension(context.Settings.OutputWidth);
         var height = NormalizeDimension(context.Settings.OutputHeight);
@@ -356,9 +357,10 @@ public sealed class ShotVideoService(
         Guid shotResourceId,
         string prompt,
         string previewHash,
+        string? instruction,
         CancellationToken cancellationToken)
     {
-        var preview = await PreviewAsync(projectId, episodeId, shotResourceId, cancellationToken);
+        var preview = await PreviewAsync(projectId, episodeId, shotResourceId, instruction, cancellationToken);
         if (preview is null) return null;
         if (!string.Equals(prompt, preview.Prompt, StringComparison.Ordinal)
             || !string.Equals(previewHash, preview.PreviewHash, StringComparison.Ordinal))
@@ -371,13 +373,20 @@ public sealed class ShotVideoService(
         {
             throw new InvalidOperationException("请先在系统设置中启用本地 ComfyUI。");
         }
+        var currentShotAssetId = await dbContext.ShotDefinitions.AsNoTracking()
+            .Where(item => item.ProjectId == projectId
+                && item.ProductionEpisodeId == episodeId
+                && item.ShotResourceId == shotResourceId)
+            .Select(item => item.ShotAssetId)
+            .SingleAsync(cancellationToken);
         var activeRuns = await dbContext.ProductionRuns.AsNoTracking()
             .Where(item => item.ProjectId == projectId
                 && item.ProductionEpisodeId == episodeId
                 && item.RunType == RunType
                 && (item.Status == "queued" || item.Status == "running"))
             .Join(
-                dbContext.ProductionRunItems.AsNoTracking().Where(item => item.ShotResourceId == shotResourceId),
+                dbContext.ProductionRunItems.AsNoTracking().Where(item =>
+                    item.ShotResourceId == shotResourceId && item.ShotAssetId == currentShotAssetId),
                 run => run.Id,
                 item => item.RunId,
                 (run, item) => run)
@@ -742,29 +751,32 @@ public sealed class ShotVideoService(
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
         var firstFrame = await ResolveCurrentFrameAsync(
             projectId,
-            shotAsset.Id,
+            shotAsset.ResourceId,
             "frame-for-shot",
             cancellationToken)
             ?? throw new InvalidOperationException("生成视频前必须先完成首帧制作。");
-        var lastFrame = await ResolveCurrentFrameAsync(
-            projectId,
-            shotAsset.Id,
-            "last-frame-for-shot",
-            cancellationToken);
+        var lastFrame = ShotProductionModes.ForShot(shot) == ShotProductionModes.FirstLastContinuous
+            ? await ResolveCurrentFrameAsync(
+                projectId,
+                shotAsset.ResourceId,
+                "last-frame-for-shot",
+                cancellationToken)
+            : null;
         return new(definition, shotAsset, settingsAsset, shot, settings, firstFrame, lastFrame);
     }
 
     private async Task<Asset?> ResolveCurrentFrameAsync(
         Guid projectId,
-        Guid shotAssetId,
+        Guid shotResourceId,
         string role,
         CancellationToken cancellationToken)
     {
         var resources = await (
             from dependency in dbContext.AssetDependencies.AsNoTracking()
+            join source in dbContext.Assets.AsNoTracking() on dependency.SourceAssetId equals source.Id
             join asset in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals asset.Id
             where dependency.ProjectId == projectId
-                && dependency.SourceAssetId == shotAssetId
+                && source.ResourceId == shotResourceId
                 && dependency.Role == role
                 && asset.Type == ShotFrameService.AssetType
             select asset.ResourceId).Distinct().ToArrayAsync(cancellationToken);
@@ -781,12 +793,13 @@ public sealed class ShotVideoService(
         return currentFrames.OrderByDescending(asset => asset.UpdatedAtUtc).FirstOrDefault();
     }
 
-    private static string BuildPrompt(StoryboardShotDocument shot) => $$"""
+    private static string BuildPrompt(StoryboardShotDocument shot, string? instruction) => $$"""
         Create one continuous cinematic take lasting {{shot.DurationSeconds:0.###}} seconds.
         Start state: {{(string.IsNullOrWhiteSpace(shot.FirstFrameDescription) ? shot.VisualDescription : shot.FirstFrameDescription)}}
         Subject actions and timing: {{shot.CutDescription}}
         Camera: {{shot.ShotSize}}, {{shot.CameraAngle}}, {{shot.CameraMovement}}. Composition: {{shot.Composition}}.
         End state: {{(string.IsNullOrWhiteSpace(shot.LastFrameDescription) ? "Let the described action settle naturally without forcing a return to the first-frame pose." : shot.LastFrameDescription)}}
+        User revision instruction: {{(string.IsNullOrWhiteSpace(instruction) ? "No additional revision instruction." : instruction.Trim())}}
         Preserve the supplied character identities, costumes, environment, materials, lighting direction, camera axis, and visual continuity. Keep living subjects naturally alive between the stated actions. Do not invent new story actions, people, props, cuts, transitions, or sudden camera motion. no subtitles, no captions, no titles, no text overlays, no new or changing text
         """;
 
@@ -832,6 +845,13 @@ internal static class ShotVideoQueries
         Guid shotResourceId,
         CancellationToken cancellationToken)
     {
+        var currentShotAssetId = await dbContext.ShotDefinitions.AsNoTracking()
+            .Where(item => item.ProjectId == projectId
+                && item.ProductionEpisodeId == episodeId
+                && item.ShotResourceId == shotResourceId)
+            .Select(item => (Guid?)item.ShotAssetId)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (currentShotAssetId is null) return null;
         var rows = await (
             from run in dbContext.ProductionRuns.AsNoTracking()
             join item in dbContext.ProductionRunItems.AsNoTracking() on run.Id equals item.RunId
@@ -839,6 +859,7 @@ internal static class ShotVideoQueries
                 && run.ProductionEpisodeId == episodeId
                 && run.RunType == ShotVideoService.RunType
                 && item.ShotResourceId == shotResourceId
+                && item.ShotAssetId == currentShotAssetId
             select new { Run = run, Item = item }).ToListAsync(cancellationToken);
         var row = rows.OrderByDescending(candidate => candidate.Run.CreatedAtUtc).FirstOrDefault();
         if (row is null) return null;
@@ -914,12 +935,13 @@ public static class ShotVideoEndpoints
             Guid projectId,
             Guid productionEpisodeId,
             Guid shotResourceId,
+            string? instruction,
             IShotVideoService service,
             CancellationToken cancellationToken) =>
         {
             try
             {
-                var preview = await service.PreviewAsync(projectId, productionEpisodeId, shotResourceId, cancellationToken);
+                var preview = await service.PreviewAsync(projectId, productionEpisodeId, shotResourceId, instruction, cancellationToken);
                 return preview is null ? Results.NotFound() : Results.Ok(preview);
             }
             catch (InvalidOperationException error)
@@ -948,6 +970,7 @@ public static class ShotVideoEndpoints
                     shotResourceId,
                     request.ConfirmedPrompt,
                     request.PreviewHash,
+                    request.Instruction,
                     cancellationToken);
                 return production is null ? Results.NotFound() : Results.Accepted(value: production);
             }
@@ -969,7 +992,7 @@ public static class ShotVideoEndpoints
                 productionEpisodeId,
                 shotResourceId,
                 cancellationToken);
-            return Results.Ok(production);
+            return production is null ? Results.NotFound() : Results.Ok(production);
         });
         app.MapGet("/api/v2/projects/{projectId:guid}/storyboard/videos/{assetId:guid}/content", async (
             Guid projectId,

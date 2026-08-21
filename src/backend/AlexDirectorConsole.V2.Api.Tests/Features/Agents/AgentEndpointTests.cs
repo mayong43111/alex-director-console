@@ -49,7 +49,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(10, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(11, await dbContext.AgentDefinitions.CountAsync());
         var link = Assert.Single(await dbContext.AgentSkills
             .Where(item => item.AgentId == created.Id)
             .ToListAsync());
@@ -99,7 +99,7 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v2/agents/{created.Id}")).StatusCode);
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(9, await dbContext.AgentDefinitions.CountAsync());
+        Assert.Equal(10, await dbContext.AgentDefinitions.CountAsync());
         Assert.DoesNotContain(
             await dbContext.AgentSkills.ToListAsync(),
             link => link.AgentId == created.Id);
@@ -145,6 +145,34 @@ public sealed class AgentEndpointTests(V2ApiFactory factory)
         Assert.Equal("剧集大纲编排助手", agent.Name);
         Assert.Contains("1 至 6 集", agent.SystemPrompt, StringComparison.Ordinal);
         Assert.Contains("重写单集时只返回目标集", agent.SystemPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Storyboard_shot_text_writer_is_seeded_for_single_field_editing()
+    {
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/api/v2/agents/{BuiltInAgents.StoryboardShotTextWriterId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var agent = await response.Content.ReadFromJsonAsync<AgentResponse>();
+        Assert.NotNull(agent);
+        Assert.Equal("镜头文本编辑助手", agent.Name);
+        Assert.Contains("单个文本字段", agent.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("直接返回改写后的字段纯文本", agent.SystemPrompt, StringComparison.Ordinal);
+
+        var invokeResponse = await client.PostAsJsonAsync($"/api/v2/agents/{BuiltInAgents.StoryboardShotTextWriterId}/invoke", new
+        {
+            input = "人物站在画面中央。",
+            context = new { targetField = "firstFrameDescription", targetLabel = "首帧描述" },
+            maxLength = 8000
+        });
+        invokeResponse.EnsureSuccessStatusCode();
+        var invocation = factory.LastAgentTextInvocation;
+        Assert.NotNull(invocation);
+        Assert.Equal(BuiltInAgents.StoryboardShotTextWriterId, invocation.Agent.Id);
+        Assert.Equal("firstFrameDescription", invocation.Context.GetProperty("targetField").GetString());
+        Assert.Equal(8000, invocation.MaxLength);
     }
 
     public static TheoryData<Guid, string, string> ProjectSettingsTextAgentCases => new()

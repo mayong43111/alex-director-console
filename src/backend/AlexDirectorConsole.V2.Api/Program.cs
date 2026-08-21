@@ -78,6 +78,7 @@ builder.Services.AddScoped<IProjectSettingsToolService, ProjectSettingsToolServi
 builder.Services.AddScoped<IStoryMaterialAnalyzer, MafStoryMaterialAnalyzer>();
 builder.Services.AddScoped<IAdaptationScriptWriter, MafAdaptationScriptWriter>();
 builder.Services.AddScoped<IStoryboardDesigner, MafStoryboardDesigner>();
+builder.Services.AddScoped<IStoryboardShotTextRewriter, MafStoryboardShotTextRewriter>();
 builder.Services.AddScoped<ICommandDispatcher, CommandDispatcher>();
 builder.Services.AddScoped<IQueryDispatcher, QueryDispatcher>();
 builder.Services.AddScoped<ICommandHandler<CreateProjectCommand, CreateProjectResult>, CreateProjectCommandHandler>();
@@ -110,6 +111,9 @@ builder.Services.AddScoped<ICommandHandler<ImportStoryMaterialAssetsCommand, IRe
 builder.Services.AddScoped<IQueryHandler<GetStoryboardQuery, StoryboardView?>, GetStoryboardQueryHandler>();
 builder.Services.AddScoped<ICommandHandler<GenerateStoryboardCommand, StoryboardView?>, GenerateStoryboardCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateStoryboardShotAssetsCommand, StoryboardView?>, UpdateStoryboardShotAssetsCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateStoryboardShotModeCommand, StoryboardView?>, UpdateStoryboardShotModeCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<UpdateStoryboardShotTextCommand, StoryboardView?>, UpdateStoryboardShotTextCommandHandler>();
+builder.Services.AddScoped<ICommandHandler<RewriteStoryboardShotTextCommand, StoryboardView?>, RewriteStoryboardShotTextCommandHandler>();
 builder.Services.AddScoped<ICommandHandler<StartShotProductionCommand, ShotProductionView?>, StartShotProductionCommandHandler>();
 builder.Services.AddScoped<IQueryHandler<GetFoundryConfigurationQuery, FoundryConfigurationView>, GetFoundryConfigurationHandler>();
 builder.Services.AddScoped<ICommandHandler<UpdateFoundryConfigurationCommand, UpdateFoundryConfigurationResult>, UpdateFoundryConfigurationHandler>();

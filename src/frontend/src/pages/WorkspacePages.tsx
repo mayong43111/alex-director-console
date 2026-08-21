@@ -6,17 +6,20 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { ProTable, type ProColumns } from "@ant-design/pro-components";
 import { Image, InputNumber, Popconfirm, Select, Switch, Tabs } from "antd";
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleAlert,
   Copy,
   Edit3,
   Eye,
   AudioLines,
   ImagePlus,
-  MoreHorizontal,
+  List,
   Play,
   Plus,
   RefreshCw,
@@ -70,9 +73,13 @@ import {
   startShotProduction,
   startShotVideo,
   type Storyboard,
+  type StoryboardShotTextField,
   type ShotVideoPreview,
   type ShotVideoProduction,
+  rewriteStoryboardShotText,
   updateStoryboardShotAssets,
+  updateStoryboardShotMode,
+  updateStoryboardShotText,
 } from "../api/storyboards";
 import type { ImageGenerationPreview } from "../api/generation";
 import { builtInAgentIds, builtInAgentLabels } from "../api/agents";
@@ -105,6 +112,7 @@ import {
 import { VersionPicker } from "../components/VersionPicker";
 import { RelationGraph } from "../components/RelationGraph";
 import { AgentTextArea, type AgentTextAreaStatus } from "../components/AgentTextArea";
+import { WorkspaceHeaderExtension } from "../layouts";
 
 const episodes = [
   { id: "production-e01", code: "E01", title: "失控的早晨", state: "review" },
@@ -2857,8 +2865,12 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                 )}
                 <aside className="asset-prompt-panel">
                   <header>
-                    <div><span>本版生成提示词</span><small>{selected.referenceImage ? `图片 v${selected.referenceImage.version}` : "等待生成"}</small></div>
-                    {selected.referenceImage?.prompt && (
+                    <div className="asset-prompt-title"><span>生成提示词</span><small>{selected.referenceImage ? `v${selected.referenceImage.version}` : "待生成"}</small></div>
+                    <div className="asset-prompt-actions">
+                      {selected.referenceImage && (
+                        <VersionPicker projectId={projectId} assetId={selected.referenceImage.assetId} label="设定图版本" compact />
+                      )}
+                      {selected.referenceImage?.prompt && (
                       <button
                         type="button"
                         className="icon-button"
@@ -2871,14 +2883,10 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                       >
                         {promptCopied ? <Check size={14} /> : <Copy size={14} />}
                       </button>
-                    )}
+                      )}
+                    </div>
                   </header>
                   <pre>{selected.referenceImage?.prompt || "提示词会在首次生成后随图片版本保存，并在这里完整显示。"}</pre>
-                  <footer>
-                    {selected.referenceImage ? (
-                      <VersionPicker projectId={projectId} assetId={selected.referenceImage.assetId} label="设定图版本" />
-                    ) : <span>暂无版本</span>}
-                  </footer>
                 </aside>
               </div>
             </div>
@@ -3472,6 +3480,8 @@ export function StoryboardPage() {
   const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
   const [loadedEpisodeId, setLoadedEpisodeId] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [framePreviewIndex, setFramePreviewIndex] = useState(0);
+  const [framePreviewOpen, setFramePreviewOpen] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -3509,6 +3519,21 @@ export function StoryboardPage() {
   const activeEpisode = productionEpisodes.find((item) => item.id === productionEpisodeId);
   const loading = productionEpisodeId !== "" && loadedEpisodeId !== productionEpisodeId;
   const currentStoryboard = storyboard?.productionEpisodeId === productionEpisodeId ? storyboard : null;
+  const framePreviews = (currentStoryboard?.shots ?? [])
+    .flatMap((shot) => {
+      const shotCode = `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")}`;
+      return [
+        shot.production?.outputUrl ? { src: shot.production.outputUrl, alt: `${shotCode} 首帧` } : null,
+        shot.production?.lastFrameUrl ? { src: shot.production.lastFrameUrl, alt: `${shotCode} 尾帧` } : null,
+      ];
+    })
+    .filter((item): item is { src: string; alt: string } => item !== null);
+  const openFramePreview = (src: string, alt: string) => {
+    const index = framePreviews.findIndex((item) => item.src === src && item.alt === alt);
+    if (index < 0) return;
+    setFramePreviewIndex(index);
+    setFramePreviewOpen(true);
+  };
   const episodeCode = activeEpisode
     ? `E${String(activeEpisode.episodeNumber).padStart(2, "0")}`
     : "生产集";
@@ -3526,36 +3551,32 @@ export function StoryboardPage() {
     }
   };
   return (
-    <div className="page">
-      <PageTitle
-        eyebrow={`分镜 / ${episodeCode}${currentStoryboard ? ` / v${currentStoryboard.revision}` : ""}`}
-        title={currentStoryboard?.title ?? activeEpisode?.title ?? "分镜工作区"}
-        description={currentStoryboard
-          ? `${currentStoryboard.shots.length} 个镜头 · ${currentStoryboard.totalDurationSeconds} / ${currentStoryboard.targetSeconds} 秒 · ${currentStoryboard.model}`
-          : "从当前生产集的正式剧本和资产圣经生成结构化分镜草稿"}
-        action={
-          <div className="button-group">
-            <label className="select-control">
-              <span>生产集</span>
-              <select
-                value={productionEpisodeId}
-                onChange={(event) => navigate(`../${event.target.value}`, { relative: "path" })}
-              >
-                {productionEpisodes.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    E{String(item.episodeNumber).padStart(2, "0")} · {item.title}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={13} />
-            </label>
+    <div className="page full-height-page storyboard-page">
+      <div className="storyboard-workspace">
+        <header className="storyboard-toolbar">
+          <div className="storyboard-context">
+            <span>{episodeCode}{currentStoryboard ? ` · v${currentStoryboard.revision}` : ""}</span>
+            <strong>{currentStoryboard?.title ?? activeEpisode?.title ?? "分镜工作区"}</strong>
+            <small>{currentStoryboard
+              ? `${currentStoryboard.shots.length} 镜 · ${currentStoryboard.totalDurationSeconds} / ${currentStoryboard.targetSeconds} 秒 · ${currentStoryboard.model}`
+              : "从正式剧本和资产圣经生成结构化分镜"}</small>
+          </div>
+          <div className="storyboard-toolbar-actions">
+            <Select
+              aria-label="切换分镜生产集"
+              value={productionEpisodeId}
+              onChange={(episodeId) => navigate(`../${episodeId}`, { relative: "path" })}
+              options={productionEpisodes.map((item) => ({
+                value: item.id,
+                label: `E${String(item.episodeNumber).padStart(2, "0")} · ${item.title}`,
+              }))}
+            />
             <button className="primary-button" onClick={generate} disabled={generating || !productionEpisodeId}>
               <WandSparkles size={14} />
               {generating ? "正在设计分镜" : currentStoryboard ? "重新生成草稿" : "生成分镜草稿"}
             </button>
           </div>
-        }
-      />
+        </header>
       {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
       {!error && (loading || !currentStoryboard) && (
         <div className="source-empty-state development-empty-state">
@@ -3579,14 +3600,22 @@ export function StoryboardPage() {
       )}
       {currentStoryboard && (
         <div className="data-table storyboard-table">
+          <Image.PreviewGroup
+            items={framePreviews}
+            preview={{
+              current: framePreviewIndex,
+              visible: framePreviewOpen,
+              onChange: setFramePreviewIndex,
+              onVisibleChange: setFramePreviewOpen,
+            }}
+          />
           <div className="table-row table-head">
             <span>镜号</span>
             <span>爆点</span>
             <span>帧策略</span>
             <span>首帧</span>
-            <span>主体</span>
+            <span>尾帧</span>
             <span>景别 / 机位</span>
-            <span>动作</span>
             <span>时长</span>
             <span>状态</span>
           </div>
@@ -3610,12 +3639,29 @@ export function StoryboardPage() {
               </span>
               <span className={`shot-frame-thumbnail ${shot.production?.outputUrl ? "ready" : "empty"}`}>
                 {shot.production?.outputUrl
-                  ? <img src={shot.production.outputUrl} alt={`S${shot.sceneNumber}-${shot.shotNumber} 首帧`} />
+                  ? <img
+                      src={shot.production.outputUrl}
+                      alt={`S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} 首帧`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openFramePreview(shot.production!.outputUrl!, `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} 首帧`);
+                      }}
+                    />
                   : <small>未生成</small>}
               </span>
-              <span>{shot.characters.join("、") || shot.props.join("、") || "场景"}</span>
+              <span className={`shot-frame-thumbnail ${shot.production?.lastFrameUrl ? "ready" : "empty"}`}>
+                {shot.production?.lastFrameUrl
+                  ? <img
+                      src={shot.production.lastFrameUrl}
+                      alt={`S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} 尾帧`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openFramePreview(shot.production!.lastFrameUrl!, `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")} 尾帧`);
+                      }}
+                    />
+                  : <small>{shot.productionMode === "first-last-continuous" ? "未生成" : "不需要"}</small>}
+              </span>
               <span>{shot.shotSize} · {shot.cameraAngle}</span>
-              <span>{shot.action}</span>
               <span>{shot.durationSeconds}s</span>
               <span className={`state-label ${shot.production?.status ?? "draft"}`}>
                 {productionStatusLabel(shot.production?.status ?? "draft")}
@@ -3624,6 +3670,84 @@ export function StoryboardPage() {
           ))}
         </div>
       )}
+      </div>
+    </div>
+  );
+}
+
+const shotTextFieldLabels: Record<StoryboardShotTextField, string> = {
+  visualDescription: "镜头描述",
+  firstFrameDescription: "首帧描述",
+  lastFrameDescription: "尾帧描述",
+  cutDescription: "CUT 执行描述",
+  dialogue: "对白",
+  sound: "声音",
+};
+
+function EditableShotText({
+  field,
+  value,
+  editingField,
+  editingValue,
+  saving,
+  shotContext,
+  rows = 4,
+  emptyText = "暂无内容",
+  onEdit,
+  onEditingValueChange,
+  onSave,
+  onCancel,
+}: {
+  field: StoryboardShotTextField;
+  value: string;
+  editingField: StoryboardShotTextField | null;
+  editingValue: string;
+  saving: boolean;
+  shotContext: unknown;
+  rows?: number;
+  emptyText?: string;
+  onEdit: (field: StoryboardShotTextField, value: string) => void;
+  onEditingValueChange: (value: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const editing = editingField === field;
+  const label = shotTextFieldLabels[field];
+  return (
+    <div className={`shot-editable-text${editing ? " editing" : ""}`}>
+      {editing
+        ? (
+          <>
+            <AgentTextArea
+              agentId={builtInAgentIds.storyboardShotTextWriter}
+              agentLabel={builtInAgentLabels.storyboardShotTextWriter}
+              rows={rows}
+              autoFocus
+              value={editingValue}
+              onChange={onEditingValueChange}
+              context={{ targetField: field, targetLabel: label, shot: shotContext }}
+              disabled={saving}
+              maxLength={8000}
+              aria-label={`编辑${label}`}
+            />
+            <div className="shot-text-edit-actions">
+              <button className="secondary-button" type="button" disabled={saving} onClick={onCancel}>取消</button>
+              <button className="primary-button" type="button" disabled={saving || editingValue.trim() === value.trim()} onClick={onSave}>
+                <Save size={13} />{saving ? "保存中" : "保存"}
+              </button>
+            </div>
+          </>
+        )
+        : (
+          <>
+            <p className={value ? "" : "empty"}>{value || emptyText}</p>
+            <div className="shot-text-field-actions">
+              <button className="icon-button" type="button" title={`编辑${label}`} aria-label={`编辑${label}`} onClick={() => onEdit(field, value)}>
+                <Edit3 size={13} />
+              </button>
+            </div>
+          </>
+        )}
     </div>
   );
 }
@@ -3640,10 +3764,19 @@ export function StoryboardShotPage() {
   const [startingProduction, setStartingProduction] = useState(false);
   const [productionConfirmation, setProductionConfirmation] = useState(false);
   const [productionPreview, setProductionPreview] = useState<ImageGenerationPreview | null>(null);
+  const [productionInstruction, setProductionInstruction] = useState("");
   const [video, setVideo] = useState<ShotVideoProduction | null>(null);
   const [videoPreview, setVideoPreview] = useState<ShotVideoPreview | null>(null);
   const [videoConfirmation, setVideoConfirmation] = useState(false);
+  const [videoInstruction, setVideoInstruction] = useState("");
   const [startingVideo, setStartingVideo] = useState(false);
+  const [savingMode, setSavingMode] = useState(false);
+  const [editingTextField, setEditingTextField] = useState<StoryboardShotTextField | null>(null);
+  const [editingTextValue, setEditingTextValue] = useState("");
+  const [savingText, setSavingText] = useState(false);
+  const [textRewriteOpen, setTextRewriteOpen] = useState(false);
+  const [textRewriteInstruction, setTextRewriteInstruction] = useState("");
+  const [rewritingText, setRewritingText] = useState(false);
   const [framePreview, setFramePreview] = useState<{ url: string; label: string } | null>(null);
   const [error, setError] = useState("");
 
@@ -3732,12 +3865,85 @@ export function StoryboardShotPage() {
       setSavingAssociations(false);
     }
   };
+  const saveFrameMode = async (requiresLastFrame: boolean) => {
+    if (!shot) return;
+    setSavingMode(true);
+    setError("");
+    try {
+      setStoryboard(await updateStoryboardShotMode(
+        projectId,
+        productionEpisodeId,
+        shot.resourceId,
+        requiresLastFrame,
+      ));
+      setVideo(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "镜头帧策略保存失败。");
+    } finally {
+      setSavingMode(false);
+    }
+  };
+  const rewriteShotText = async () => {
+    if (!shot || !textRewriteInstruction.trim()) return;
+    setRewritingText(true);
+    setError("");
+    try {
+      setStoryboard(await rewriteStoryboardShotText(
+        projectId,
+        productionEpisodeId,
+        shot.resourceId,
+        textRewriteInstruction.trim(),
+      ));
+      setVideo(null);
+      setTextRewriteOpen(false);
+      setTextRewriteInstruction("");
+    } catch (rewriteError) {
+      setError(rewriteError instanceof Error ? rewriteError.message : "镜头文本重新生成失败。");
+    } finally {
+      setRewritingText(false);
+    }
+  };
+  const beginTextEdit = (field: StoryboardShotTextField, value: string) => {
+    setEditingTextField(field);
+    setEditingTextValue(value);
+    setError("");
+  };
+  const saveShotText = async () => {
+    if (!shot || !editingTextField) return;
+    setSavingText(true);
+    setError("");
+    try {
+      setStoryboard(await updateStoryboardShotText(
+        projectId,
+        productionEpisodeId,
+        shot.resourceId,
+        editingTextField,
+        editingTextValue,
+      ));
+      setVideo(null);
+      setEditingTextField(null);
+      setEditingTextValue("");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "镜头文本保存失败。");
+    } finally {
+      setSavingText(false);
+    }
+  };
+  const openTextRewrite = () => {
+    setTextRewriteInstruction("");
+    setTextRewriteOpen(true);
+  };
   const previewProduction = async () => {
     if (!shot) return;
     setStartingProduction(true);
     setError("");
     try {
-      setProductionPreview(await previewShotProduction(projectId, productionEpisodeId, shot.resourceId));
+      setProductionPreview(await previewShotProduction(
+        projectId,
+        productionEpisodeId,
+        shot.resourceId,
+        productionInstruction,
+      ));
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "首帧生成规格加载失败。");
     } finally {
@@ -3755,6 +3961,7 @@ export function StoryboardShotPage() {
         productionEpisodeId,
         shot.resourceId,
         productionPreview.prompt,
+        productionInstruction,
       );
       setStoryboard((current) => current ? {
         ...current,
@@ -3764,6 +3971,7 @@ export function StoryboardShotPage() {
       } : current);
       setProductionConfirmation(false);
       setProductionPreview(null);
+      setProductionInstruction("");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "镜头开始制作失败。");
     } finally {
@@ -3775,7 +3983,12 @@ export function StoryboardShotPage() {
     setStartingVideo(true);
     setError("");
     try {
-      setVideoPreview(await previewShotVideo(projectId, productionEpisodeId, shot.resourceId));
+      setVideoPreview(await previewShotVideo(
+        projectId,
+        productionEpisodeId,
+        shot.resourceId,
+        videoInstruction,
+      ));
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "视频生成规格加载失败。");
     } finally {
@@ -3793,10 +4006,12 @@ export function StoryboardShotPage() {
         shot.resourceId,
         videoPreview.prompt,
         videoPreview.previewHash,
+        videoInstruction,
       );
       setVideo(started);
       setVideoConfirmation(false);
       setVideoPreview(null);
+      setVideoInstruction("");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "镜头视频任务创建失败。");
     } finally {
@@ -3819,76 +4034,126 @@ export function StoryboardShotPage() {
   }
 
   const shotCode = `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")}`;
+  const generatesOnlyLastFrame = shot.productionMode === "first-last-continuous" && Boolean(shot.production?.outputUrl);
+  const shotIndex = storyboard?.shots.findIndex((item) => item.resourceId === shotResourceId) ?? -1;
+  const previousShot = shotIndex > 0 ? storyboard?.shots[shotIndex - 1] : undefined;
+  const nextShot = shotIndex >= 0 && shotIndex < (storyboard?.shots.length ?? 0) - 1
+    ? storyboard?.shots[shotIndex + 1]
+    : undefined;
   return (
-    <div className="page">
-      <PageTitle
-        eyebrow={`分镜 / ${storyboard?.title ?? "生产集"} / ${shotCode}`}
-        title={shot.action}
-        description={`${shot.shotSize} · ${shot.cameraAngle} · ${shot.cameraMovement} · ${shot.durationSeconds} 秒`}
-        action={<div className="button-group"><VersionPicker projectId={projectId} assetId={shot.assetId} label="镜头版本" /><button className="secondary-button" onClick={() => navigate("../..", { relative: "path" })}>返回镜头表</button></div>}
+    <div className="page full-height-page shot-detail-page">
+      <WorkspaceHeaderExtension
+        label={shotCode}
+        actions={(
+          <>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!previousShot}
+              onClick={() => previousShot && navigate(`../${previousShot.resourceId}`, { relative: "path" })}
+            >
+              <ChevronLeft size={14} /><span>上一个</span>
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!nextShot}
+              onClick={() => nextShot && navigate(`../${nextShot.resourceId}`, { relative: "path" })}
+            >
+              <span>下一个</span><ChevronRight size={14} />
+            </button>
+            <VersionPicker projectId={projectId} assetId={shot.assetId} label="镜头版本" />
+            <button className="secondary-button" type="button" onClick={() => navigate("../..", { relative: "path" })}><List size={14} /><span>镜头表</span></button>
+          </>
+        )}
       />
-      {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
-      <section className="shot-workbench">
+      <div className="shot-detail-workspace">
+        <div className="shot-detail-scroll">
+          {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
+          <section className="shot-workbench">
         <header>
           <div>
-            <span className="eyebrow">镜头制作</span>
             <h2>{shotCode}</h2>
-            <p>{shot.visualDescription || shot.composition}</p>
+            <EditableShotText
+              field="visualDescription"
+              value={shot.visualDescription || shot.composition}
+              editingField={editingTextField}
+              editingValue={editingTextValue}
+              saving={savingText}
+              shotContext={shot}
+              rows={3}
+              onEdit={beginTextEdit}
+              onEditingValueChange={setEditingTextValue}
+              onSave={() => void saveShotText()}
+              onCancel={() => setEditingTextField(null)}
+            />
           </div>
-          <div className="shot-production-actions">
-            <span className="production-mode">
-              {productionModeLabel(shot.productionMode)}
-            </span>
-            <button
-              className="primary-button"
-              onClick={() => { setProductionPreview(null); setProductionConfirmation(true); }}
-              disabled={startingProduction
-                || associationsDirty
-                || associationDraft.length === 0
-                || ["queued", "running"].includes(shot.production?.status ?? "")}
-            >
-              <Play size={14} />
-              {startingProduction
-                ? shot.productionMode === "first-last-continuous" ? "正在生成首尾帧" : "正在生成首帧"
-                : shot.production?.status === "completed"
-                  ? shot.productionMode === "first-last-continuous" ? "重新生成首尾帧" : "重新生成首帧"
+          {!shot.production?.outputUrl && (
+            <div className="shot-production-actions">
+              <button
+                className="primary-button"
+                onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
+                disabled={startingProduction
+                  || associationsDirty
+                  || associationDraft.length === 0
+                  || ["queued", "running"].includes(shot.production?.status ?? "")}
+              >
+                <Play size={14} />
+                {startingProduction
+                  ? shot.productionMode === "first-last-continuous" ? "正在生成首尾帧" : "正在生成首帧"
                   : ["queued", "running"].includes(shot.production?.status ?? "")
                     ? "正在制作"
                     : shot.productionMode === "first-last-continuous" ? "开始制作首尾帧" : "开始制作首帧"}
-            </button>
-            {shot.production && (
-              <NavLink className="secondary-button" to={`/projects/${projectId}/production/runs/${shot.production.runId}`}>
-                查看生产运行
-              </NavLink>
-            )}
-          </div>
+              </button>
+            </div>
+          )}
         </header>
-        <section className="shot-directing-analysis" aria-label="镜头执行分析">
-          <div className="shot-strategy-reason">
-            <span className="eyebrow">帧策略判断</span>
-            <strong>{shot.productionMode === "first-last-continuous" ? "需要首帧与尾帧" : "只需要首帧"}</strong>
-            <p>{shot.frameStrategyReason}</p>
+        <section className={`shot-directing-analysis ${shot.productionMode === "first-last-continuous" ? "continuous" : "direct"}`} aria-label="镜头执行分析">
+          <div className="shot-directing-toolbar">
+            <div className="shot-frame-strategy-control">
+              <div>
+                <span className="eyebrow">帧策略</span>
+                <strong>{shot.productionMode === "first-last-continuous" ? "需要首帧与尾帧" : "只需要首帧"}</strong>
+                <small>{shot.frameStrategyReason}</small>
+              </div>
+              <label>
+                <span>需要尾帧</span>
+                <Switch
+                  size="small"
+                  checked={shot.productionMode === "first-last-continuous"}
+                  loading={savingMode}
+                  disabled={savingMode || rewritingText}
+                  onChange={(checked) => void saveFrameMode(checked)}
+                />
+              </label>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={openTextRewrite}
+              disabled={rewritingText || savingMode}
+            >
+              <WandSparkles size={13} />按意见重写
+            </button>
           </div>
           <div className="shot-frame-brief">
             <span className="eyebrow">首帧</span>
-            <p>{shot.firstFrameDescription || shot.visualDescription}</p>
+            <EditableShotText field="firstFrameDescription" value={shot.firstFrameDescription || shot.visualDescription} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={5} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} />
           </div>
           {shot.productionMode === "first-last-continuous" && (
             <div className="shot-frame-brief last">
               <span className="eyebrow">尾帧</span>
-              <p>{shot.lastFrameDescription}</p>
+              <EditableShotText field="lastFrameDescription" value={shot.lastFrameDescription} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={5} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} />
             </div>
           )}
           <div className="shot-cut-description">
             <span className="eyebrow">CUT 执行描述</span>
-            <p>{shot.cutDescription || shot.action}</p>
+            <EditableShotText field="cutDescription" value={shot.cutDescription || shot.action} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={5} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} />
           </div>
-          {(shot.dialogue || shot.sound) && (
-            <dl className="shot-audio-cues">
-              {shot.dialogue && <div><dt>对白</dt><dd>{shot.dialogue}</dd></div>}
-              {shot.sound && <div><dt>声音</dt><dd>{shot.sound}</dd></div>}
-            </dl>
-          )}
+          <div className="shot-audio-cues">
+            <div><span className="eyebrow">对白</span><EditableShotText field="dialogue" value={shot.dialogue} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
+            <div><span className="eyebrow">声音</span><EditableShotText field="sound" value={shot.sound} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
+          </div>
         </section>
         {shot.hooks?.length > 0 && (
           <section className="shot-hook-details" aria-label="本镜头爆点">
@@ -3901,14 +4166,25 @@ export function StoryboardShotPage() {
             ))}
           </section>
         )}
-        {(shot.production?.outputUrl || shot.production?.lastFrameUrl) && (
+        {(shot.production?.outputUrl || (shot.productionMode === "first-last-continuous" && shot.production?.lastFrameUrl)) && (
           <section className="shot-output-gallery" aria-label="已生成镜头帧">
             {shot.production.outputUrl && (
               <div className="shot-output-item">
-                <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.outputUrl!, label: `${shotCode} 首帧` })} title="预览首帧">
-                  <img src={shot.production.outputUrl} alt={`${shotCode} 首帧`} />
-                  <span>当前首帧</span>
-                </button>
+                <div className="shot-output-frame-shell">
+                  <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.outputUrl!, label: `${shotCode} 首帧` })} title="预览首帧">
+                    <img src={shot.production.outputUrl} alt={`${shotCode} 首帧`} />
+                    <span>当前首帧</span>
+                  </button>
+                  <button
+                    className="media-regenerate-button"
+                    type="button"
+                    onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
+                  >
+                    <RefreshCw size={13} />{shot.productionMode === "first-last-continuous"
+                      ? shot.production.lastFrameUrl ? "重新生成尾帧" : "生成尾帧"
+                      : "重新生成"}
+                  </button>
+                </div>
                 <div className="shot-output-meta">
                   {shot.production.outputAssetId && <VersionPicker projectId={projectId} assetId={shot.production.outputAssetId} label="首帧版本" />}
                   {shot.production.outputPrompt && (
@@ -3917,12 +4193,21 @@ export function StoryboardShotPage() {
                 </div>
               </div>
             )}
-            {shot.production.lastFrameUrl && (
+            {shot.productionMode === "first-last-continuous" && shot.production.lastFrameUrl && (
               <div className="shot-output-item">
-                <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.lastFrameUrl!, label: `${shotCode} 尾帧` })} title="预览尾帧">
-                  <img src={shot.production.lastFrameUrl} alt={`${shotCode} 尾帧`} />
-                  <span>当前尾帧</span>
-                </button>
+                <div className="shot-output-frame-shell">
+                  <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.lastFrameUrl!, label: `${shotCode} 尾帧` })} title="预览尾帧">
+                    <img src={shot.production.lastFrameUrl} alt={`${shotCode} 尾帧`} />
+                    <span>当前尾帧</span>
+                  </button>
+                  <button
+                    className="media-regenerate-button"
+                    type="button"
+                    onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
+                  >
+                    <RefreshCw size={13} />重新生成尾帧
+                  </button>
+                </div>
                 <div className="shot-output-meta">
                   {shot.production.lastFrameAssetId && <VersionPicker projectId={projectId} assetId={shot.production.lastFrameAssetId} label="尾帧版本" />}
                   {shot.production.lastFramePrompt && (
@@ -3942,23 +4227,34 @@ export function StoryboardShotPage() {
             </div>
             <div className="shot-production-actions">
               {video && <span className={`state-label ${video.status}`}>{productionStatusLabel(video.status)}</span>}
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => { setVideoPreview(null); setVideoConfirmation(true); }}
-                disabled={!shot.production?.outputAssetId || startingVideo || ["queued", "running"].includes(video?.status ?? "")}
-              >
-                <Play size={14} />
-                {startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : video?.status === "completed" ? "重新生成视频" : "生成视频"}
-              </button>
+              {!video?.url && (
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => { setVideoInstruction(""); setVideoPreview(null); setVideoConfirmation(true); }}
+                  disabled={!shot.production?.outputAssetId || startingVideo || ["queued", "running"].includes(video?.status ?? "")}
+                >
+                  <Play size={14} />
+                  {startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : "生成视频"}
+                </button>
+              )}
               {video && <NavLink className="secondary-button" to={`/projects/${projectId}/production/runs/${video.runId}`}>查看运行</NavLink>}
             </div>
           </header>
           {video?.url && (
             <div className="shot-video-output">
-              <video controls preload="metadata" src={video.url}>
-                <track kind="captions" />
-              </video>
+              <div className="shot-video-shell">
+                <video controls preload="metadata" src={video.url}>
+                  <track kind="captions" />
+                </video>
+                <button
+                  className="media-regenerate-button"
+                  type="button"
+                  onClick={() => { setVideoInstruction(""); setVideoPreview(null); setVideoConfirmation(true); }}
+                >
+                  <RefreshCw size={13} />重新生成
+                </button>
+              </div>
               <div className="shot-output-meta">
                 {video.assetId && <VersionPicker projectId={projectId} assetId={video.assetId} label="视频版本" />}
                 <details><summary>视频提示词</summary><textarea readOnly rows={8} value={video.prompt} /></details>
@@ -4032,7 +4328,9 @@ export function StoryboardShotPage() {
             </button>
           </div>
         </div>
-      </section>
+          </section>
+        </div>
+      </div>
       {framePreview && (
         <div className="modal-backdrop shot-frame-preview-backdrop" role="presentation" onMouseDown={() => setFramePreview(null)}>
           <div className="shot-frame-preview-dialog" role="dialog" aria-modal="true" aria-label={`${framePreview.label}预览`} onMouseDown={(event) => event.stopPropagation()}>
@@ -4042,6 +4340,35 @@ export function StoryboardShotPage() {
             </header>
             <img src={framePreview.url} alt={`${framePreview.label}大图预览`} />
           </div>
+        </div>
+      )}
+      {textRewriteOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !rewritingText && setTextRewriteOpen(false)}>
+          <form
+            className="dialog ai-assist-dialog shot-feedback-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => { event.preventDefault(); void rewriteShotText(); }}
+          >
+            <span className="eyebrow">分镜 Agent / {shotCode}</span>
+            <h2>按意见重写镜头文本</h2>
+            <p>只调整当前镜头的画面、首尾帧、CUT、对白与声音描述，不改变镜号、时长、景别、人物和道具。</p>
+            <label>
+              <span>修改意见</span>
+              <textarea
+                rows={5}
+                autoFocus
+                value={textRewriteInstruction}
+                onChange={(event) => setTextRewriteInstruction(event.target.value)}
+                placeholder="例如：首帧更突出人物迟疑，CUT 节奏放缓，并明确结尾视线落点"
+              />
+            </label>
+            <div>
+              <button className="secondary-button" type="button" disabled={rewritingText} onClick={() => setTextRewriteOpen(false)}>取消</button>
+              <button className="primary-button" type="submit" disabled={rewritingText || !textRewriteInstruction.trim()}>
+                <WandSparkles size={13} />{rewritingText ? "正在重写" : "生成新版本"}
+              </button>
+            </div>
+          </form>
         </div>
       )}
       {videoConfirmation && (
@@ -4057,6 +4384,17 @@ export function StoryboardShotPage() {
             <span className="eyebrow">MINIMAX H3 / {shotCode}</span>
             <h2>{videoPreview ? "核对视频生成规格" : video?.status === "completed" ? "重新生成镜头视频" : "生成镜头视频"}</h2>
             <p>{videoPreview ? "确认后任务进入后台队列，关闭页面不会中断生成。" : "先锁定当前项目分辨率、关键帧版本、提示词和 H3 参数。"}</p>
+            {!videoPreview && (
+              <label className="generation-instruction-field">
+                <span>本次修改意见（可选）</span>
+                <textarea
+                  rows={4}
+                  value={videoInstruction}
+                  onChange={(event) => setVideoInstruction(event.target.value)}
+                  placeholder="例如：动作更克制，固定机位，结尾多停留半秒"
+                />
+              </label>
+            )}
             {videoPreview && (
               <div className="generation-preview">
                 <label><span>完整提示词</span><textarea readOnly rows={10} value={videoPreview.prompt} /></label>
@@ -4091,8 +4429,29 @@ export function StoryboardShotPage() {
             }}
           >
             <span className="eyebrow">图像模型 / {shotCode}</span>
-            <h2>{productionPreview ? "核对镜头帧生成规格" : `${shot.production?.status === "completed" ? "重新制作" : "制作"}${shot.productionMode === "first-last-continuous" ? "首帧与尾帧" : "首帧"}`}</h2>
-            <p>{productionPreview ? `确认后将按当前输入版本生成${shot.productionMode === "first-last-continuous" ? "首帧，再以首帧为连续性锚点生成尾帧" : "首帧"}。` : "先预览完整生成规格；每张图片、输入资产版本和对应提示词都会随结果保存。"}</p>
+            <h2>{productionPreview
+              ? `核对${generatesOnlyLastFrame ? "尾帧" : "镜头帧"}生成规格`
+              : generatesOnlyLastFrame
+                ? "制作尾帧"
+                : `${shot.production?.status === "completed" ? "重新制作" : "制作"}${shot.productionMode === "first-last-continuous" ? "首帧与尾帧" : "首帧"}`}</h2>
+            <p>{productionPreview
+              ? generatesOnlyLastFrame
+                ? "确认后将复用当前首帧作为连续性锚点，只生成尾帧。"
+                : `确认后将按当前输入版本生成${shot.productionMode === "first-last-continuous" ? "首帧，再以首帧为连续性锚点生成尾帧" : "首帧"}。`
+              : generatesOnlyLastFrame
+                ? "当前首帧会保持不变；先预览尾帧完整生成规格。"
+                : "先预览完整生成规格；每张图片、输入资产版本和对应提示词都会随结果保存。"}</p>
+            {!productionPreview && (
+              <label className="generation-instruction-field">
+                <span>本次修改意见（可选）</span>
+                <textarea
+                  rows={4}
+                  value={productionInstruction}
+                  onChange={(event) => setProductionInstruction(event.target.value)}
+                  placeholder="例如：人物表情更克制，晨光更柔和，保持当前场景构图"
+                />
+              </label>
+            )}
             {productionPreview && <GenerationPreviewDetails preview={productionPreview} />}
             <div>
               <button className="secondary-button" type="button" onClick={() => { setProductionConfirmation(false); setProductionPreview(null); }}>取消</button>
@@ -4157,6 +4516,7 @@ function productionStageLabel(stage: string) {
   return ({
     "first-frame": "首帧",
     "last-frame": "尾帧",
+    "shot-video": "镜头视频",
   } as Record<string, string>)[stage] ?? stage;
 }
 
@@ -4171,19 +4531,14 @@ function localDateTime(value: string) {
 export function ProductionPage() {
   const { projectId = "", productionEpisodeId = "" } = useParams();
   const navigate = useNavigate();
-  const [productionEpisodes, setProductionEpisodes] = useState<ProductionEpisodeRecord[]>([]);
   const [runs, setRuns] = useState<ProductionRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([
-      listProductionEpisodes(projectId, controller.signal),
-      listProductionRuns(projectId, productionEpisodeId || undefined, controller.signal),
-    ])
-      .then(([episodes, loadedRuns]) => {
-        setProductionEpisodes(episodes);
+    listProductionRuns(projectId, productionEpisodeId || undefined, controller.signal)
+      .then((loadedRuns) => {
         setRuns(loadedRuns);
         setLoaded(true);
       })
@@ -4195,88 +4550,63 @@ export function ProductionPage() {
     return () => controller.abort();
   }, [productionEpisodeId, projectId]);
 
-  const itemCount = runs.reduce((total, run) => total + run.items.length, 0);
-  const runningCount = runs.filter((run) => ["queued", "running"].includes(run.status)).length;
-  const failedCount = runs.filter((run) => run.status === "failed").length;
-  const completedCount = runs.filter((run) => run.status === "completed").length;
+  const columns: ProColumns<ProductionRun>[] = [
+    {
+      title: "生产集",
+      dataIndex: "episodeNumber",
+      width: 72,
+      render: (_, run) => <strong className="production-table-episode">E{String(run.episodeNumber).padStart(2, "0")}</strong>,
+    },
+    {
+      title: "镜头 / 剧集",
+      dataIndex: "episodeTitle",
+      width: 360,
+      ellipsis: true,
+      render: (_, run) => (
+        <span className="production-table-subject">
+          <strong>{[...new Set(run.items.map((item) => item.shotName).filter(Boolean))].join("、") || run.episodeTitle}</strong>
+          <small>{run.episodeTitle}</small>
+        </span>
+      ),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 100,
+      render: (_, run) => <span className={`state-label ${run.status}`}>{productionStatusLabel(run.status)}</span>,
+    },
+    {
+      title: "创建时间",
+      dataIndex: "createdAtUtc",
+      width: 150,
+      render: (_, run) => localDateTime(run.createdAtUtc),
+    },
+  ];
   return (
-    <div className="page">
-      <PageTitle
-        eyebrow="媒体生产 / 真实运行"
-        title="生产中心"
-        description="查看从镜头详情创建的真实生产运行、阶段和输出"
-        action={
-          <label className="select-control">
-            <span>生产集</span>
-            <select
-              value={productionEpisodeId}
-              onChange={(event) => navigate(event.target.value
-                ? `/projects/${projectId}/production/episodes/${event.target.value}`
-                : `/projects/${projectId}/production`)}
-            >
-              <option value="">全部生产集</option>
-              {productionEpisodes.map((episode) => (
-                <option key={episode.id} value={episode.id}>E{String(episode.episodeNumber).padStart(2, "0")} · {episode.title}</option>
-              ))}
-            </select>
-            <ChevronDown size={13} />
-          </label>
-        }
-      />
+    <div className="page production-page">
       {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
-      <div className="production-summary">
-        <div>
-          <span className="eyebrow">运行记录</span>
-          <strong>{runs.length}</strong>
-          <small>Run</small>
-        </div>
-        <div>
-          <span className="eyebrow">任务项</span>
-          <strong>{itemCount}</strong>
-          <small>真实阶段</small>
-        </div>
-        <div>
-          <span className="eyebrow">进行 / 失败</span>
-          <strong className={failedCount ? "danger" : ""}>{runningCount} / {failedCount}</strong>
-          <small>Run</small>
-        </div>
-        <div>
-          <span className="eyebrow">已完成</span>
-          <strong className="online">{completedCount}</strong>
-          <small>Run</small>
-        </div>
-      </div>
-      <section className="production-table panel">
-        <header className="panel-header">
-          <h2>生产运行</h2>
-          <span>按创建时间倒序</span>
-        </header>
-        {!loaded && <div className="source-empty-state"><strong>正在读取生产运行</strong></div>}
-        {loaded && !error && runs.length === 0 && (
-          <div className="source-empty-state">
-            <strong>尚无生产运行</strong>
-            <span>从分镜镜头详情开始制作后，运行会出现在这里。</span>
-          </div>
-        )}
-        {runs.map((run) => (
-          <button className="production-row" onClick={() => navigate(`/projects/${projectId}/production/runs/${run.id}`)} key={run.id}>
-            <span className="episode-code large">E{String(run.episodeNumber).padStart(2, "0")}</span>
-            <span className="production-title">
-              <strong>{run.episodeTitle}</strong>
-              <small>{productionModeLabel(run.mode)} · {localDateTime(run.createdAtUtc)}</small>
-            </span>
-            <div className="stage-pipeline">
-              {run.items.map((item) => (
-                <span className={item.status === "completed" ? "done" : item.status} key={item.id}>
-                  {productionStageLabel(item.stage)} <b>{productionStatusLabel(item.status)}</b>
-                </span>
-              ))}
-            </div>
-            <span className={`state-label ${run.status}`}>{productionStatusLabel(run.status)}</span>
-            <MoreHorizontal size={16} />
-          </button>
-        ))}
-      </section>
+      <ProTable<ProductionRun>
+        className="production-pro-table"
+        rowKey="id"
+        columns={columns}
+        dataSource={runs}
+        loading={!loaded}
+        size="small"
+        search={false}
+        options={false}
+        cardProps={{ bordered: false }}
+        scroll={{ x: 682 }}
+        pagination={{
+          pageSize: 20,
+          showSizeChanger: false,
+          showTotal: (total) => `共 ${total} 条`,
+          size: "small",
+        }}
+        locale={{ emptyText: error || "尚无生产运行。" }}
+        onRow={(run) => ({
+          onClick: () => navigate(`/projects/${projectId}/production/runs/${run.id}`),
+        })}
+      />
     </div>
   );
 }

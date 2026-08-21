@@ -137,6 +137,26 @@ public interface IStoryboardDesigner
         CancellationToken cancellationToken);
 }
 
+public sealed record StoryboardShotTextRevision(
+    string VisualDescription,
+    string Action,
+    string FrameStrategyReason,
+    string FirstFrameDescription,
+    string LastFrameDescription,
+    string CutDescription,
+    string Dialogue,
+    string Sound,
+    string Model,
+    string Runtime);
+
+public interface IStoryboardShotTextRewriter
+{
+    Task<StoryboardShotTextRevision> RewriteAsync(
+        StoryboardShotView shot,
+        string instruction,
+        CancellationToken cancellationToken);
+}
+
 public sealed record GetStoryboardQuery(Guid ProjectId, Guid ProductionEpisodeId)
     : IQuery<StoryboardView?>;
 
@@ -150,16 +170,41 @@ public sealed record UpdateStoryboardShotAssetsCommand(
     IReadOnlyList<Guid> AssetResourceIds)
     : ICommand<StoryboardView?>;
 
+public sealed record UpdateStoryboardShotModeCommand(
+    Guid ProjectId,
+    Guid ProductionEpisodeId,
+    Guid ShotResourceId,
+    string ProductionMode)
+    : ICommand<StoryboardView?>;
+
+public sealed record UpdateStoryboardShotTextCommand(
+    Guid ProjectId,
+    Guid ProductionEpisodeId,
+    Guid ShotResourceId,
+    string Field,
+    string Value)
+    : ICommand<StoryboardView?>;
+
+public sealed record RewriteStoryboardShotTextCommand(
+    Guid ProjectId,
+    Guid ProductionEpisodeId,
+    Guid ShotResourceId,
+    string Instruction)
+    : ICommand<StoryboardView?>;
+
 public sealed record StartShotProductionCommand(
     Guid ProjectId,
     Guid ProductionEpisodeId,
     Guid ShotResourceId,
-    string ConfirmedPrompt)
+    string ConfirmedPrompt,
+    string? Instruction)
     : ICommand<ShotProductionView?>;
 
 public sealed record UpdateStoryboardShotAssetsRequest(IReadOnlyList<Guid>? AssetResourceIds);
-
-public sealed record StartShotProductionRequest(string? ConfirmedPrompt);
+public sealed record UpdateStoryboardShotModeRequest(bool RequiresLastFrame);
+public sealed record UpdateStoryboardShotTextRequest(string? Value);
+public sealed record RewriteStoryboardShotTextRequest(string? Instruction);
+public sealed record StartShotProductionRequest(string? ConfirmedPrompt, string? Instruction);
 
 public sealed class GetStoryboardQueryHandler(V2DbContext dbContext)
     : IQueryHandler<GetStoryboardQuery, StoryboardView?>
@@ -762,8 +807,7 @@ internal static class StoryboardQueries
         var items = await dbContext.ProductionRunItems.AsNoTracking()
             .Where(item => item.ProjectId == definition.ProjectId
                 && item.ProductionEpisodeId == definition.ProductionEpisodeId
-                && item.ShotResourceId == definition.ShotResourceId
-                && item.ShotAssetId == definition.ShotAssetId)
+                && item.ShotResourceId == definition.ShotResourceId)
             .ToListAsync(cancellationToken);
         if (items.Count == 0) return null;
         var runIds = items.Select(item => item.RunId).Distinct().ToArray();
@@ -797,11 +841,27 @@ internal static class StoryboardQueries
                 && currentOutputs.TryGetValue(currentId, out var current)
                     ? current
                     : item);
-        return ShotProductionModes.ToView(
+        var view = ShotProductionModes.ToView(
             run,
             runItems,
             definition.DurationSeconds,
             resolvedOutputs);
+        var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+            item => item.Id == definition.ShotAssetId,
+            cancellationToken);
+        var shot = JsonSerializer.Deserialize<StoryboardShotDocument>(
+            shotAsset.DocumentJson ?? "{}",
+            StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+        return ShotProductionModes.ForShot(shot) == ShotProductionModes.DirectFirstFrame
+            ? view with
+            {
+                Mode = ShotProductionModes.DirectFirstFrame,
+                LastFrameAssetId = null,
+                LastFrameUrl = null,
+                LastFramePrompt = null
+            }
+            : view with { Mode = ShotProductionModes.FirstLastContinuous };
     }
 }
 
@@ -904,6 +964,76 @@ public sealed class MafStoryboardDesigner(
 }
 #pragma warning restore MAAI001
 
+#pragma warning disable MAAI001
+public sealed class MafStoryboardShotTextRewriter(
+    V2DbContext dbContext,
+    IDataProtectionProvider dataProtectionProvider,
+    ILoggerFactory loggerFactory) : IStoryboardShotTextRewriter
+{
+    public async Task<StoryboardShotTextRevision> RewriteAsync(
+        StoryboardShotView shot,
+        string instruction,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        if (!LlmChatClientFactory.IsConfigured(configuration))
+            throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
+        var agent = LlmChatClientFactory.Create(configuration!, dataProtectionProvider)
+            .AsIChatClient()
+            .AsHarnessAgent(new HarnessAgentOptions
+            {
+                Name = "AlexStoryboardShotRewriter",
+                MaxContextWindowTokens = 1_050_000,
+                MaxOutputTokens = 6_000,
+                MaximumIterationsPerRequest = 2,
+                DisableFileMemory = true,
+                DisableWebSearch = true,
+                DisableTodoProvider = true,
+                DisableAgentModeProvider = true,
+                DisableAgentSkillsProvider = true,
+                ChatOptions = new ChatOptions
+                {
+                    Instructions = """
+                        你是动画导演和分镜师。只按用户意见重写输入中的单个镜头执行文本，不改变镜号、时长、景别、机位、运镜、人物、道具、剧情事实和 productionMode。
+                        firstFrameDescription 必须写清主体位置、朝向、姿态、视线、手部/道具、前中后景和光线。productionMode 为 first-last-continuous 时 lastFrameDescription 必须明确相对首帧的结束变化；direct-first-frame 时必须为空字符串。
+                        cutDescription 必须按时间顺序写清动作节拍、演员调度、摄影机运动和切出点。只返回 JSON，不要 Markdown。
+                        """,
+                    MaxOutputTokens = 6_000
+                }
+            }, loggerFactory);
+        var input = JsonSerializer.Serialize(new { instruction, shot }, StoryboardDefaults.JsonOptions);
+        var response = await agent.RunAsync($"重写这个镜头的执行文本：\n{input}", cancellationToken: cancellationToken);
+        var text = response.Text?.Trim() ?? string.Empty;
+        var start = text.IndexOf('{');
+        var end = text.LastIndexOf('}');
+        if (start < 0 || end <= start)
+            throw new InvalidOperationException("GPT-5.4 未返回 JSON 镜头文本。");
+        var payload = JsonSerializer.Deserialize<ShotTextPayload>(text[start..(end + 1)], StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("GPT-5.4 未返回有效镜头文本。");
+        if (string.IsNullOrWhiteSpace(payload.VisualDescription)
+            || string.IsNullOrWhiteSpace(payload.Action)
+            || string.IsNullOrWhiteSpace(payload.FrameStrategyReason)
+            || string.IsNullOrWhiteSpace(payload.FirstFrameDescription)
+            || string.IsNullOrWhiteSpace(payload.CutDescription))
+            throw new InvalidOperationException("Agent 返回的镜头文本缺少必填内容。");
+        if (shot.ProductionMode == ShotProductionModes.FirstLastContinuous
+            && string.IsNullOrWhiteSpace(payload.LastFrameDescription))
+            throw new InvalidOperationException("首尾帧模式必须包含尾帧描述。");
+        return new(
+            payload.VisualDescription.Trim(), payload.Action.Trim(), payload.FrameStrategyReason.Trim(),
+            payload.FirstFrameDescription.Trim(), shot.ProductionMode == ShotProductionModes.DirectFirstFrame ? "" : payload.LastFrameDescription.Trim(),
+            payload.CutDescription.Trim(), payload.Dialogue.Trim(), payload.Sound.Trim(),
+            LlmChatClientFactory.GetModel(configuration!), "MAF HarnessAgent");
+    }
+
+    private sealed record ShotTextPayload(
+        string VisualDescription = "", string Action = "", string FrameStrategyReason = "",
+        string FirstFrameDescription = "", string LastFrameDescription = "", string CutDescription = "",
+        string Dialogue = "", string Sound = "");
+}
+#pragma warning restore MAAI001
+
 public static class StoryboardEndpoints
 {
     public static IEndpointRouteBuilder MapStoryboards(this IEndpointRouteBuilder app)
@@ -955,6 +1085,81 @@ public static class StoryboardEndpoints
                 cancellationToken);
             return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
         });
+        app.MapPut($"{route}/shots/{{shotResourceId:guid}}/mode", async (
+            Guid projectId,
+            Guid productionEpisodeId,
+            Guid shotResourceId,
+            UpdateStoryboardShotModeRequest request,
+            ICommandDispatcher dispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            var storyboard = await dispatcher.SendAsync(
+                new UpdateStoryboardShotModeCommand(
+                    projectId,
+                    productionEpisodeId,
+                    shotResourceId,
+                    request.RequiresLastFrame
+                        ? ShotProductionModes.FirstLastContinuous
+                        : ShotProductionModes.DirectFirstFrame),
+                cancellationToken);
+            return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
+        });
+        app.MapPut($"{route}/shots/{{shotResourceId:guid}}/text/{{field}}", async (
+            Guid projectId,
+            Guid productionEpisodeId,
+            Guid shotResourceId,
+            string field,
+            UpdateStoryboardShotTextRequest request,
+            ICommandDispatcher dispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var storyboard = await dispatcher.SendAsync(
+                    new UpdateStoryboardShotTextCommand(
+                        projectId,
+                        productionEpisodeId,
+                        shotResourceId,
+                        field,
+                        request.Value ?? string.Empty),
+                    cancellationToken);
+                return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
+            }
+        });
+        app.MapPost($"{route}/shots/{{shotResourceId:guid}}/rewrite", async (
+            Guid projectId,
+            Guid productionEpisodeId,
+            Guid shotResourceId,
+            RewriteStoryboardShotTextRequest request,
+            ICommandDispatcher dispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Instruction))
+                return Results.BadRequest(new { error = "请输入镜头文本修改意见。" });
+            try
+            {
+                var storyboard = await dispatcher.SendAsync(
+                    new RewriteStoryboardShotTextCommand(
+                        projectId,
+                        productionEpisodeId,
+                        shotResourceId,
+                        request.Instruction.Trim()),
+                    cancellationToken);
+                return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
+            }
+            catch (ProjectGenerationConfigurationException error)
+            {
+                return Results.Conflict(new { error = error.Message });
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
+            }
+        });
         app.MapPost($"{route}/shots/{{shotResourceId:guid}}/production/start", async (
             Guid projectId,
             Guid productionEpisodeId,
@@ -974,7 +1179,8 @@ public static class StoryboardEndpoints
                         projectId,
                         productionEpisodeId,
                         shotResourceId,
-                        request.ConfirmedPrompt),
+                        request.ConfirmedPrompt,
+                        request.Instruction),
                     cancellationToken);
                 return production is null ? Results.NotFound() : Results.Ok(production);
             }
@@ -998,6 +1204,7 @@ public static class StoryboardEndpoints
             Guid projectId,
             Guid productionEpisodeId,
             Guid shotResourceId,
+            string? instruction,
             IShotFrameService frameService,
             CancellationToken cancellationToken) =>
         {
@@ -1007,6 +1214,7 @@ public static class StoryboardEndpoints
                     projectId,
                     productionEpisodeId,
                     shotResourceId,
+                    instruction,
                     cancellationToken);
                 return preview is null ? Results.NotFound() : Results.Ok(preview);
             }
@@ -1020,6 +1228,212 @@ public static class StoryboardEndpoints
             }
         });
         return app;
+    }
+}
+
+public sealed class UpdateStoryboardShotModeCommandHandler(
+    V2DbContext dbContext,
+    TimeProvider timeProvider)
+    : ICommandHandler<UpdateStoryboardShotModeCommand, StoryboardView?>
+{
+    public async Task<StoryboardView?> HandleAsync(
+        UpdateStoryboardShotModeCommand command,
+        CancellationToken cancellationToken)
+    {
+        var context = await StoryboardShotVersioning.LoadAsync(
+            dbContext, command.ProjectId, command.ProductionEpisodeId, command.ShotResourceId, cancellationToken);
+        if (context is null) return null;
+        var mode = ShotProductionModes.Normalize(command.ProductionMode);
+        if (context.Document.ProductionMode == mode)
+            return await StoryboardQueries.GetAsync(dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+        var updated = context.Document with
+        {
+            ProductionMode = mode,
+            FrameStrategyReason = mode == ShotProductionModes.FirstLastContinuous
+                ? "手动指定需要尾帧，以明确约束镜头结束状态。"
+                : "手动指定只需要首帧，动作由首帧自然延展。",
+            LastFrameDescription = mode == ShotProductionModes.FirstLastContinuous
+                ? string.IsNullOrWhiteSpace(context.Document.LastFrameDescription)
+                    ? $"镜头结束时，{context.Document.Action}"
+                    : context.Document.LastFrameDescription
+                : ""
+        };
+        await StoryboardShotVersioning.SaveAsync(
+            dbContext, context, updated, "manual-frame-strategy", timeProvider.GetUtcNow(), cancellationToken);
+        return await StoryboardQueries.GetAsync(dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+    }
+}
+
+public sealed class RewriteStoryboardShotTextCommandHandler(
+    V2DbContext dbContext,
+    IStoryboardShotTextRewriter rewriter,
+    TimeProvider timeProvider)
+    : ICommandHandler<RewriteStoryboardShotTextCommand, StoryboardView?>
+{
+    public async Task<StoryboardView?> HandleAsync(
+        RewriteStoryboardShotTextCommand command,
+        CancellationToken cancellationToken)
+    {
+        var storyboard = await StoryboardQueries.GetAsync(
+            dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+        var shot = storyboard?.Shots.SingleOrDefault(item => item.ResourceId == command.ShotResourceId);
+        if (shot is null) return null;
+        var context = await StoryboardShotVersioning.LoadAsync(
+            dbContext, command.ProjectId, command.ProductionEpisodeId, command.ShotResourceId, cancellationToken)
+            ?? throw new InvalidOperationException("镜头不存在。");
+        var revision = await rewriter.RewriteAsync(shot, command.Instruction, cancellationToken);
+        var updated = context.Document with
+        {
+            VisualDescription = revision.VisualDescription,
+            Action = revision.Action,
+            FrameStrategyReason = revision.FrameStrategyReason,
+            FirstFrameDescription = revision.FirstFrameDescription,
+            LastFrameDescription = revision.LastFrameDescription,
+            CutDescription = revision.CutDescription,
+            Dialogue = context.Document.Dialogue,
+            Sound = revision.Sound,
+            Model = revision.Model,
+            Runtime = revision.Runtime
+        };
+        await StoryboardShotVersioning.SaveAsync(
+            dbContext, context, updated, command.Instruction, timeProvider.GetUtcNow(), cancellationToken);
+        return await StoryboardQueries.GetAsync(dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+    }
+}
+
+public sealed class UpdateStoryboardShotTextCommandHandler(
+    V2DbContext dbContext,
+    TimeProvider timeProvider)
+    : ICommandHandler<UpdateStoryboardShotTextCommand, StoryboardView?>
+{
+    public async Task<StoryboardView?> HandleAsync(
+        UpdateStoryboardShotTextCommand command,
+        CancellationToken cancellationToken)
+    {
+        var context = await StoryboardShotVersioning.LoadAsync(
+            dbContext, command.ProjectId, command.ProductionEpisodeId, command.ShotResourceId, cancellationToken);
+        if (context is null) return null;
+        var field = StoryboardShotTextFields.Normalize(command.Field)
+            ?? throw new InvalidOperationException("不支持编辑这个镜头字段。");
+        var updated = StoryboardShotTextFields.Apply(context.Document, field, command.Value);
+        if (updated == context.Document)
+            return await StoryboardQueries.GetAsync(dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+        await StoryboardShotVersioning.SaveAsync(
+            dbContext, context, updated, $"manual-edit:{field}", timeProvider.GetUtcNow(), cancellationToken);
+        return await StoryboardQueries.GetAsync(dbContext, command.ProjectId, command.ProductionEpisodeId, cancellationToken);
+    }
+}
+
+internal static class StoryboardShotTextFields
+{
+    private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "visualDescription", "firstFrameDescription",
+        "lastFrameDescription", "cutDescription", "dialogue", "sound"
+    };
+
+    public static string? Normalize(string? field) =>
+        string.IsNullOrWhiteSpace(field) || !Supported.Contains(field)
+            ? null
+            : Supported.Single(item => item.Equals(field, StringComparison.OrdinalIgnoreCase));
+
+    public static string Label(string field) => field switch
+    {
+        "visualDescription" => "镜头描述",
+        "firstFrameDescription" => "首帧描述",
+        "lastFrameDescription" => "尾帧描述",
+        "cutDescription" => "CUT 执行描述",
+        "dialogue" => "对白",
+        "sound" => "声音",
+        _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")
+    };
+
+    public static StoryboardShotDocument Apply(StoryboardShotDocument document, string field, string value)
+    {
+        var normalized = value.Trim();
+        if (field is not ("dialogue" or "sound") && string.IsNullOrWhiteSpace(normalized))
+            throw new InvalidOperationException($"{Label(field)}不能为空。");
+        return field switch
+        {
+            "visualDescription" => document with { VisualDescription = normalized },
+            "firstFrameDescription" => document with { FirstFrameDescription = normalized },
+            "lastFrameDescription" => document with { LastFrameDescription = normalized },
+            "cutDescription" => document with { CutDescription = normalized },
+            "dialogue" => document with { Dialogue = normalized },
+            "sound" => document with { Sound = normalized },
+            _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")
+        };
+    }
+}
+
+internal static class StoryboardShotVersioning
+{
+    internal sealed record Context(ShotDefinition Definition, Asset Asset, ResourceState State, StoryboardShotDocument Document);
+
+    public static async Task<Context?> LoadAsync(
+        V2DbContext dbContext,
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken)
+    {
+        var definition = await dbContext.ShotDefinitions.SingleOrDefaultAsync(item =>
+            item.ProjectId == projectId && item.ProductionEpisodeId == productionEpisodeId && item.ShotResourceId == shotResourceId,
+            cancellationToken);
+        if (definition is null) return null;
+        var asset = await dbContext.Assets.SingleAsync(item => item.Id == definition.ShotAssetId, cancellationToken);
+        var state = await dbContext.ResourceStates.SingleAsync(item => item.ProjectId == projectId && item.ResourceId == shotResourceId, cancellationToken);
+        var document = JsonSerializer.Deserialize<StoryboardShotDocument>(asset.DocumentJson ?? "{}", StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+        return new(definition, asset, state, document);
+    }
+
+    public static async Task SaveAsync(
+        V2DbContext dbContext,
+        Context context,
+        StoryboardShotDocument document,
+        string instruction,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
+        var asset = new Asset
+        {
+            ProjectId = context.Asset.ProjectId,
+            ProductionEpisodeId = context.Asset.ProductionEpisodeId,
+            ResourceId = context.Asset.ResourceId,
+            Version = context.Asset.Version + 1,
+            Number = context.Asset.Number,
+            Type = context.Asset.Type,
+            Name = context.Asset.Name,
+            DocumentJson = json,
+            ContentType = "application/json",
+            SizeBytes = Encoding.UTF8.GetByteCount(json),
+            GenerationMetadataJson = JsonSerializer.Serialize(new { instruction, document.Model, document.Runtime }, StoryboardDefaults.JsonOptions),
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(asset);
+        context.Definition.ShotAssetId = asset.Id;
+        context.Definition.UpdatedAtUtc = now;
+        context.State.CurrentAssetId = asset.Id;
+        context.State.IsStale = false;
+        context.State.UpdatedAtUtc = now;
+        var claims = await dbContext.ShotBeatClaims
+            .Where(item => item.ProjectId == context.Asset.ProjectId
+                && item.ShotResourceId == context.Asset.ResourceId)
+            .ToListAsync(cancellationToken);
+        foreach (var claim in claims) claim.ShotAssetId = asset.Id;
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = context.Asset.ProjectId,
+            ConsumerAssetId = asset.Id,
+            SourceAssetId = context.Definition.ScriptPackageAssetId,
+            Role = "derived-from-script",
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 }
 
@@ -1127,10 +1541,22 @@ public sealed class StartShotProductionCommandHandler(
             shotAsset.DocumentJson ?? "{}",
             StoryboardDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+        var mode = ShotProductionModes.ForShot(shotDocument);
+        var reusableFirstFrame = mode == ShotProductionModes.FirstLastContinuous
+            ? await frameService.ResolveCurrentFrameAsync(
+                command.ProjectId,
+                command.ShotResourceId,
+                "frame-for-shot",
+                cancellationToken)
+            : null;
         var preflight = await ShotProductionPreflight.EvaluateAsync(
             dbContext,
             definition,
             cancellationToken);
+        if (!preflight.Passed && reusableFirstFrame?.BlobContent is not null)
+        {
+            preflight = ShotProductionPreflight.ForLastFrameReuse(preflight.Inputs, reusableFirstFrame);
+        }
         if (!preflight.Passed)
         {
             CreateValidationRun(
@@ -1149,6 +1575,7 @@ public sealed class StartShotProductionCommandHandler(
             creativeSettingsAssetId,
             preflight.Inputs.ReferenceImageAssetIds,
             preflight.Inputs.PropAssetIds,
+            command.Instruction,
             cancellationToken)
             ?? throw new InvalidOperationException("镜头不存在。");
         if (!string.Equals(command.ConfirmedPrompt, preview.Prompt, StringComparison.Ordinal))
@@ -1168,7 +1595,6 @@ public sealed class StartShotProductionCommandHandler(
             .Append(creativeSettingsAssetId)
             .Distinct()
             .ToArray();
-        var mode = ShotProductionModes.ForShot(shotDocument);
         var stages = ShotProductionModes.Stages(mode);
         var now = timeProvider.GetUtcNow();
         var run = new ProductionRun
@@ -1186,6 +1612,7 @@ public sealed class StartShotProductionCommandHandler(
                 durationSeconds = definition.DurationSeconds,
                 shotDocument.FrameStrategyReason,
                 command.ShotResourceId,
+                userInstruction = string.IsNullOrWhiteSpace(command.Instruction) ? null : command.Instruction.Trim(),
                 execution = mode == ShotProductionModes.FirstLastContinuous ? "sequential" : "direct"
             }, StoryboardDefaults.JsonOptions),
             OriginalInstruction = mode == ShotProductionModes.FirstLastContinuous
@@ -1206,14 +1633,21 @@ public sealed class StartShotProductionCommandHandler(
                 ShotAssetId = shotAsset.Id,
                 ShotName = shotAsset.Name,
                 Stage = stages[index],
-                Status = index == 0 ? "queued" : "waiting",
+                Status = stages[index] == "first-frame" && reusableFirstFrame is not null
+                    ? "completed"
+                    : reusableFirstFrame is not null || index == 0 ? "queued" : "waiting",
                 Attempt = 0,
+                OutputAssetId = stages[index] == "first-frame" ? reusableFirstFrame?.Id : null,
+                CompletedAtUtc = stages[index] == "first-frame" && reusableFirstFrame is not null ? now : null,
                 InputAssetIdsJson = JsonSerializer.Serialize(inputAssetIds, StoryboardDefaults.JsonOptions),
                 CreatedAtUtc = now
             });
         }
         await dbContext.SaveChangesAsync(cancellationToken);
-        await frameService.GenerateFirstFrameAsync(run.Id, command.ConfirmedPrompt, cancellationToken);
+        if (reusableFirstFrame is null)
+        {
+            await frameService.GenerateFirstFrameAsync(run.Id, command.ConfirmedPrompt, cancellationToken);
+        }
         if (mode == ShotProductionModes.FirstLastContinuous)
         {
             await frameService.GenerateLastFrameAsync(run.Id, cancellationToken);
@@ -1289,6 +1723,20 @@ internal sealed record ShotProductionPreflightReport(
 
 internal static class ShotProductionPreflight
 {
+    public static ShotProductionPreflightReport ForLastFrameReuse(
+        ShotProductionInputs inputs,
+        Asset firstFrame) =>
+        new(
+            inputs,
+            [
+                new(
+                    "shot.first-frame-reused",
+                    "pass",
+                    "复用已生成首帧作为尾帧场景与连续性锚点。",
+                    null,
+                    [firstFrame.Id])
+            ]);
+
     public static async Task<ShotProductionInputs> ResolveAsync(
         V2DbContext dbContext,
         ShotDefinition definition,

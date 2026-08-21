@@ -29,6 +29,14 @@ export interface StoryboardShot {
   updatedAtUtc: string
 }
 
+export type StoryboardShotTextField =
+  | 'visualDescription'
+  | 'firstFrameDescription'
+  | 'lastFrameDescription'
+  | 'cutDescription'
+  | 'dialogue'
+  | 'sound'
+
 export interface Storyboard {
   productionEpisodeId: string
   episodeNumber: number
@@ -140,18 +148,74 @@ export async function updateStoryboardShotAssets(
   return response.json() as Promise<Storyboard>
 }
 
+  export async function updateStoryboardShotMode(
+    projectId: string,
+    productionEpisodeId: string,
+    shotResourceId: string,
+    requiresLastFrame: boolean,
+  ): Promise<Storyboard> {
+    const response = await fetch(
+      `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/mode`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requiresLastFrame }),
+      },
+    )
+    if (!response.ok) throw await readError(response, '镜头帧策略保存失败。')
+    return response.json() as Promise<Storyboard>
+  }
+
+  export async function updateStoryboardShotText(
+    projectId: string,
+    productionEpisodeId: string,
+    shotResourceId: string,
+    field: StoryboardShotTextField,
+    value: string,
+  ): Promise<Storyboard> {
+    const response = await fetch(
+      `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/text/${field}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      },
+    )
+    if (!response.ok) throw await readError(response, '镜头文本保存失败。')
+    return response.json() as Promise<Storyboard>
+  }
+
+  export async function rewriteStoryboardShotText(
+    projectId: string,
+    productionEpisodeId: string,
+    shotResourceId: string,
+    instruction: string,
+  ): Promise<Storyboard> {
+    const response = await fetch(
+      `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/rewrite`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction }),
+      },
+    )
+    if (!response.ok) throw await readError(response, '镜头文本重新生成失败。')
+    return response.json() as Promise<Storyboard>
+  }
+
 export async function startShotProduction(
   projectId: string,
   productionEpisodeId: string,
   shotResourceId: string,
   confirmedPrompt: string,
+  instruction?: string,
 ): Promise<ShotProduction> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/production/start`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirmedPrompt }),
+      body: JSON.stringify({ confirmedPrompt, instruction }),
     },
   )
   if (!response.ok) throw await readError(response, '镜头开始制作失败。')
@@ -162,9 +226,11 @@ export async function previewShotProduction(
   projectId: string,
   productionEpisodeId: string,
   shotResourceId: string,
+  instruction?: string,
 ): Promise<ImageGenerationPreview> {
+  const query = instruction?.trim() ? `?instruction=${encodeURIComponent(instruction.trim())}` : ''
   const response = await fetch(
-    `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/production/preview`,
+    `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/production/preview${query}`,
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '首帧生成规格加载失败。')
@@ -191,8 +257,10 @@ export async function previewShotVideo(
   projectId: string,
   productionEpisodeId: string,
   shotResourceId: string,
+  instruction?: string,
 ): Promise<ShotVideoPreview> {
-  const response = await fetch(`${shotVideoRoute(projectId, productionEpisodeId, shotResourceId)}/preview`, {
+  const query = instruction?.trim() ? `?instruction=${encodeURIComponent(instruction.trim())}` : ''
+  const response = await fetch(`${shotVideoRoute(projectId, productionEpisodeId, shotResourceId)}/preview${query}`, {
     method: 'POST',
   })
   if (!response.ok) throw await readError(response, '视频生成规格加载失败。')
@@ -205,11 +273,12 @@ export async function startShotVideo(
   shotResourceId: string,
   confirmedPrompt: string,
   previewHash: string,
+  instruction?: string,
 ): Promise<ShotVideoProduction> {
   const response = await fetch(`${shotVideoRoute(projectId, productionEpisodeId, shotResourceId)}/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirmedPrompt, previewHash }),
+    body: JSON.stringify({ confirmedPrompt, previewHash, instruction }),
   })
   if (!response.ok) throw await readError(response, '镜头视频任务创建失败。')
   return response.json() as Promise<ShotVideoProduction>

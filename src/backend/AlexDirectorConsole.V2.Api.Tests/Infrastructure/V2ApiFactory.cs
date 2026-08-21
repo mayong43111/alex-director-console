@@ -17,6 +17,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using System.Collections.Concurrent;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 
@@ -47,6 +48,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IStoryMaterialAnalyzer>();
             services.RemoveAll<IAdaptationScriptWriter>();
             services.RemoveAll<IStoryboardDesigner>();
+            services.RemoveAll<IStoryboardShotTextRewriter>();
             services.AddDbContext<V2DbContext>(options =>
                 options.UseSqlite($"Data Source={databasePath};Pooling=False"));
             services.AddSingleton<IFoundryConnectionTester, SuccessfulFoundryConnectionTester>();
@@ -57,7 +59,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IComfyUiWorkflowProvider, TestComfyUiWorkflowProvider>();
             services.AddScoped<ISessionAgent, TestSessionAgent>();
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
-            services.AddSingleton<IShotFrameGenerator, TestShotFrameGenerator>();
+            services.AddSingleton<TestShotFrameGenerator>();
+            services.AddSingleton<IShotFrameGenerator>(provider =>
+                provider.GetRequiredService<TestShotFrameGenerator>());
             services.AddSingleton<ILocalVoiceDesigner, TestLocalVoiceDesigner>();
             services.AddSingleton<TestProjectSettingsAssistant>();
             services.AddSingleton<IProjectSettingsAssistant>(provider =>
@@ -68,6 +72,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IStoryMaterialAnalyzer, TestStoryMaterialAnalyzer>();
             services.AddSingleton<IAdaptationScriptWriter, TestAdaptationScriptWriter>();
             services.AddSingleton<IStoryboardDesigner, TestStoryboardDesigner>();
+            services.AddSingleton<IStoryboardShotTextRewriter, TestStoryboardShotTextRewriter>();
         });
     }
 
@@ -78,6 +83,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         await dbContext.Database.EnsureDeletedAsync();
         await dbContext.Database.MigrateAsync();
         Services.GetRequiredService<TestComfyUiVideoClient>().Reset();
+        Services.GetRequiredService<TestShotFrameGenerator>().Reset();
         Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
         Services.GetRequiredService<TestAgentTextInvoker>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
@@ -150,23 +156,41 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     prompt));
     }
 
+    public IReadOnlyList<ShotFrameGenerationCall> ShotFrameCalls =>
+        Services.GetRequiredService<TestShotFrameGenerator>().Calls;
+
+    public sealed record ShotFrameGenerationCall(
+        string Prompt,
+        IReadOnlyList<ShotFrameReference> References);
+
     private sealed class TestShotFrameGenerator : IShotFrameGenerator
     {
         private static readonly byte[] PngBytes = Convert.FromBase64String(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+        private readonly ConcurrentQueue<ShotFrameGenerationCall> calls = new();
+
+        public IReadOnlyList<ShotFrameGenerationCall> Calls => calls.ToArray();
+
+        public void Reset()
+        {
+            while (calls.TryDequeue(out _)) { }
+        }
 
         public Task<GeneratedShotFrame> GenerateAsync(
             string prompt,
             string size,
             IReadOnlyList<ShotFrameReference> references,
-            CancellationToken cancellationToken) => Task.FromResult(
-                new GeneratedShotFrame(
+            CancellationToken cancellationToken)
+        {
+            calls.Enqueue(new ShotFrameGenerationCall(prompt, references.ToArray()));
+            return Task.FromResult(new GeneratedShotFrame(
                     PngBytes,
                     "image/png",
                     ".png",
                     "gpt-image-2",
                     "medium",
                     prompt));
+        }
     }
 
     private sealed class TestLocalVoiceDesigner : ILocalVoiceDesigner
@@ -378,6 +402,26 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     "gpt-5.4-test",
                     "Test Harness"));
         }
+    }
+
+    private sealed class TestStoryboardShotTextRewriter : IStoryboardShotTextRewriter
+    {
+        public Task<StoryboardShotTextRevision> RewriteAsync(
+            StoryboardShotView shot,
+            string instruction,
+            CancellationToken cancellationToken) => Task.FromResult(new StoryboardShotTextRevision(
+                $"{shot.VisualDescription}；已按意见调整：{instruction}",
+                shot.Action,
+                $"已按意见重新判断：{instruction}",
+                $"{shot.FirstFrameDescription}；调整要求：{instruction}",
+                shot.ProductionMode == ShotProductionModes.FirstLastContinuous
+                    ? $"{shot.LastFrameDescription}；调整要求：{instruction}"
+                    : "",
+                $"{shot.CutDescription}；调整要求：{instruction}",
+                shot.Dialogue,
+                shot.Sound,
+                "gpt-5.4-test",
+                "Test Harness"));
     }
 
     private sealed class TestProjectSettingsAssistant : IProjectSettingsAssistant

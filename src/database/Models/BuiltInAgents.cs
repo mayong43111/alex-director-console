@@ -28,4 +28,7 @@ public static class BuiltInAgents
 
     public static readonly Guid EpisodeOutlinePlannerId =
         Guid.Parse("c1d4c535-5a7b-4d54-b88a-e93d273a5b15");
+
+    public static readonly Guid StoryboardShotTextWriterId =
+        Guid.Parse("5c25f460-d7dc-4b23-83dc-03581542b17e");
 }

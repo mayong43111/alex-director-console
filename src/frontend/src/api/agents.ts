@@ -69,6 +69,7 @@ export const builtInAgentIds = {
   cameraLanguageWriter: 'c86c50ec-8dd5-4889-85af-075c500256e7',
   soundStrategyWriter: 'f430be3f-ee6f-4e03-9475-82af31f699b5',
   imagePromptPrefixWriter: 'b25d162a-691c-4382-a3f2-e430d04a43c8',
+  storyboardShotTextWriter: '5c25f460-d7dc-4b23-83dc-03581542b17e',
 } as const
 
 export const builtInAgentLabels = {
@@ -79,6 +80,7 @@ export const builtInAgentLabels = {
   cameraLanguageWriter: '项目摄影语言助手',
   soundStrategyWriter: '项目声音策略助手',
   imagePromptPrefixWriter: '图像生成约束助手',
+  storyboardShotTextWriter: '镜头文本编辑助手',
 } as const
 
 export interface AgentInvocationInput {

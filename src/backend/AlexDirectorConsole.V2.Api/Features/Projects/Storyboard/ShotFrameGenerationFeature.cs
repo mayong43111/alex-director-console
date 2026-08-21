@@ -197,6 +197,7 @@ public interface IShotFrameService
         Guid projectId,
         Guid productionEpisodeId,
         Guid shotResourceId,
+        string? instruction,
         CancellationToken cancellationToken);
 
     Task<ImageGenerationPreviewView?> PreviewFirstFrameAsync(
@@ -206,6 +207,7 @@ public interface IShotFrameService
         Guid settingsAssetId,
         IReadOnlyList<Guid> referenceImageAssetIds,
         IReadOnlyList<Guid> propAssetIds,
+        string? instruction,
         CancellationToken cancellationToken);
 
     Task GenerateFirstFrameAsync(
@@ -215,6 +217,12 @@ public interface IShotFrameService
 
     Task GenerateLastFrameAsync(
         Guid runId,
+        CancellationToken cancellationToken);
+
+    Task<Asset?> ResolveCurrentFrameAsync(
+        Guid projectId,
+        Guid shotResourceId,
+        string role,
         CancellationToken cancellationToken);
 }
 
@@ -229,6 +237,7 @@ public sealed class ShotFrameService(
         Guid projectId,
         Guid productionEpisodeId,
         Guid shotResourceId,
+        string? instruction,
         CancellationToken cancellationToken)
     {
         var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleOrDefaultAsync(
@@ -244,13 +253,29 @@ public sealed class ShotFrameService(
         {
             throw new InvalidOperationException("开始制作前必须先保存项目设定。");
         }
-        var inputs = await ShotProductionPreflight.ResolveAsync(dbContext, definition, cancellationToken);
+        var preflight = await ShotProductionPreflight.EvaluateAsync(dbContext, definition, cancellationToken);
+        if (!preflight.Passed)
+        {
+            var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+                asset => asset.Id == definition.ShotAssetId,
+                cancellationToken);
+            var shot = JsonSerializer.Deserialize<StoryboardShotDocument>(
+                shotAsset.DocumentJson ?? "{}",
+                StoryboardDefaults.JsonOptions)
+                ?? throw new InvalidOperationException("当前镜头内容无法读取。");
+            var firstFrame = ShotProductionModes.ForShot(shot) == ShotProductionModes.FirstLastContinuous
+                ? await ResolveCurrentFrameAsync(projectId, shotResourceId, "frame-for-shot", cancellationToken)
+                : null;
+            if (firstFrame?.BlobContent is null) throw new InvalidOperationException(preflight.FailureMessage);
+        }
+        var inputs = preflight.Inputs;
         return await BuildPreviewAsync(
             projectId,
             definition,
             settingsAssetId,
             inputs.ReferenceImageAssetIds,
             inputs.PropAssetIds,
+            instruction,
             cancellationToken);
     }
 
@@ -261,6 +286,7 @@ public sealed class ShotFrameService(
         Guid settingsAssetId,
         IReadOnlyList<Guid> referenceImageAssetIds,
         IReadOnlyList<Guid> propAssetIds,
+        string? instruction,
         CancellationToken cancellationToken)
     {
         var definition = await dbContext.ShotDefinitions.AsNoTracking().SingleOrDefaultAsync(
@@ -276,6 +302,7 @@ public sealed class ShotFrameService(
                 settingsAssetId,
                 referenceImageAssetIds,
                 propAssetIds,
+                instruction,
                 cancellationToken);
     }
 
@@ -285,6 +312,7 @@ public sealed class ShotFrameService(
         Guid settingsAssetId,
         IReadOnlyList<Guid> referenceImageAssetIds,
         IReadOnlyList<Guid> propAssetIds,
+        string? instruction,
         CancellationToken cancellationToken)
     {
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
@@ -305,16 +333,23 @@ public sealed class ShotFrameService(
         var props = await dbContext.Assets.AsNoTracking()
             .Where(candidate => candidate.ProjectId == projectId && propAssetIds.Contains(candidate.Id))
             .ToListAsync(cancellationToken);
-        var prompt = BuildPrompt(settings, shot, references, props);
+        var mode = ShotProductionModes.ForShot(shot);
+        var firstFrame = mode == ShotProductionModes.FirstLastContinuous
+            ? await ResolveCurrentFrameAsync(projectId, definition.ShotResourceId, "frame-for-shot", cancellationToken)
+            : null;
+        var prompt = AppendInstruction(
+            firstFrame is null
+                ? BuildPrompt(settings, shot, references, props)
+                : BuildLastFramePrompt(settings, shot, references, props),
+            instruction);
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
             settings.OutputWidth,
             settings.OutputHeight,
             settings.AspectRatio);
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
             .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
-        var mode = ShotProductionModes.ForShot(shot);
         return new(
-            "generate-storyboard-first-frame",
+            firstFrame is null ? "generate-storyboard-first-frame" : "generate-storyboard-last-frame",
             prompt,
             new(
                 FoundryConfigurationView.ImageEditModel(configuration),
@@ -326,7 +361,57 @@ public sealed class ShotFrameService(
                 mode,
                 definition.DurationSeconds,
                 ShotProductionModes.Stages(mode)),
-            BuildProvenance(projectId, shotAsset, settingsAsset, references, props));
+            BuildProvenance(projectId, shotAsset, settingsAsset, references, props)
+                .Concat(firstFrame is null
+                    ? []
+                    : [GenerationProvenance.Reference(firstFrame, "continues-from-first-frame")])
+                .ToArray());
+    }
+
+    public async Task<Asset?> ResolveCurrentFrameAsync(
+        Guid projectId,
+        Guid shotResourceId,
+        string role,
+        CancellationToken cancellationToken)
+    {
+        var frameResources = await (
+            from dependency in dbContext.AssetDependencies.AsNoTracking()
+            join source in dbContext.Assets.AsNoTracking() on dependency.SourceAssetId equals source.Id
+            join frame in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals frame.Id
+            where dependency.ProjectId == projectId
+                && source.ResourceId == shotResourceId
+                && dependency.Role == role
+                && frame.Type == AssetType
+            select frame.ResourceId)
+            .Distinct()
+            .ToArrayAsync(cancellationToken);
+        if (frameResources.Length == 0) return null;
+        var states = await dbContext.ResourceStates.AsNoTracking()
+            .Where(state => state.ProjectId == projectId
+                && state.ResourceType == AssetType
+                && frameResources.Contains(state.ResourceId))
+            .ToListAsync(cancellationToken);
+        var currentAssetId = states
+            .OrderByDescending(state => state.UpdatedAtUtc)
+            .Select(state => (Guid?)state.CurrentAssetId)
+            .FirstOrDefault();
+        return currentAssetId is Guid assetId
+            ? await dbContext.Assets.AsNoTracking().SingleAsync(asset => asset.Id == assetId, cancellationToken)
+            : null;
+    }
+
+    private static string AppendInstruction(string prompt, string? instruction) =>
+        string.IsNullOrWhiteSpace(instruction)
+            ? prompt
+            : $"{prompt}\nUser revision instruction: {instruction.Trim()}\nApply this instruction without violating any identity, scene-continuity, asset-reference, or no-text constraint above.";
+
+    private static string? ReadInstruction(string? specJson)
+    {
+        if (string.IsNullOrWhiteSpace(specJson)) return null;
+        using var spec = JsonDocument.Parse(specJson);
+        return spec.RootElement.TryGetProperty("userInstruction", out var instruction)
+            ? instruction.GetString()
+            : null;
     }
 
     public Task GenerateFirstFrameAsync(
@@ -429,12 +514,8 @@ public sealed class ShotFrameService(
                 ];
             }
             var prompt = stage == "last-frame"
-                ? BuildLastFramePrompt(settings, shot, references, props)
-                : BuildPrompt(settings, shot, references, props);
-            if (stage == "first-frame" && !string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
-            }
+                ? AppendInstruction(BuildLastFramePrompt(settings, shot, references, props), ReadInstruction(run.SpecJson))
+                : confirmedPrompt ?? throw new InvalidOperationException("首帧缺少已确认提示词。");
             var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
                 settings.OutputWidth,
                 settings.OutputHeight,
@@ -455,9 +536,10 @@ public sealed class ShotFrameService(
 
             var previousFrames = await (
                 from dependency in dbContext.AssetDependencies.AsNoTracking()
+                join source in dbContext.Assets.AsNoTracking() on dependency.SourceAssetId equals source.Id
                 join asset in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals asset.Id
                 where dependency.ProjectId == run.ProjectId
-                    && dependency.SourceAssetId == shotAsset.Id
+                    && source.ResourceId == item.ShotResourceId
                     && dependency.Role == (stage == "last-frame" ? "last-frame-for-shot" : "frame-for-shot")
                     && asset.Type == AssetType
                 select asset)
@@ -715,7 +797,8 @@ public sealed class ShotFrameService(
     {
         var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
         return $$"""
-            Create the exact final frame of one cinematic storyboard shot. The supplied first-frame image is the strict continuity anchor; the supplied character and scene sheets are strict identity and environment references.
+            Create the exact final frame of one cinematic storyboard shot. The supplied first-frame image is mandatory and is the highest-priority visual reference for the final frame; the supplied character and scene sheets are additional strict identity and environment references.
+            Treat the scene shown in the first-frame image as locked. Preserve its architecture, spatial layout, camera position and axis, perspective, lighting direction and intensity, materials, colors, set dressing, background objects, and weather exactly. Do not redesign, replace, relocate, add, or remove any scene element unless the required final-frame state explicitly demands that visible change.
             Project: {{settings.ProjectName}}
             Visual style: {{settings.VisualStyle}}
             Art direction: {{settings.ArtDirection}}
@@ -733,7 +816,7 @@ public sealed class ShotFrameService(
             Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
             Required scene references: {{string.Join("; ", references.Where(item => item.SubjectType == "scene").Select(item => item.SubjectName))}}
             Important recurring complex props only: {{string.Join("; ", props.Select(item => $"{item.Name}: {item.VisualDescription}"))}}
-            Preserve every identity, costume, material, color, light direction, camera axis, and environment detail from the supplied first frame. Change only the positions, poses, expressions, occlusions, prop states, framing, and focus explicitly required by the final-frame state and cut execution.
+            Preserve every identity, costume, material, color, light direction, camera axis, and environment detail from the supplied first frame. Change only the positions, poses, expressions, occlusions, prop states, framing, and focus explicitly required by the final-frame state and cut execution. When any instruction conflicts with scene continuity, follow the first-frame image for the scene and alter only the explicitly required action state.
             Render one coherent final frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
             """;
     }

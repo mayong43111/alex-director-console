@@ -1,11 +1,11 @@
 param(
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [int]$ApiPort = 6275,
+    [int]$WebPort = 5273
 )
 
 $ErrorActionPreference = "Stop"
 
-$apiPort = 6275
-$webPort = 5273
 $apiPath = Join-Path $PSScriptRoot "src/backend/AlexDirectorConsole.V2.Api"
 $webPath = Join-Path $PSScriptRoot "src/frontend"
 $apiProcess = $null
@@ -17,19 +17,27 @@ function Assert-CommandExists([string]$Name) {
     }
 }
 
-function Assert-PortAvailable([int]$Port, [string]$Service) {
-    $listener = [System.Net.Sockets.TcpListener]::new(
-        [System.Net.IPAddress]::Loopback,
-        $Port)
-    try {
-        $listener.Start()
+function Get-AvailablePort([int]$PreferredPort, [string]$Service) {
+    foreach ($candidate in $PreferredPort..($PreferredPort + 100)) {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback,
+            $candidate)
+        try {
+            $listener.Start()
+            if ($candidate -ne $PreferredPort) {
+                Write-Host "$Service port $PreferredPort is unavailable; using $candidate instead." -ForegroundColor Yellow
+            }
+            return $candidate
+        }
+        catch {
+            continue
+        }
+        finally {
+            $listener.Stop()
+        }
     }
-    catch {
-        throw "$Service port $Port is already in use. Stop the existing process and try again."
-    }
-    finally {
-        $listener.Stop()
-    }
+
+    throw "No available $Service port found between $PreferredPort and $($PreferredPort + 100)."
 }
 
 function Stop-ProcessTree([System.Diagnostics.Process]$Process) {
@@ -70,8 +78,8 @@ function Wait-HttpReady(
 
 Assert-CommandExists "dotnet"
 Assert-CommandExists "npm.cmd"
-Assert-PortAvailable $apiPort "API"
-Assert-PortAvailable $webPort "Frontend"
+$apiPort = Get-AvailablePort $ApiPort "API"
+$webPort = Get-AvailablePort $WebPort "Frontend"
 
 if (-not $SkipInstall -and -not (Test-Path (Join-Path $webPath "node_modules"))) {
     Write-Host "Installing frontend dependencies..." -ForegroundColor Cyan
@@ -82,12 +90,14 @@ if (-not $SkipInstall -and -not (Test-Path (Join-Path $webPath "node_modules")))
 }
 
 $previousWatchRestart = $env:DOTNET_WATCH_RESTART_ON_RUDE_EDIT
+$previousApiTarget = $env:VITE_API_TARGET
 $env:DOTNET_WATCH_RESTART_ON_RUDE_EDIT = "1"
+$env:VITE_API_TARGET = "http://127.0.0.1:$apiPort"
 
 try {
     Write-Host "Starting API hot reload: http://127.0.0.1:$apiPort" -ForegroundColor Cyan
     $apiProcess = Start-Process dotnet `
-        -ArgumentList @("watch", "run", "--launch-profile", "http") `
+        -ArgumentList @("watch", "run", "--launch-profile", "http", "--urls", "http://127.0.0.1:$apiPort") `
         -WorkingDirectory $apiPath `
         -NoNewWindow `
         -PassThru
@@ -119,4 +129,5 @@ finally {
     Stop-ProcessTree $webProcess
     Stop-ProcessTree $apiProcess
     $env:DOTNET_WATCH_RESTART_ON_RUDE_EDIT = $previousWatchRestart
+    $env:VITE_API_TARGET = $previousApiTarget
 }

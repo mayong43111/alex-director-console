@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import { ChevronRight, Save } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -6,6 +7,35 @@ export type WorkspaceTab = {
   label: string;
   to: string;
 };
+
+type WorkspaceHeaderTargets = {
+  breadcrumb: HTMLSpanElement | null;
+  actions: HTMLDivElement | null;
+};
+
+const WorkspaceHeaderTargetsContext = createContext<WorkspaceHeaderTargets>({
+  breadcrumb: null,
+  actions: null,
+});
+
+export function WorkspaceHeaderExtension({
+  label,
+  actions,
+}: {
+  label: ReactNode;
+  actions?: ReactNode;
+}) {
+  const targets = useContext(WorkspaceHeaderTargetsContext);
+  return (
+    <>
+      {targets.breadcrumb && createPortal(
+        <><ChevronRight size={13} /><span aria-current="page">{label}</span></>,
+        targets.breadcrumb,
+      )}
+      {targets.actions && actions && createPortal(actions, targets.actions)}
+    </>
+  );
+}
 
 type TitledWorkspaceLayoutProps = {
   title: string;
@@ -38,6 +68,8 @@ export function TitledWorkspaceLayout({
 }: TitledWorkspaceLayoutProps) {
   const frameRef = useRef<HTMLElement>(null);
   const [saveState, setSaveState] = useState<string | null>(null);
+  const [breadcrumbTarget, setBreadcrumbTarget] = useState<HTMLSpanElement | null>(null);
+  const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(null);
   const currentTab = tabs.find((tab) =>
     pathname === tab.to || pathname.startsWith(`${tab.to}/`));
 
@@ -81,6 +113,7 @@ export function TitledWorkspaceLayout({
   );
 
   return (
+    <WorkspaceHeaderTargetsContext.Provider value={{ breadcrumb: breadcrumbTarget, actions: actionsTarget }}>
     <section className="workspace-frame" ref={frameRef}>
       <header className={`workspace-header ${compact ? "compact" : ""}`}>
         <div className="workspace-title-row">
@@ -89,6 +122,7 @@ export function TitledWorkspaceLayout({
               <Link to={projectHome}>{projectName}</Link>
               <ChevronRight size={13} />
               <span aria-current="page">{currentTab?.label ?? title}</span>
+              <span className="workspace-route-extension" ref={setBreadcrumbTarget} />
             </nav>
             {!compact && <h1>{title}</h1>}
             {!compact && description && <p>{description}</p>}
@@ -97,6 +131,7 @@ export function TitledWorkspaceLayout({
           <div className="workspace-title-actions">
             {status && <div className="workspace-status">{status}</div>}
             {actions}
+            <div className="workspace-page-actions" ref={setActionsTarget} />
             {saveFormId && (
               <button
                 className="primary-button workspace-save-button"
@@ -117,5 +152,6 @@ export function TitledWorkspaceLayout({
         {children}
       </main>
     </section>
+    </WorkspaceHeaderTargetsContext.Provider>
   );
 }
