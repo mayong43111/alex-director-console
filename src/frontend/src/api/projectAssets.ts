@@ -13,6 +13,25 @@ export interface VisualReferenceImage {
   createdAtUtc: string
 }
 
+export interface VisualReferencePrompt {
+  assetId: string
+  subjectResourceId: string
+  subjectType: VisualAssetKind
+  subjectName: string
+  version: number
+  prompt: string
+  instruction: string | null
+  useCurrentReference: boolean
+  createdAtUtc: string
+}
+
+export interface BatchVisualReferenceResult {
+  generated: number
+  skipped: number
+  failed: number
+  errors: string[]
+}
+
 export interface VisualAsset {
   assetId: string
   resourceId: string
@@ -29,6 +48,7 @@ export interface VisualAsset {
   sourceAssetId: string | null
   updatedAtUtc: string
   referenceImage: VisualReferenceImage | null
+  referencePrompt: VisualReferencePrompt | null
 }
 
 export interface SaveVisualAssetInput {
@@ -150,14 +170,14 @@ export async function importStoryMaterialAssets(projectId: string): Promise<Visu
   return response.json() as Promise<VisualAsset[]>
 }
 
-export async function generateVisualReference(
+export async function generateVisualReferencePrompt(
   projectId: string,
   resourceId: string,
   instruction?: string,
   useCurrentReference = false,
-): Promise<VisualReferenceImage> {
+): Promise<VisualReferencePrompt> {
   const response = await fetch(
-    `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/generate`,
+    `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/prompt/generate`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -167,8 +187,51 @@ export async function generateVisualReference(
       }),
     },
   )
+  if (!response.ok) throw await readError(response, '提示词生成失败。')
+  return response.json() as Promise<VisualReferencePrompt>
+}
+
+export async function generateVisualReferenceImage(
+  projectId: string,
+  resourceId: string,
+): Promise<VisualReferenceImage> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/generate`,
+    { method: 'POST' },
+  )
   if (!response.ok) throw await readError(response, '参考图生成失败。')
   return response.json() as Promise<VisualReferenceImage>
+}
+
+export async function generateMissingVisualReferencePrompts(
+  projectId: string,
+  kind: VisualAssetKind,
+): Promise<BatchVisualReferenceResult> {
+  return generateMissingVisualReferences(projectId, kind, 'prompts')
+}
+
+export async function generateMissingVisualReferenceImages(
+  projectId: string,
+  kind: VisualAssetKind,
+): Promise<BatchVisualReferenceResult> {
+  return generateMissingVisualReferences(projectId, kind, 'images')
+}
+
+async function generateMissingVisualReferences(
+  projectId: string,
+  kind: VisualAssetKind,
+  target: 'prompts' | 'images',
+): Promise<BatchVisualReferenceResult> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/visual-assets/reference/${target}/generate-missing`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind }),
+    },
+  )
+  if (!response.ok) throw await readError(response, `批量生成${target === 'prompts' ? '提示词' : '图片'}失败。`)
+  return response.json() as Promise<BatchVisualReferenceResult>
 }
 
 export async function uploadVisualReference(

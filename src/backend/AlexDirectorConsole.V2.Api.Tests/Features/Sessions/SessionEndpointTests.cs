@@ -65,6 +65,55 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
         Assert.Equal(2, unchanged.Messages.Length);
     }
 
+    [Fact]
+    public async Task Clearing_messages_keeps_session_and_restarts_sequence()
+    {
+        using var client = factory.CreateClient();
+        const string scopeKey = "scope:clear";
+        var session = await SendAsync(client, scopeKey, null, "第一条");
+
+        var clearResponse = await client.DeleteAsync($"/api/v2/sessions/{session.Id}/messages");
+
+        Assert.Equal(HttpStatusCode.NoContent, clearResponse.StatusCode);
+        var cleared = await client.GetFromJsonAsync<SessionResponse>($"/api/v2/sessions/{session.Id}");
+        Assert.NotNull(cleared);
+        Assert.Empty(cleared.Messages);
+
+        var continued = await SendAsync(client, scopeKey, null, "重新开始");
+        Assert.Equal(session.Id, continued.Id);
+        Assert.Equal([1L, 2L], continued.Messages.Select(message => message.Sequence));
+        Assert.Contains("历史 0 条", continued.Messages[^1].Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Retrying_user_message_replaces_it_and_all_later_messages()
+    {
+        using var client = factory.CreateClient();
+        const string scopeKey = "scope:retry";
+        await SendAsync(client, scopeKey, null, "第一条");
+        var session = await SendAsync(client, scopeKey, null, "第二条");
+        var retriedMessage = session.Messages[2];
+        await SendAsync(client, scopeKey, null, "第三条");
+
+        var response = await client.PostAsJsonAsync(
+            $"/api/v2/sessions/{session.Id}/messages/{retriedMessage.Id}/retry",
+            new { page = "项目中心", episode = "未选择" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var retried = await response.Content.ReadFromJsonAsync<SessionResponse>();
+        Assert.NotNull(retried);
+        Assert.Equal(4, retried.Messages.Length);
+        Assert.Equal([1L, 2L, 3L, 4L], retried.Messages.Select(message => message.Sequence));
+        Assert.Equal("第二条", retried.Messages[2].Content);
+        Assert.NotEqual(retriedMessage.Id, retried.Messages[2].Id);
+        Assert.Contains("历史 2 条", retried.Messages[^1].Content, StringComparison.Ordinal);
+
+        var invalidResponse = await client.PostAsJsonAsync(
+            $"/api/v2/sessions/{session.Id}/messages/{retried.Messages[^1].Id}/retry",
+            new { page = "项目中心", episode = "未选择" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+    }
+
     private static async Task<SessionResponse> SendAsync(
         HttpClient client,
         string scopeKey,

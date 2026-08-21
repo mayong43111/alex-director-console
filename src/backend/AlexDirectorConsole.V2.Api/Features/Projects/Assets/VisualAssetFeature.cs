@@ -26,7 +26,8 @@ public sealed record VisualAssetView(
     string Status,
     Guid? SourceAssetId,
     DateTimeOffset UpdatedAtUtc,
-    VisualReferenceImageView? ReferenceImage = null);
+    VisualReferenceImageView? ReferenceImage = null,
+    VisualReferencePromptView? ReferencePrompt = null);
 
 public sealed record SaveVisualAssetRequest(
     string Kind,
@@ -95,11 +96,33 @@ public sealed class ListVisualAssetsQueryHandler(V2DbContext dbContext)
             query.ProjectId,
             current.Select(item => item.Asset.ResourceId).ToArray(),
             cancellationToken);
+        var prompts = await VisualReferenceQueries.GetLatestPromptsBySubjectAsync(
+            dbContext,
+            query.ProjectId,
+            current.Select(item => item.Asset.ResourceId).ToArray(),
+            cancellationToken);
         return current
-            .Select(item => VisualAssetMapper.ToView(
-                item.Asset,
-                item.State,
-                references.GetValueOrDefault(item.Asset.ResourceId)))
+            .Select(item =>
+            {
+                var reference = references.GetValueOrDefault(item.Asset.ResourceId);
+                var prompt = prompts.GetValueOrDefault(item.Asset.ResourceId)
+                    ?? (reference is null || string.IsNullOrWhiteSpace(reference.Prompt)
+                        ? null
+                        : new VisualReferencePromptView(
+                            reference.AssetId,
+                            reference.SubjectResourceId,
+                            reference.SubjectType,
+                            reference.SubjectName,
+                            reference.Version,
+                            reference.Prompt,
+                            null,
+                            false,
+                            reference.CreatedAtUtc));
+                return VisualAssetMapper.ToView(item.Asset, item.State, reference) with
+                {
+                    ReferencePrompt = prompt
+                };
+            })
             .Where(item => string.IsNullOrWhiteSpace(query.Kind) || item.Kind == query.Kind)
             .ToArray();
     }

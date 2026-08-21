@@ -214,6 +214,13 @@ public sealed record ConfirmAdaptationScriptCommand(
 public sealed record RegenerateProductionScriptCommand(Guid ProjectId, Guid ProductionEpisodeId)
     : ICommand<ProductionScriptPackageView?>;
 
+public sealed record UpdateProductionScriptSceneCommand(
+    Guid ProjectId,
+    Guid ProductionEpisodeId,
+    int SceneNumber,
+    ProductionScriptSceneDraft Scene)
+    : ICommand<ProductionScriptPackageView?>;
+
 public sealed record GetProductionScriptPackageQuery(Guid ProjectId, Guid ProductionEpisodeId)
     : IQuery<ProductionScriptPackageView?>;
 
@@ -1219,7 +1226,7 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
         throw new InvalidOperationException($"第 {outline.ProposalNumber} 集正式剧本生成失败。");
     }
 
-    private static ProductionScriptEpisodeDraft NormalizeProductionScript(
+    internal static ProductionScriptEpisodeDraft NormalizeProductionScript(
         AdaptationEpisodeDraft outline,
         ProductionScriptEpisodeDraft script)
     {
@@ -1248,7 +1255,11 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
             var normalizedShots = scene.ShotPlan!.Select((shot, shotIndex) => shot with
             {
                 ShotNumber = shotIndex + 1,
-                DurationSeconds = durations[durationIndex++]
+                DurationSeconds = durations[durationIndex++],
+                ShotSize = shot.ShotSize.Trim(),
+                CameraAngle = shot.CameraAngle.Trim(),
+                CameraMovement = shot.CameraMovement.Trim(),
+                Purpose = shot.Purpose.Trim()
             }).ToArray();
             var normalizedDialogues = (scene.Dialogues ?? [])
                 .Where(dialogue => !string.IsNullOrWhiteSpace(dialogue.Character))
@@ -1268,6 +1279,7 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
             return scene with
             {
                 SceneNumber = sceneIndex + 1,
+                Heading = scene.Heading.Trim(),
                 Summary = scene.Summary?.Trim() ?? string.Empty,
                 Action = scene.Action.Trim(),
                 Dialogues = normalizedDialogues,
@@ -1281,7 +1293,10 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                     .Where(item => item.Length > 0)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray(),
+                StoryFunction = scene.StoryFunction?.Trim() ?? string.Empty,
                 TargetSeconds = Math.Round(normalizedShots.Sum(shot => shot.DurationSeconds), 1),
+                Rhythm = scene.Rhythm.Trim(),
+                VisualContrast = scene.VisualContrast.Trim(),
                 ShotPlan = normalizedShots
             };
         }).ToArray();
@@ -1360,6 +1375,118 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
             units[index]++;
         }
         return units.Select(unit => unit / 10d).ToArray();
+    }
+}
+
+public sealed class UpdateProductionScriptSceneCommandHandler(
+    V2DbContext dbContext,
+    TimeProvider timeProvider)
+    : ICommandHandler<UpdateProductionScriptSceneCommand, ProductionScriptPackageView?>
+{
+    public async Task<ProductionScriptPackageView?> HandleAsync(
+        UpdateProductionScriptSceneCommand command,
+        CancellationToken cancellationToken)
+    {
+        var productionEpisode = await dbContext.ProductionEpisodes.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == command.ProductionEpisodeId && item.ProjectId == command.ProjectId,
+            cancellationToken);
+        if (productionEpisode is null) return null;
+
+        var current = await (
+            from state in dbContext.ResourceStates
+            join asset in dbContext.Assets on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == command.ProjectId
+                && state.ResourceType == "script-package"
+                && asset.ProductionEpisodeId == command.ProductionEpisodeId
+                && asset.Type == "script-package"
+            select new { Asset = asset, State = state })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (current?.Asset.DocumentJson is null) return null;
+
+        var packageDocument = JsonSerializer.Deserialize<ProductionScriptPackageDocument>(
+            current.Asset.DocumentJson,
+            ProjectSourceDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("正式剧本包内容无效。");
+        if (packageDocument.Script is null)
+            throw new InvalidOperationException("历史大纲不能直接编辑，请先重新生成正式剧本。");
+        if (!packageDocument.Script.Scenes.Any(scene => scene.SceneNumber == command.SceneNumber))
+            return null;
+
+        var editedScript = packageDocument.Script with
+        {
+            Scenes = packageDocument.Script.Scenes.Select(scene => scene.SceneNumber == command.SceneNumber
+                ? command.Scene with { SceneNumber = command.SceneNumber }
+                : scene).ToArray()
+        };
+        var outline = new AdaptationEpisodeDraft(
+            productionEpisode.EpisodeNumber,
+            editedScript.Title,
+            editedScript.Logline,
+            editedScript.TargetSeconds,
+            [],
+            [],
+            editedScript.SmallHooks,
+            editedScript.BigHooks);
+        var normalizedScript = ConfirmAdaptationScriptCommandHandler.NormalizeProductionScript(
+            outline,
+            editedScript);
+
+        var adaptationAsset = await dbContext.Assets.AsNoTracking().SingleOrDefaultAsync(
+            asset => asset.Id == packageDocument.AdaptationScriptAssetId
+                && asset.ProjectId == command.ProjectId
+                && asset.Type == AdaptationScriptQueries.AssetType,
+            cancellationToken)
+            ?? throw new InvalidOperationException("正式剧本关联的改编方案不存在。");
+        var now = timeProvider.GetUtcNow();
+        var documentJson = JsonSerializer.Serialize(
+            new ProductionScriptPackageDocument(
+                adaptationAsset.Id,
+                command.ProductionEpisodeId,
+                normalizedScript),
+            ProjectSourceDefaults.JsonOptions);
+        var editedAsset = new Asset
+        {
+            ProjectId = command.ProjectId,
+            ProductionEpisodeId = command.ProductionEpisodeId,
+            ResourceId = current.Asset.ResourceId,
+            Version = current.Asset.Version + 1,
+            Number = current.Asset.Number,
+            Type = "script-package",
+            Name = current.Asset.Name,
+            DocumentJson = documentJson,
+            ContentType = "application/json",
+            SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
+            GenerationMetadataJson = current.Asset.GenerationMetadataJson,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(editedAsset);
+        GenerateAdaptationScriptCommandHandler.AddDependency(
+            dbContext,
+            command.ProjectId,
+            editedAsset.Id,
+            adaptationAsset.Id,
+            "derived-from",
+            now);
+        current.State.CurrentAssetId = editedAsset.Id;
+        current.State.LifecycleStatus = "active";
+        current.State.UpdatedAtUtc = now;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return new ProductionScriptPackageView(
+            editedAsset.Id,
+            editedAsset.ResourceId,
+            editedAsset.Version,
+            AdaptationScriptQueries.ReadDocument(adaptationAsset).SourceResourceId,
+            command.ProductionEpisodeId,
+            productionEpisode.EpisodeNumber,
+            productionEpisode.Title,
+            productionEpisode.TargetSeconds,
+            productionEpisode.Status,
+            adaptationAsset.Id,
+            false,
+            normalizedScript,
+            now);
     }
 }
 
@@ -1935,6 +2062,32 @@ public static class AdaptationScriptEndpoints
                         statusCode: StatusCodes.Status502BadGateway);
                 }
             });
+        app.MapPut(
+            "/api/v2/projects/{projectId:guid}/production-episodes/{productionEpisodeId:guid}/script-package/scenes/{sceneNumber:int}",
+            async (
+                Guid projectId,
+                Guid productionEpisodeId,
+                int sceneNumber,
+                UpdateProductionScriptSceneRequest request,
+                ICommandDispatcher dispatcher,
+                CancellationToken cancellationToken) =>
+            {
+                try
+                {
+                    var package = await dispatcher.SendAsync(
+                        new UpdateProductionScriptSceneCommand(
+                            projectId,
+                            productionEpisodeId,
+                            sceneNumber,
+                            request.Scene),
+                        cancellationToken);
+                    return package is null ? Results.NotFound() : Results.Ok(package);
+                }
+                catch (InvalidOperationException error)
+                {
+                    return Results.BadRequest(new { error = error.Message });
+                }
+            });
         app.MapGet(route, async (
             Guid projectId,
             Guid sourceResourceId,
@@ -2176,6 +2329,9 @@ public static class AdaptationScriptEndpoints
         return app;
     }
 }
+
+public sealed record UpdateProductionScriptSceneRequest(
+    ProductionScriptSceneDraft Scene);
 
 public sealed record GenerateAdaptationScriptRequest(
     string? Mode,

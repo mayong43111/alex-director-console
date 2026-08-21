@@ -181,6 +181,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         configurationResponse.EnsureSuccessStatusCode();
         var route = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{shot.ResourceId}/video";
         const string videoInstruction = "动作节奏更克制，保持固定机位";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync($"{route}/generate", null)).StatusCode);
         var previewResponse = await client.PostAsync($"{route}/preview?instruction={Uri.EscapeDataString(videoInstruction)}", null);
         previewResponse.EnsureSuccessStatusCode();
         var preview = await previewResponse.Content.ReadFromJsonAsync<ShotVideoPreview>();
@@ -190,9 +191,19 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(24, preview.Fps);
         Assert.Contains(videoInstruction, preview.Prompt);
 
-        var startResponse = await client.PostAsJsonAsync(
-            $"{route}/start",
-            new { confirmedPrompt = preview.Prompt, previewHash = preview.PreviewHash, instruction = videoInstruction });
+        var promptResponse = await client.PostAsJsonAsync(
+            $"{route}/prompt",
+            new { instruction = videoInstruction });
+        promptResponse.EnsureSuccessStatusCode();
+        var savedPrompt = await promptResponse.Content.ReadFromJsonAsync<StoryboardMediaPromptView>();
+        Assert.NotNull(savedPrompt);
+        Assert.Equal(preview.Prompt, savedPrompt.Prompt);
+        Assert.Equal(preview.PreviewHash, savedPrompt.PreviewHash);
+        var storyboardWithPrompt = await client.GetFromJsonAsync<StoryboardView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
+        Assert.Equal(savedPrompt.AssetId, storyboardWithPrompt?.Shots.Single(item => item.ResourceId == shot.ResourceId).VideoPrompt?.AssetId);
+
+        var startResponse = await client.PostAsync($"{route}/generate", null);
         Assert.Equal(HttpStatusCode.Accepted, startResponse.StatusCode);
         var started = await startResponse.Content.ReadFromJsonAsync<ShotVideoProductionView>();
         Assert.NotNull(started);
@@ -219,6 +230,19 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.NotNull(comfyUi.LastSubmission);
         Assert.Null(comfyUi.LastSubmission.LastFrame);
         Assert.Equal((864, 480), (comfyUi.LastSubmission.Width, comfyUi.LastSubmission.Height));
+
+        var batchPrompts = await (await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/video-prompts",
+            null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.NotNull(batchPrompts);
+        Assert.Equal(1, batchPrompts.Skipped);
+        Assert.Equal(1, batchPrompts.Failed);
+        var batchVideos = await (await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/videos",
+            null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.NotNull(batchVideos);
+        Assert.Equal(1, batchVideos.Skipped);
+        Assert.Equal(1, batchVideos.Failed);
 
         var modeResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{shot.ResourceId}/mode",
@@ -617,6 +641,8 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         }
 
         const string imageInstruction = "人物表情更克制，晨光更柔和";
+        var directRoute = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/image";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync($"{directRoute}/generate", null)).StatusCode);
         var directPreviewResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/preview?instruction={Uri.EscapeDataString(imageInstruction)}",
             null);
@@ -626,9 +652,17 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(ShotProductionModes.DirectFirstFrame, directPreview.Parameters.ProductionMode);
         Assert.Contains(imageInstruction, directPreview.Prompt);
         Assert.All(directPreview.References, reference => Assert.True(reference.Version > 0));
-        var directResponse = await client.PostAsJsonAsync(
-            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/start",
-            new { confirmedPrompt = directPreview.Prompt, instruction = imageInstruction });
+        var directPromptResponse = await client.PostAsJsonAsync(
+            $"{directRoute}/prompt",
+            new { instruction = imageInstruction });
+        directPromptResponse.EnsureSuccessStatusCode();
+        var directPrompt = await directPromptResponse.Content.ReadFromJsonAsync<StoryboardMediaPromptView>();
+        Assert.NotNull(directPrompt);
+        Assert.Equal(directPreview.Prompt, directPrompt.Prompt);
+        var storyboardWithImagePrompt = await client.GetFromJsonAsync<StoryboardView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
+        Assert.Equal(directPrompt.AssetId, storyboardWithImagePrompt?.Shots.Single(item => item.ResourceId == firstShot.ResourceId).ImagePrompt?.AssetId);
+        var directResponse = await client.PostAsync($"{directRoute}/generate", null);
         directResponse.EnsureSuccessStatusCode();
         var directProduction = await directResponse.Content.ReadFromJsonAsync<ShotProductionView>();
         Assert.NotNull(directProduction);
@@ -649,9 +683,10 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(ShotProductionModes.FirstLastContinuous, continuousPreview.Parameters.ProductionMode);
         Assert.Contains("small: 推荐信不翼而飞", continuousPreview.Prompt);
         Assert.Contains("big: 幕后势力首次现身", continuousPreview.Prompt);
-        var continuousResponse = await client.PostAsJsonAsync(
-            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{secondShot.ResourceId}/production/start",
-            new { confirmedPrompt = continuousPreview.Prompt });
+        var continuousRoute = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{secondShot.ResourceId}/image";
+        var continuousPromptResponse = await client.PostAsJsonAsync($"{continuousRoute}/prompt", new { instruction = (string?)null });
+        continuousPromptResponse.EnsureSuccessStatusCode();
+        var continuousResponse = await client.PostAsync($"{continuousRoute}/generate", null);
         Assert.True(continuousResponse.IsSuccessStatusCode, await continuousResponse.Content.ReadAsStringAsync());
         var continuousProduction = await continuousResponse.Content.ReadFromJsonAsync<ShotProductionView>();
         Assert.NotNull(continuousProduction);
@@ -672,6 +707,17 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(continuousProduction.OutputAssetId, generatedFirstFrameReference.AssetId);
         var lastFrameBytes = await client.GetByteArrayAsync(continuousProduction.LastFrameUrl);
         Assert.Equal([0x89, 0x50, 0x4e, 0x47], lastFrameBytes[..4]);
+
+        var imagePromptBatch = await (await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/image-prompts",
+            null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.NotNull(imagePromptBatch);
+        Assert.Equal((0, 2, 0), (imagePromptBatch.Generated, imagePromptBatch.Skipped, imagePromptBatch.Failed));
+        var imageBatch = await (await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/images",
+            null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.NotNull(imageBatch);
+        Assert.Equal((0, 2, 0), (imageBatch.Generated, imageBatch.Skipped, imageBatch.Failed));
 
         var repeatPreviewResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{secondShot.ResourceId}/production/preview",
@@ -843,13 +889,13 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             cancelledRun.Id,
             directPreview.Prompt,
             CancellationToken.None));
-        Assert.Equal("running", cancelledRun.Status);
-        Assert.Equal("running", cancelledItem.Status);
-        Assert.Null(cancelledRun.LastError);
-        Assert.Null(cancelledRun.CompletedAtUtc);
-        Assert.Null(cancelledItem.ErrorCode);
-        Assert.Null(cancelledItem.ErrorDetail);
-        Assert.Null(cancelledItem.CompletedAtUtc);
+        Assert.Equal("failed", cancelledRun.Status);
+        Assert.Equal("failed", cancelledItem.Status);
+        Assert.Equal("The operation was canceled.", cancelledRun.LastError);
+        Assert.NotNull(cancelledRun.CompletedAtUtc);
+        Assert.Equal(nameof(OperationCanceledException), cancelledItem.ErrorCode);
+        Assert.Equal("The operation was canceled.", cancelledItem.ErrorDetail);
+        Assert.NotNull(cancelledItem.CompletedAtUtc);
     }
 
     private static (ProductionRun Run, ProductionRunItem Item) CloneFirstFrameRun(

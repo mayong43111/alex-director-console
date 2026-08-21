@@ -12,6 +12,8 @@ public sealed record SendSessionMessageRequest(
     string? Page,
     string? Episode);
 
+public sealed record RetrySessionMessageRequest(string? Page, string? Episode);
+
 public static class SessionEndpoints
 {
     public static IEndpointRouteBuilder MapSessions(this IEndpointRouteBuilder app)
@@ -74,13 +76,39 @@ public static class SessionEndpoints
             };
         });
 
+        group.MapPost("/{sessionId:guid}/messages/{messageId:guid}/retry", async (
+            Guid sessionId,
+            Guid messageId,
+            RetrySessionMessageRequest request,
+            ICommandDispatcher commandDispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await commandDispatcher.SendAsync(
+                new RetrySessionMessageCommand(
+                    sessionId,
+                    messageId,
+                    request.Page,
+                    request.Episode),
+                cancellationToken);
+            return result.Status switch
+            {
+                SendSessionMessageStatus.Success => Results.Ok(result.Session),
+                SendSessionMessageStatus.AgentNotFound or
+                    SendSessionMessageStatus.ProjectNotFound or
+                    SendSessionMessageStatus.SessionNotFound => Results.NotFound(),
+                SendSessionMessageStatus.Invalid => Results.BadRequest(new { error = result.Error }),
+                SendSessionMessageStatus.NotConfigured => Results.Conflict(new { error = result.Error }),
+                _ => Results.Problem(result.Error, statusCode: StatusCodes.Status502BadGateway)
+            };
+        });
+
         group.MapDelete("/{sessionId:guid}/messages", async (
             Guid sessionId,
             ICommandDispatcher commandDispatcher,
             CancellationToken cancellationToken) =>
         {
             var deleted = await commandDispatcher.SendAsync(
-                new ResetSessionCommand(sessionId),
+                new ClearSessionMessagesCommand(sessionId),
                 cancellationToken);
             return deleted ? Results.NoContent() : Results.NotFound();
         });

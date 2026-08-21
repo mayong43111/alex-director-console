@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
@@ -21,9 +22,28 @@ public sealed record VisualReferenceImageView(
     string? RevisedPrompt,
     DateTimeOffset CreatedAtUtc);
 
+public sealed record VisualReferencePromptView(
+    Guid AssetId,
+    Guid SubjectResourceId,
+    string SubjectType,
+    string SubjectName,
+    int Version,
+    string Prompt,
+    string? Instruction,
+    bool UseCurrentReference,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record BatchVisualReferenceResult(
+    int Generated,
+    int Skipped,
+    int Failed,
+    IReadOnlyList<string> Errors);
+
 public sealed record GenerateVisualReferenceRequest(
     string? Instruction,
     bool UseCurrentReference = false);
+
+public sealed record BatchVisualReferenceRequest(string Kind);
 
 internal static class VisualReferenceQueries
 {
@@ -71,15 +91,65 @@ internal static class VisualReferenceQueries
                             : latest.Image.Name);
                 });
     }
+
+    public static async Task<IReadOnlyDictionary<Guid, VisualReferencePromptView>> GetLatestPromptsBySubjectAsync(
+        V2DbContext dbContext,
+        Guid projectId,
+        IReadOnlyList<Guid> subjectResourceIds,
+        CancellationToken cancellationToken)
+    {
+        if (subjectResourceIds.Count == 0)
+            return new Dictionary<Guid, VisualReferencePromptView>();
+        var rows = await (
+            from reference in dbContext.VisualReferences.AsNoTracking()
+            join prompt in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals prompt.Id
+            join state in dbContext.ResourceStates.AsNoTracking() on prompt.ResourceId equals state.ResourceId
+            where reference.ProjectId == projectId
+                && subjectResourceIds.Contains(reference.SubjectResourceId)
+                && reference.Purpose == VisualReferenceService.PromptPurpose
+                && prompt.Type == VisualReferenceService.PromptAssetType
+                && state.ProjectId == projectId
+                && state.ResourceType == VisualReferenceService.PromptAssetType
+                && state.CurrentAssetId == prompt.Id
+            orderby prompt.Version descending
+            select new { Reference = reference, Prompt = prompt })
+            .ToListAsync(cancellationToken);
+        return rows
+            .GroupBy(item => item.Reference.SubjectResourceId)
+            .ToDictionary(
+                group => group.Key,
+                group => VisualReferenceService.ToPromptView(
+                    group.First().Prompt,
+                    group.Key,
+                    group.First().Reference.SubjectType,
+                    group.First().Prompt.Name.EndsWith("提示词", StringComparison.Ordinal)
+                        ? group.First().Prompt.Name[..^3]
+                        : group.First().Prompt.Name));
+    }
 }
 
 public interface IVisualReferenceService
 {
-    Task<VisualReferenceImageView> GenerateAsync(
+    Task<VisualReferencePromptView> GeneratePromptAsync(
         Guid projectId,
         Guid subjectResourceId,
         string? instruction,
         bool useCurrentReference,
+        CancellationToken cancellationToken);
+
+    Task<VisualReferenceImageView> GenerateImageAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        CancellationToken cancellationToken);
+
+    Task<BatchVisualReferenceResult> GenerateMissingPromptsAsync(
+        Guid projectId,
+        string kind,
+        CancellationToken cancellationToken);
+
+    Task<BatchVisualReferenceResult> GenerateMissingImagesAsync(
+        Guid projectId,
+        string kind,
         CancellationToken cancellationToken);
 
     Task<VisualReferenceImageView> UploadAsync(
@@ -98,12 +168,22 @@ public sealed class VisualReferenceService(
     TimeProvider timeProvider) : IVisualReferenceService
 {
     public const string AssetType = "visual-reference-image";
+    public const string PromptAssetType = "visual-reference-prompt";
     public const string Purpose = "generation-reference";
+    public const string PromptPurpose = "generation-prompt";
     public const long MaxUploadBytes = 10 * 1024 * 1024;
     private static readonly HashSet<string> UploadContentTypes =
         ["image/png", "image/jpeg", "image/webp"];
 
-    public async Task<VisualReferenceImageView> GenerateAsync(
+    private sealed record PromptDocument(
+        string Prompt,
+        string? Instruction,
+        bool UseCurrentReference,
+        Guid SubjectAssetId,
+        Guid SettingsAssetId,
+        Guid? BasedOnReferenceAssetId);
+
+    public async Task<VisualReferencePromptView> GeneratePromptAsync(
         Guid projectId,
         Guid subjectResourceId,
         string? instruction,
@@ -113,21 +193,10 @@ public sealed class VisualReferenceService(
         instruction = instruction?.Trim();
         if (instruction?.Length > 2000)
             throw new InvalidOperationException("本轮修改意见不能超过 2000 个字符。");
-        var subject = await (
-            from state in dbContext.ResourceStates.AsNoTracking()
-            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
-            where state.ProjectId == projectId
-                && state.ResourceId == subjectResourceId
-                && state.ResourceType == VisualAssetDefaults.AssetType
-                && state.LifecycleStatus != "retired"
-            select asset)
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw new KeyNotFoundException("视觉资产不存在或已退休。");
+        var subject = await GetSubjectAsync(projectId, subjectResourceId, cancellationToken);
         var document = VisualAssetMapper.ReadDocument(subject);
         if (document.Kind is not ("character" or "scene" or "prop"))
-        {
             throw new InvalidOperationException("不支持该类型的设定图生成。");
-        }
 
         var project = await dbContext.Projects.AsNoTracking()
             .SingleAsync(item => item.Id == projectId, cancellationToken);
@@ -143,27 +212,176 @@ public sealed class VisualReferenceService(
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
 
         var prompt = BuildPrompt(settings, document, instruction);
+        var currentReference = useCurrentReference
+            ? (await GetCurrentReferenceAssetAsync(
+                projectId,
+                subjectResourceId,
+                AssetType,
+                Purpose,
+                cancellationToken)
+                ?? throw new InvalidOperationException("当前资产还没有可用于修改的参考图。"))
+            : null;
+        var previous = await GetLatestReferenceAssetAsync(
+            projectId,
+            subjectResourceId,
+            PromptAssetType,
+            PromptPurpose,
+            cancellationToken);
+        var resourceId = previous?.ResourceId ?? Guid.NewGuid();
+        var version = (previous?.Version ?? 0) + 1;
+        var number = previous?.Number
+            ?? (await dbContext.Assets
+                .Where(item => item.ProjectId == projectId)
+                .Select(item => (int?)item.Number)
+                .MaxAsync(cancellationToken) ?? 0) + 1;
+        var now = timeProvider.GetUtcNow();
+        var promptDocument = new PromptDocument(
+            prompt,
+            instruction,
+            useCurrentReference,
+            subject.Id,
+            settingsAsset.Id,
+            currentReference?.Id);
+        var documentJson = JsonSerializer.Serialize(promptDocument, VisualAssetDefaults.JsonOptions);
+        var promptAsset = new Asset
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            Version = version,
+            Number = number,
+            Type = PromptAssetType,
+            Name = $"{document.Name}提示词",
+            DocumentJson = documentJson,
+            ContentType = "application/json",
+            SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
+            GenerationMetadataJson = JsonSerializer.Serialize(new
+            {
+                operation = "generate-visual-reference-prompt",
+                subjectAssetId = subject.Id,
+                subjectResourceId,
+                subjectType = document.Kind,
+                settingsAssetId,
+                prompt,
+                instruction,
+                useCurrentReference,
+                basedOnReferenceAssetId = currentReference?.Id,
+                references = new[]
+                    {
+                        GenerationProvenance.Reference(subject, "reference-for"),
+                        GenerationProvenance.Reference(settingsAsset, "uses-settings")
+                    }
+                    .Concat(currentReference is null
+                        ? []
+                        : [GenerationProvenance.Reference(currentReference, "uses-current-reference")]),
+                projectStyle = new
+                {
+                    settings.VisualStyle,
+                    settings.ArtDirection,
+                    settings.CharacterDesign,
+                    settings.ColorPalette,
+                    settings.ImagePromptPrefix
+                }
+            }, VisualAssetDefaults.JsonOptions),
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(promptAsset);
+        var referenceState = await dbContext.ResourceStates.SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == resourceId
+                && item.ResourceType == PromptAssetType,
+            cancellationToken);
+        referenceState ??= new ResourceState
+        {
+            ProjectId = projectId,
+            ResourceId = resourceId,
+            ResourceType = PromptAssetType
+        };
+        if (referenceState.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(referenceState);
+        referenceState.CurrentAssetId = promptAsset.Id;
+        referenceState.LifecycleStatus = "active";
+        referenceState.UpdatedAtUtc = now;
+        dbContext.VisualReferences.Add(new VisualReference
+        {
+            ProjectId = projectId,
+            ImageAssetId = promptAsset.Id,
+            SubjectResourceId = subjectResourceId,
+            SubjectType = document.Kind,
+            Purpose = PromptPurpose,
+            Source = "prompt-builder",
+            ReviewStatus = "active",
+            InheritsFromAssetId = previous?.Id,
+            CreatedAtUtc = now
+        });
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = projectId,
+            ConsumerAssetId = promptAsset.Id,
+            SourceAssetId = subject.Id,
+            Role = "reference-for",
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
+        dbContext.AssetDependencies.Add(new AssetDependency
+        {
+            ProjectId = projectId,
+            ConsumerAssetId = promptAsset.Id,
+            SourceAssetId = settingsAsset.Id,
+            Role = "uses-settings",
+            IsRequired = true,
+            CreatedAtUtc = now
+        });
+        if (currentReference is not null)
+        {
+            dbContext.AssetDependencies.Add(new AssetDependency
+            {
+                ProjectId = projectId,
+                ConsumerAssetId = promptAsset.Id,
+                SourceAssetId = currentReference.Id,
+                Role = "uses-current-reference",
+                IsRequired = true,
+                CreatedAtUtc = now
+            });
+        }
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return ToPromptView(promptAsset, subjectResourceId, document.Kind, document.Name);
+    }
+
+    public async Task<VisualReferenceImageView> GenerateImageAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        CancellationToken cancellationToken)
+    {
+        var subject = await GetSubjectAsync(projectId, subjectResourceId, cancellationToken);
+        var document = VisualAssetMapper.ReadDocument(subject);
+        var promptAsset = await GetCurrentReferenceAssetAsync(
+            projectId,
+            subjectResourceId,
+            PromptAssetType,
+            PromptPurpose,
+            cancellationToken);
+        PromptDocument? promptDocument = promptAsset is null ? null : ReadPromptDocument(promptAsset);
+        var previous = await GetLatestReferenceAssetAsync(
+            projectId,
+            subjectResourceId,
+            AssetType,
+            Purpose,
+            cancellationToken);
+        var prompt = promptDocument?.Prompt;
+        if (string.IsNullOrWhiteSpace(prompt) && previous is not null)
+            prompt = ReadPrompts(previous.GenerationMetadataJson).Prompt;
+        if (string.IsNullOrWhiteSpace(prompt))
+            throw new InvalidOperationException("请先生成提示词，再生成设定图。");
+
         const int referenceSize = 1024;
         const string modelSize = "1024x1024";
         Asset? currentReference = null;
         GeneratedProjectCover generated;
-        if (useCurrentReference)
+        if (promptDocument?.UseCurrentReference == true)
         {
-            currentReference = await (
-                from reference in dbContext.VisualReferences.AsNoTracking()
-                join referenceAsset in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals referenceAsset.Id
-                join resourceState in dbContext.ResourceStates.AsNoTracking() on referenceAsset.ResourceId equals resourceState.ResourceId
-                where reference.ProjectId == projectId
-                    && reference.SubjectResourceId == subjectResourceId
-                    && reference.Purpose == Purpose
-                    && referenceAsset.Type == AssetType
-                    && referenceAsset.BlobContent != null
-                    && resourceState.ProjectId == projectId
-                    && resourceState.ResourceType == AssetType
-                    && resourceState.CurrentAssetId == referenceAsset.Id
-                select referenceAsset)
-                .SingleOrDefaultAsync(cancellationToken)
-                ?? throw new InvalidOperationException("当前资产还没有可用于修改的参考图。");
+            currentReference = previous?.BlobContent is not null
+                ? previous
+                : throw new InvalidOperationException("当前资产还没有可用于修改的参考图。");
             var edited = await referenceEditor.GenerateAsync(
                 prompt,
                 modelSize,
@@ -190,31 +408,16 @@ public sealed class VisualReferenceService(
             generated = await generator.GenerateAsync(prompt, modelSize, cancellationToken);
         }
         if (generated.Bytes.Length == 0)
-        {
             throw new InvalidOperationException("图片模型返回了空文件。");
-        }
         var output = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
             generated.Bytes,
             referenceSize,
             referenceSize);
-
-        var previous = await (
-            from reference in dbContext.VisualReferences.AsNoTracking()
-            join referenceImage in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals referenceImage.Id
-            where reference.ProjectId == projectId
-                && reference.SubjectResourceId == subjectResourceId
-                && reference.Purpose == Purpose
-                && referenceImage.Type == AssetType
-            orderby referenceImage.Version descending
-            select referenceImage)
-            .FirstOrDefaultAsync(cancellationToken);
         var resourceId = previous?.ResourceId ?? Guid.NewGuid();
         var version = (previous?.Version ?? 0) + 1;
         var number = previous?.Number
-            ?? (await dbContext.Assets
-                .Where(item => item.ProjectId == projectId)
-                .Select(item => (int?)item.Number)
-                .MaxAsync(cancellationToken) ?? 0) + 1;
+            ?? (await dbContext.Assets.Where(item => item.ProjectId == projectId)
+                .Select(item => (int?)item.Number).MaxAsync(cancellationToken) ?? 0) + 1;
         var now = timeProvider.GetUtcNow();
         var image = new Asset
         {
@@ -231,16 +434,14 @@ public sealed class VisualReferenceService(
             SizeBytes = output.Bytes.LongLength,
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
-                operation = "generate-visual-reference",
+                operation = "generate-visual-reference-image",
                 subjectAssetId = subject.Id,
                 subjectResourceId,
                 subjectType = document.Kind,
-                settingsAssetId,
-                deployment = generated.Deployment,
-                quality = generated.Quality,
+                promptAssetId = promptAsset?.Id,
                 prompt,
-                instruction,
-                useCurrentReference,
+                instruction = promptDocument?.Instruction,
+                useCurrentReference = promptDocument?.UseCurrentReference ?? false,
                 basedOnReferenceAssetId = currentReference?.Id,
                 parameters = new
                 {
@@ -250,22 +451,6 @@ public sealed class VisualReferenceService(
                     outputFormat = "png",
                     outputWidth = referenceSize,
                     outputHeight = referenceSize
-                },
-                references = new[]
-                    {
-                        GenerationProvenance.Reference(subject, "reference-for"),
-                        GenerationProvenance.Reference(settingsAsset, "uses-settings")
-                    }
-                    .Concat(currentReference is null
-                        ? []
-                        : [GenerationProvenance.Reference(currentReference, "uses-current-reference")]),
-                projectStyle = new
-                {
-                    settings.VisualStyle,
-                    settings.ArtDirection,
-                    settings.CharacterDesign,
-                    settings.ColorPalette,
-                    settings.ImagePromptPrefix
                 },
                 modelSize,
                 sourceWidth = output.SourceWidth,
@@ -278,21 +463,21 @@ public sealed class VisualReferenceService(
             UpdatedAtUtc = now
         };
         dbContext.Assets.Add(image);
-        var referenceState = await dbContext.ResourceStates.SingleOrDefaultAsync(
+        var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
             item => item.ProjectId == projectId
                 && item.ResourceId == resourceId
                 && item.ResourceType == AssetType,
             cancellationToken);
-        referenceState ??= new ResourceState
+        state ??= new ResourceState
         {
             ProjectId = projectId,
             ResourceId = resourceId,
             ResourceType = AssetType
         };
-        if (referenceState.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(referenceState);
-        referenceState.CurrentAssetId = image.Id;
-        referenceState.LifecycleStatus = "active";
-        referenceState.UpdatedAtUtc = now;
+        if (state.CurrentAssetId == Guid.Empty) dbContext.ResourceStates.Add(state);
+        state.CurrentAssetId = image.Id;
+        state.LifecycleStatus = "active";
+        state.UpdatedAtUtc = now;
         dbContext.VisualReferences.Add(new VisualReference
         {
             ProjectId = projectId,
@@ -305,32 +490,19 @@ public sealed class VisualReferenceService(
             InheritsFromAssetId = previous?.Id,
             CreatedAtUtc = now
         });
-        dbContext.AssetDependencies.Add(new AssetDependency
+        foreach (var dependency in new[]
         {
-            ProjectId = projectId,
-            ConsumerAssetId = image.Id,
-            SourceAssetId = subject.Id,
-            Role = "reference-for",
-            IsRequired = true,
-            CreatedAtUtc = now
-        });
-        dbContext.AssetDependencies.Add(new AssetDependency
-        {
-            ProjectId = projectId,
-            ConsumerAssetId = image.Id,
-            SourceAssetId = settingsAsset.Id,
-            Role = "uses-settings",
-            IsRequired = true,
-            CreatedAtUtc = now
-        });
-        if (currentReference is not null)
+            (AssetId: subject.Id, Role: "reference-for"),
+            (AssetId: promptAsset?.Id, Role: "uses-prompt"),
+            (AssetId: currentReference?.Id, Role: "uses-current-reference")
+        }.Where(item => item.AssetId is not null))
         {
             dbContext.AssetDependencies.Add(new AssetDependency
             {
                 ProjectId = projectId,
                 ConsumerAssetId = image.Id,
-                SourceAssetId = currentReference.Id,
-                Role = "uses-current-reference",
+                SourceAssetId = dependency.AssetId!.Value,
+                Role = dependency.Role,
                 IsRequired = true,
                 CreatedAtUtc = now
             });
@@ -338,6 +510,36 @@ public sealed class VisualReferenceService(
         await dbContext.SaveChangesAsync(cancellationToken);
         return ToView(image, subjectResourceId, document.Kind, document.Name);
     }
+
+    public Task<BatchVisualReferenceResult> GenerateMissingPromptsAsync(
+        Guid projectId,
+        string kind,
+        CancellationToken cancellationToken) => RunBatchAsync(
+            projectId,
+            kind,
+            async subjectResourceId =>
+            {
+                if (await HasPromptAsync(projectId, subjectResourceId, cancellationToken)) return false;
+                await GeneratePromptAsync(projectId, subjectResourceId, null, false, cancellationToken);
+                return true;
+            },
+            cancellationToken);
+
+    public Task<BatchVisualReferenceResult> GenerateMissingImagesAsync(
+        Guid projectId,
+        string kind,
+        CancellationToken cancellationToken) => RunBatchAsync(
+            projectId,
+            kind,
+            async subjectResourceId =>
+            {
+                if (await GetCurrentReferenceAssetAsync(
+                    projectId, subjectResourceId, AssetType, Purpose, cancellationToken) is not null)
+                    return false;
+                await GenerateImageAsync(projectId, subjectResourceId, cancellationToken);
+                return true;
+            },
+            cancellationToken);
 
     public async Task<VisualReferenceImageView> UploadAsync(
         Guid projectId,
@@ -454,6 +656,146 @@ public sealed class VisualReferenceService(
         return ToView(image, subjectResourceId, document.Kind, document.Name);
     }
 
+    private async Task<Asset> GetSubjectAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        CancellationToken cancellationToken) => await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == projectId
+                && state.ResourceId == subjectResourceId
+                && state.ResourceType == VisualAssetDefaults.AssetType
+                && state.LifecycleStatus != "retired"
+            select asset)
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new KeyNotFoundException("视觉资产不存在或已退休。");
+
+    private async Task<Asset?> GetCurrentReferenceAssetAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        string assetType,
+        string purpose,
+        CancellationToken cancellationToken) => await (
+            from reference in dbContext.VisualReferences.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals asset.Id
+            join state in dbContext.ResourceStates.AsNoTracking() on asset.ResourceId equals state.ResourceId
+            where reference.ProjectId == projectId
+                && reference.SubjectResourceId == subjectResourceId
+                && reference.Purpose == purpose
+                && asset.Type == assetType
+                && state.ProjectId == projectId
+                && state.ResourceType == assetType
+                && state.CurrentAssetId == asset.Id
+            select asset)
+            .SingleOrDefaultAsync(cancellationToken);
+
+    private async Task<Asset?> GetLatestReferenceAssetAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        string assetType,
+        string purpose,
+        CancellationToken cancellationToken) => await (
+            from reference in dbContext.VisualReferences.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals asset.Id
+            where reference.ProjectId == projectId
+                && reference.SubjectResourceId == subjectResourceId
+                && reference.Purpose == purpose
+                && asset.Type == assetType
+            orderby asset.Version descending
+            select asset)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    private async Task<bool> HasPromptAsync(
+        Guid projectId,
+        Guid subjectResourceId,
+        CancellationToken cancellationToken)
+    {
+        if (await GetCurrentReferenceAssetAsync(
+            projectId,
+            subjectResourceId,
+            PromptAssetType,
+            PromptPurpose,
+            cancellationToken) is not null)
+            return true;
+        var image = await GetCurrentReferenceAssetAsync(
+            projectId,
+            subjectResourceId,
+            AssetType,
+            Purpose,
+            cancellationToken);
+        return image is not null && !string.IsNullOrWhiteSpace(ReadPrompts(image.GenerationMetadataJson).Prompt);
+    }
+
+    private async Task<BatchVisualReferenceResult> RunBatchAsync(
+        Guid projectId,
+        string kind,
+        Func<Guid, Task<bool>> operation,
+        CancellationToken cancellationToken)
+    {
+        kind = kind.Trim().ToLowerInvariant();
+        if (kind is not ("character" or "scene" or "prop"))
+            throw new InvalidOperationException("批量生成仅支持人物、场景或道具资产。");
+        var assets = await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == projectId
+                && state.ResourceType == VisualAssetDefaults.AssetType
+                && state.LifecycleStatus != "retired"
+                && asset.Type == VisualAssetDefaults.AssetType
+            orderby asset.Number
+            select asset)
+            .ToListAsync(cancellationToken);
+        var subjects = assets
+            .Select(asset => (Asset: asset, Document: VisualAssetMapper.ReadDocument(asset)))
+            .Where(item => item.Document.Kind == kind)
+            .ToArray();
+        var generated = 0;
+        var skipped = 0;
+        var errors = new List<string>();
+        foreach (var subject in subjects)
+        {
+            try
+            {
+                if (await operation(subject.Asset.ResourceId)) generated++;
+                else skipped++;
+            }
+            catch (Exception error) when (error is InvalidOperationException or HttpRequestException)
+            {
+                errors.Add($"{subject.Document.Name}: {error.Message}");
+            }
+            catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+            {
+                errors.Add($"{subject.Document.Name}: 图片生成请求超时。{error.Message}");
+            }
+        }
+        return new(generated, skipped, errors.Count, errors);
+    }
+
+    public static VisualReferencePromptView ToPromptView(
+        Asset promptAsset,
+        Guid subjectResourceId,
+        string subjectType,
+        string subjectName)
+    {
+        var document = ReadPromptDocument(promptAsset);
+        return new(
+            promptAsset.Id,
+            subjectResourceId,
+            subjectType,
+            subjectName,
+            promptAsset.Version,
+            document.Prompt,
+            document.Instruction,
+            document.UseCurrentReference,
+            promptAsset.CreatedAtUtc);
+    }
+
+    private static PromptDocument ReadPromptDocument(Asset promptAsset) =>
+        JsonSerializer.Deserialize<PromptDocument>(
+            promptAsset.DocumentJson ?? "{}",
+            VisualAssetDefaults.JsonOptions)
+        ?? throw new InvalidOperationException("设定图提示词内容无效。");
+
     public static VisualReferenceImageView ToView(
         Asset image,
         Guid subjectResourceId,
@@ -527,7 +869,7 @@ public static class VisualReferenceEndpoints
 {
     public static RouteGroupBuilder MapVisualReferenceEndpoints(this RouteGroupBuilder group)
     {
-        group.MapPost("/{resourceId:guid}/reference/generate", async (
+        group.MapPost("/{resourceId:guid}/reference/prompt/generate", async (
             Guid projectId,
             Guid resourceId,
             GenerateVisualReferenceRequest? request,
@@ -536,7 +878,7 @@ public static class VisualReferenceEndpoints
         {
             try
             {
-                return Results.Ok(await service.GenerateAsync(
+                return Results.Ok(await service.GeneratePromptAsync(
                     projectId,
                     resourceId,
                     request?.Instruction,
@@ -547,14 +889,31 @@ public static class VisualReferenceEndpoints
             {
                 return Results.NotFound();
             }
-            catch (ProjectGenerationConfigurationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
             catch (InvalidOperationException error)
             {
                 return Results.BadRequest(new { error = error.Message });
             }
+        });
+
+        group.MapPost("/{resourceId:guid}/reference/generate", async (
+            Guid projectId,
+            Guid resourceId,
+            IVisualReferenceService service,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await service.GenerateImageAsync(
+                    projectId,
+                    resourceId,
+                    cancellationToken));
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (ProjectGenerationConfigurationException error)
+            {
+                return Results.Conflict(new { error = error.Message });
+            }
+            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
             catch (HttpRequestException error)
             {
                 return Results.Problem(
@@ -562,6 +921,38 @@ public static class VisualReferenceEndpoints
                     detail: error.Message,
                     statusCode: StatusCodes.Status502BadGateway);
             }
+        });
+
+        group.MapPost("/reference/prompts/generate-missing", async (
+            Guid projectId,
+            BatchVisualReferenceRequest request,
+            IVisualReferenceService service,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await service.GenerateMissingPromptsAsync(
+                    projectId,
+                    request.Kind,
+                    cancellationToken));
+            }
+            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
+        });
+
+        group.MapPost("/reference/images/generate-missing", async (
+            Guid projectId,
+            BatchVisualReferenceRequest request,
+            IVisualReferenceService service,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await service.GenerateMissingImagesAsync(
+                    projectId,
+                    request.Kind,
+                    cancellationToken));
+            }
+            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
         });
 
         group.MapPost("/{resourceId:guid}/reference/upload", async (

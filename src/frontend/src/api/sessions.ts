@@ -85,6 +85,23 @@ export async function resetSession(sessionId: string): Promise<void> {
   if (!response.ok) throw await readError(response, '副导演会话清空失败。')
 }
 
+export async function retrySessionMessage(
+  sessionId: string,
+  messageId: string,
+  context: { page: string; episode: string },
+): Promise<SessionRecord> {
+  const response = await fetch(
+    `/api/v2/sessions/${sessionId}/messages/${messageId}/retry`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(context),
+    },
+  )
+  if (!response.ok) throw await readError(response, '副导演消息重试失败。')
+  return response.json() as Promise<SessionRecord>
+}
+
 export async function listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
   const response = await fetch('/api/v2/sessions', { signal })
   if (!response.ok) throw await readError(response, 'Session 列表加载失败。')

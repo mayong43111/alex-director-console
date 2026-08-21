@@ -238,6 +238,33 @@ export async function appendProjectSourceChapters(
   return response.json() as Promise<ProjectSource>
 }
 
+export async function updateProjectSourceChapter(
+  projectId: string,
+  sourceId: string,
+  chapterId: string,
+  input: Pick<SourceChapter, 'title' | 'content'>,
+): Promise<ProjectSource> {
+  const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/chapters/${chapterId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await readError(response, '章节保存失败。')
+  return response.json() as Promise<ProjectSource>
+}
+
+export async function deleteProjectSourceChapter(
+  projectId: string,
+  sourceId: string,
+  chapterId: string,
+): Promise<ProjectSource> {
+  const response = await fetch(`/api/v2/projects/${projectId}/sources/${sourceId}/chapters/${chapterId}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw await readError(response, '章节删除失败。')
+  return response.json() as Promise<ProjectSource>
+}
+
 export async function getStoryMaterialAnalysis(
   projectId: string,
   sourceId: string,
@@ -413,5 +440,23 @@ export async function regenerateProductionScript(
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '正式剧本重新生成失败。')
+  return response.json() as Promise<ProductionScriptPackage>
+}
+
+export async function updateProductionScriptScene(
+  projectId: string,
+  productionEpisodeId: string,
+  sceneNumber: number,
+  scene: ProductionScriptSceneDraft,
+): Promise<ProductionScriptPackage> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/script-package/scenes/${sceneNumber}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scene }),
+    },
+  )
+  if (!response.ok) throw await readError(response, '正式剧本场次保存失败。')
   return response.json() as Promise<ProductionScriptPackage>
 }

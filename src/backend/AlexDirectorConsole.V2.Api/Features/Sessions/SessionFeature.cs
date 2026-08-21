@@ -425,20 +425,197 @@ public sealed class SendSessionMessageCommandHandler(
     }
 }
 
+public sealed record RetrySessionMessageCommand(
+    Guid SessionId,
+    Guid MessageId,
+    string? Page,
+    string? Episode)
+    : ICommand<SendSessionMessageResult>;
+
+public sealed class RetrySessionMessageCommandHandler(
+    V2DbContext dbContext,
+    ISessionAgent agentRuntime,
+    TimeProvider timeProvider)
+    : ICommandHandler<RetrySessionMessageCommand, SendSessionMessageResult>
+{
+    public async Task<SendSessionMessageResult> HandleAsync(
+        RetrySessionMessageCommand command,
+        CancellationToken cancellationToken)
+    {
+        var session = await dbContext.Sessions
+            .SingleOrDefaultAsync(item => item.Id == command.SessionId, cancellationToken);
+        if (session is null)
+        {
+            return SendSessionMessageResult.Failed(
+                SendSessionMessageStatus.SessionNotFound,
+                "Session 不存在。");
+        }
+
+        var messages = await dbContext.SessionMessages
+            .Where(message => message.SessionId == session.Id)
+            .OrderBy(message => message.Sequence)
+            .ToListAsync(cancellationToken);
+        var target = messages.SingleOrDefault(message => message.Id == command.MessageId);
+        if (target is null)
+        {
+            return SendSessionMessageResult.Failed(
+                SendSessionMessageStatus.SessionNotFound,
+                "消息不存在或不属于当前 Session。");
+        }
+        if (!target.Role.Equals("user", StringComparison.Ordinal))
+        {
+            return SendSessionMessageResult.Failed(
+                SendSessionMessageStatus.Invalid,
+                "只能从用户消息重试。");
+        }
+
+        var agentDefinition = await dbContext.AgentDefinitions
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == session.AgentId, cancellationToken);
+        if (agentDefinition is null)
+        {
+            return SendSessionMessageResult.Failed(
+                SendSessionMessageStatus.AgentNotFound,
+                "Agent 不存在。");
+        }
+        var skillIds = await dbContext.AgentSkills
+            .AsNoTracking()
+            .Where(link => link.AgentId == session.AgentId)
+            .OrderBy(link => link.SkillId)
+            .Select(link => link.SkillId)
+            .ToArrayAsync(cancellationToken);
+        var agent = ListAgentsQueryHandler.Map(agentDefinition, skillIds);
+
+        string? projectName = null;
+        if (session.ProjectId is Guid projectId)
+        {
+            projectName = await dbContext.Projects
+                .AsNoTracking()
+                .Where(project => project.Id == projectId)
+                .Select(project => project.Name)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (projectName is null)
+            {
+                return SendSessionMessageResult.Failed(
+                    SendSessionMessageStatus.ProjectNotFound,
+                    "项目不存在。");
+            }
+        }
+
+        var retainedMessages = messages
+            .Where(message => message.Sequence < target.Sequence)
+            .ToArray();
+        SessionAgentReply reply;
+        try
+        {
+            reply = await agentRuntime.ReplyAsync(
+                agent,
+                new SessionAgentContext(
+                    session.ScopeKey,
+                    session.ProjectId,
+                    projectName,
+                    NormalizeContext(command.Page, "项目中心"),
+                    NormalizeContext(command.Episode, "未选择")),
+                retainedMessages
+                    .Select(message => new SessionHistoryMessage(message.Role, message.Content))
+                    .ToArray(),
+                target.Content,
+                cancellationToken);
+        }
+        catch (SessionsConfigurationException error)
+        {
+            return SendSessionMessageResult.Failed(SendSessionMessageStatus.NotConfigured, error.Message);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return SendSessionMessageResult.Failed(
+                SendSessionMessageStatus.AgentFailed,
+                "Agent 暂时无法回复，请检查语言模型连接后重试。");
+        }
+
+        var now = timeProvider.GetUtcNow();
+        dbContext.SessionMessages.RemoveRange(
+            messages.Where(message => message.Sequence >= target.Sequence));
+        var userMessage = new SessionMessage
+        {
+            SessionId = session.Id,
+            Sequence = target.Sequence,
+            Role = "user",
+            Content = target.Content,
+            CreatedAtUtc = now
+        };
+        var assistantMessage = new SessionMessage
+        {
+            SessionId = session.Id,
+            Sequence = target.Sequence + 1,
+            Role = "assistant",
+            Content = reply.Content,
+            Model = reply.Model,
+            CreatedAtUtc = now
+        };
+        dbContext.SessionMessages.AddRange(userMessage, assistantMessage);
+        session.Runtime = reply.Runtime;
+        session.UpdatedAtUtc = now;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return new SendSessionMessageResult(
+            SendSessionMessageStatus.Success,
+            new SessionView(
+                session.Id,
+                session.AgentId,
+                agent.Name,
+                session.ScopeKey,
+                session.ProjectId,
+                projectName,
+                session.Title,
+                session.Runtime,
+                session.CreatedAtUtc,
+                session.UpdatedAtUtc,
+                retainedMessages
+                    .Select(ToView)
+                    .Append(ToView(userMessage))
+                    .Append(ToView(assistantMessage))
+                    .ToArray()),
+            null);
+    }
+
+    private static SessionMessageView ToView(SessionMessage message) => new(
+        message.Id,
+        message.Sequence,
+        message.Role,
+        message.Content,
+        message.Model,
+        message.CreatedAtUtc);
+
+    private static string NormalizeContext(string? value, string fallback)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized)
+            ? fallback
+            : normalized[..Math.Min(normalized.Length, 100)];
+    }
+}
+
 public sealed class SessionsConfigurationException(string message) : InvalidOperationException(message);
 
-public sealed record ResetSessionCommand(Guid SessionId) : ICommand<bool>;
+public sealed record ClearSessionMessagesCommand(Guid SessionId) : ICommand<bool>;
 
-public sealed class ResetSessionCommandHandler(V2DbContext dbContext)
-    : ICommandHandler<ResetSessionCommand, bool>
+public sealed class ClearSessionMessagesCommandHandler(V2DbContext dbContext, TimeProvider timeProvider)
+    : ICommandHandler<ClearSessionMessagesCommand, bool>
 {
-    public async Task<bool> HandleAsync(ResetSessionCommand command, CancellationToken cancellationToken)
+    public async Task<bool> HandleAsync(
+        ClearSessionMessagesCommand command,
+        CancellationToken cancellationToken)
     {
         var session = await dbContext.Sessions
             .SingleOrDefaultAsync(item => item.Id == command.SessionId, cancellationToken);
         if (session is null) return false;
 
-        dbContext.Sessions.Remove(session);
+        var messages = await dbContext.SessionMessages
+            .Where(message => message.SessionId == session.Id)
+            .ToListAsync(cancellationToken);
+        dbContext.SessionMessages.RemoveRange(messages);
+        session.UpdatedAtUtc = timeProvider.GetUtcNow();
         await dbContext.SaveChangesAsync(cancellationToken);
         return true;
     }

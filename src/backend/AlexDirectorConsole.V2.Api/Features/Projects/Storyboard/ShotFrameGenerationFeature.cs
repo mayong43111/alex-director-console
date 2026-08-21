@@ -374,12 +374,16 @@ public sealed class ShotFrameService(
         string role,
         CancellationToken cancellationToken)
     {
+        var currentShotAssetId = await dbContext.ShotDefinitions.AsNoTracking()
+            .Where(item => item.ProjectId == projectId && item.ShotResourceId == shotResourceId)
+            .Select(item => (Guid?)item.ShotAssetId)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (currentShotAssetId is null) return null;
         var frameResources = await (
             from dependency in dbContext.AssetDependencies.AsNoTracking()
-            join source in dbContext.Assets.AsNoTracking() on dependency.SourceAssetId equals source.Id
             join frame in dbContext.Assets.AsNoTracking() on dependency.ConsumerAssetId equals frame.Id
             where dependency.ProjectId == projectId
-                && source.ResourceId == shotResourceId
+                && dependency.SourceAssetId == currentShotAssetId
                 && dependency.Role == role
                 && frame.Type == AssetType
             select frame.ResourceId)
@@ -668,7 +672,7 @@ public sealed class ShotFrameService(
             run.UpdatedAtUtc = now;
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error)
         {
             now = timeProvider.GetUtcNow();
             item.Status = "failed";

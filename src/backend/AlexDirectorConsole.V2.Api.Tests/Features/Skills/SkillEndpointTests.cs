@@ -24,15 +24,31 @@ public sealed class SkillEndpointTests(V2ApiFactory factory)
         Assert.Equal(6, skills.Length);
         var storyboard = Assert.Single(skills, skill => skill.Id == "storyboard-design");
         Assert.Equal("分镜设计", storyboard.Name);
-        Assert.Equal("2.1.0", storyboard.Version);
+        Assert.Equal("2.2.0", storyboard.Version);
         Assert.True(storyboard.IsEnabled);
-        Assert.Contains("write_storyboard", storyboard.AllowedTools);
+        Assert.Equal(["generate_storyboard"], storyboard.AllowedTools);
         Assert.Contains("# 分镜设计", storyboard.Content, StringComparison.Ordinal);
+        var firstFrame = Assert.Single(skills, skill => skill.Id == "shot-first-frame");
+        Assert.Equal("1.1.0", firstFrame.Version);
+        Assert.Equal(
+            ["generate_missing_storyboard_image_prompts", "generate_next_storyboard_first_frame"],
+            firstFrame.AllowedTools);
         var projectManagement = Assert.Single(skills, skill => skill.Id == "project-management");
         Assert.Equal(
-            ["list_projects", "read_project", "create_project", "update_project"],
+            [
+                "list_projects",
+                "read_project",
+                "create_project",
+                "update_project",
+                "read_project_settings",
+                "update_project_settings"
+            ],
             projectManagement.AllowedTools);
         Assert.DoesNotContain("delete_project", projectManagement.AllowedTools);
+        var scriptWriting = Assert.Single(skills, skill => skill.Id == "script-writing");
+        Assert.Equal(
+            ["create_story_source", "generate_source_episode_script"],
+            scriptWriting.AllowedTools);
     }
 
     [Fact]

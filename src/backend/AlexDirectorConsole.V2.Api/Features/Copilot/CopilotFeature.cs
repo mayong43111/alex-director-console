@@ -158,7 +158,7 @@ public sealed class ResetCopilotConversationCommandHandler(
             .SingleOrDefaultAsync(cancellationToken);
         if (sessionId is Guid id)
         {
-            await commandDispatcher.SendAsync(new ResetSessionCommand(id), cancellationToken);
+            await commandDispatcher.SendAsync(new ClearSessionMessagesCommand(id), cancellationToken);
         }
         return true;
     }

@@ -60,6 +60,18 @@ public sealed record AppendProjectSourceChaptersCommand(
     string Content,
     string? FileName) : ICommand<CreateProjectSourceResult>;
 
+public sealed record UpdateProjectSourceChapterCommand(
+    Guid ProjectId,
+    Guid ResourceId,
+    Guid ChapterId,
+    string Title,
+    string Content) : ICommand<CreateProjectSourceResult>;
+
+public sealed record DeleteProjectSourceChapterCommand(
+    Guid ProjectId,
+    Guid ResourceId,
+    Guid ChapterId) : ICommand<CreateProjectSourceResult>;
+
 internal static class ProjectSourceDefaults
 {
     public const string AssetType = "source-document";
@@ -311,6 +323,156 @@ public sealed class AppendProjectSourceChaptersCommandHandler(
     }
 }
 
+public sealed class UpdateProjectSourceChapterCommandHandler(
+    V2DbContext dbContext,
+    TimeProvider timeProvider)
+    : ICommandHandler<UpdateProjectSourceChapterCommand, CreateProjectSourceResult>
+{
+    public async Task<CreateProjectSourceResult> HandleAsync(
+        UpdateProjectSourceChapterCommand command,
+        CancellationToken cancellationToken)
+    {
+        var title = command.Title.Trim();
+        var content = command.Content.Trim();
+        var errors = new Dictionary<string, string[]>();
+        if (title.Length is < 1 or > 300)
+            errors["title"] = ["章节标题必须为 1 至 300 个字符。"];
+        if (content.Length < 1)
+            errors["content"] = ["章节正文不能为空。"];
+        if (errors.Count > 0)
+            return new(CreateProjectSourceStatus.Invalid, null, errors);
+
+        return await ProjectSourceVersioning.UpdateAsync(
+            dbContext,
+            timeProvider,
+            command.ProjectId,
+            command.ResourceId,
+            document =>
+            {
+                if (!document.Chapters.Any(chapter => chapter.Id == command.ChapterId)) return null;
+                var chapters = document.Chapters.Select(chapter => chapter.Id == command.ChapterId
+                    ? chapter with { Title = title, Content = content, CharacterCount = content.Length }
+                    : chapter).ToArray();
+                return document with
+                {
+                    CharacterCount = chapters.Sum(chapter => chapter.CharacterCount),
+                    Chapters = chapters
+                };
+            },
+            cancellationToken);
+    }
+}
+
+public sealed class DeleteProjectSourceChapterCommandHandler(
+    V2DbContext dbContext,
+    TimeProvider timeProvider)
+    : ICommandHandler<DeleteProjectSourceChapterCommand, CreateProjectSourceResult>
+{
+    public async Task<CreateProjectSourceResult> HandleAsync(
+        DeleteProjectSourceChapterCommand command,
+        CancellationToken cancellationToken) => await ProjectSourceVersioning.UpdateAsync(
+            dbContext,
+            timeProvider,
+            command.ProjectId,
+            command.ResourceId,
+            document =>
+            {
+                if (!document.Chapters.Any(chapter => chapter.Id == command.ChapterId)) return null;
+                if (document.Chapters.Count == 1) throw new InvalidOperationException("原文资料至少需要保留一个章节。");
+                var chapters = document.Chapters
+                    .Where(chapter => chapter.Id != command.ChapterId)
+                    .Select((chapter, index) => chapter with { Number = index + 1 })
+                    .ToArray();
+                return document with
+                {
+                    CharacterCount = chapters.Sum(chapter => chapter.CharacterCount),
+                    Chapters = chapters
+                };
+            },
+            cancellationToken);
+}
+
+internal static class ProjectSourceVersioning
+{
+    public static async Task<CreateProjectSourceResult> UpdateAsync(
+        V2DbContext dbContext,
+        TimeProvider timeProvider,
+        Guid projectId,
+        Guid resourceId,
+        Func<SourceDocument, SourceDocument?> update,
+        CancellationToken cancellationToken)
+    {
+        var state = await dbContext.ResourceStates.SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == resourceId
+                && item.ResourceType == ProjectSourceDefaults.AssetType,
+            cancellationToken);
+        if (state is null) return new(CreateProjectSourceStatus.ProjectNotFound, null, []);
+
+        var previousAsset = await dbContext.Assets.SingleAsync(
+            item => item.Id == state.CurrentAssetId
+                && item.ProjectId == projectId
+                && item.Type == ProjectSourceDefaults.AssetType,
+            cancellationToken);
+        var document = update(ProjectSourceMapper.ReadDocument(previousAsset));
+        if (document is null) return new(CreateProjectSourceStatus.ProjectNotFound, null, []);
+        if (document.CharacterCount > ProjectSourceDefaults.MaxContentCharacters)
+        {
+            return new(
+                CreateProjectSourceStatus.Invalid,
+                null,
+                new Dictionary<string, string[]> { ["content"] = ["原文内容不能超过 500 万个字符。"] });
+        }
+
+        var documentJson = JsonSerializer.Serialize(document, ProjectSourceDefaults.JsonOptions);
+        var now = timeProvider.GetUtcNow();
+        var asset = new Asset
+        {
+            ProjectId = projectId,
+            ProductionEpisodeId = null,
+            ResourceId = resourceId,
+            Version = previousAsset.Version + 1,
+            Number = previousAsset.Number,
+            Type = ProjectSourceDefaults.AssetType,
+            Name = previousAsset.Name,
+            DocumentJson = documentJson,
+            FileName = previousAsset.FileName,
+            ContentType = "application/json",
+            SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.Assets.Add(asset);
+        state.CurrentAssetId = asset.Id;
+        state.LifecycleStatus = "draft";
+        state.UpdatedAtUtc = now;
+
+        var analysisResourceIds = await (
+            from dependency in dbContext.AssetDependencies
+            join consumer in dbContext.Assets on dependency.ConsumerAssetId equals consumer.Id
+            where dependency.ProjectId == projectId
+                && dependency.SourceAssetId == previousAsset.Id
+                && dependency.Role == "derived-from"
+                && consumer.Type == "story-material-analysis"
+            select consumer.ResourceId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var analysisStates = await dbContext.ResourceStates
+            .Where(item => item.ProjectId == projectId && analysisResourceIds.Contains(item.ResourceId))
+            .ToListAsync(cancellationToken);
+        foreach (var analysisState in analysisStates)
+        {
+            analysisState.IsStale = true;
+            analysisState.StaleReason = $"原文资料已从 v{previousAsset.Version} 更新到 v{asset.Version}，可按需重新分析。";
+            analysisState.StaleSinceUtc = now;
+            analysisState.UpdatedAtUtc = now;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return new(CreateProjectSourceStatus.Success, ProjectSourceMapper.ToView(asset), []);
+    }
+}
+
 internal static class ProjectSourceParser
 {
     private static readonly Regex MarkdownHeading = new("^#{1,6}\\s+(.+)$", RegexOptions.Compiled);
@@ -480,6 +642,47 @@ public static class ProjectSourceEndpoints
             };
         });
 
+        group.MapPut("/{resourceId:guid}/chapters/{chapterId:guid}", async (
+            Guid projectId,
+            Guid resourceId,
+            Guid chapterId,
+            UpdateProjectSourceChapterRequest request,
+            ICommandDispatcher dispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await dispatcher.SendAsync(
+                new UpdateProjectSourceChapterCommand(projectId, resourceId, chapterId, request.Title, request.Content),
+                cancellationToken);
+            return result.Status switch
+            {
+                CreateProjectSourceStatus.Success => Results.Ok(result.Source),
+                CreateProjectSourceStatus.Invalid => Results.ValidationProblem(result.Errors),
+                _ => Results.NotFound()
+            };
+        });
+
+        group.MapDelete("/{resourceId:guid}/chapters/{chapterId:guid}", async (
+            Guid projectId,
+            Guid resourceId,
+            Guid chapterId,
+            ICommandDispatcher dispatcher,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var result = await dispatcher.SendAsync(
+                    new DeleteProjectSourceChapterCommand(projectId, resourceId, chapterId),
+                    cancellationToken);
+                return result.Status == CreateProjectSourceStatus.Success
+                    ? Results.Ok(result.Source)
+                    : Results.NotFound();
+            }
+            catch (InvalidOperationException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
+            }
+        });
+
         return app;
     }
 }
@@ -493,3 +696,7 @@ public sealed record CreateProjectSourceRequest(
 public sealed record AppendProjectSourceChaptersRequest(
     string Content,
     string? FileName);
+
+public sealed record UpdateProjectSourceChapterRequest(
+    string Title,
+    string Content);

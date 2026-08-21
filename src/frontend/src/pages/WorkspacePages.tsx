@@ -7,7 +7,7 @@ import {
   useParams,
 } from "react-router-dom";
 import { ProTable, type ProColumns } from "@ant-design/pro-components";
-import { Image, InputNumber, Popconfirm, Select, Switch, Tabs } from "antd";
+import { Image, InputNumber, Popconfirm, Select, Switch, Tabs, Tooltip } from "antd";
 import {
   Check,
   ChevronDown,
@@ -44,8 +44,11 @@ import {
 } from "../api/projectSettings";
 import {
   createVisualAsset,
+  generateMissingVisualReferenceImages,
+  generateMissingVisualReferencePrompts,
   generateVoiceReference,
-  generateVisualReference,
+  generateVisualReferenceImage,
+  generateVisualReferencePrompt,
   getVoiceProfile,
   importStoryMaterialAssets,
   listAudioMaterials,
@@ -66,16 +69,20 @@ import {
   type ProductionEpisodeRecord,
 } from "../api/projects";
 import {
+  generateMissingStoryboardImagePrompts,
+  generateMissingStoryboardImages,
+  generateMissingStoryboardVideoPrompts,
+  generateMissingStoryboardVideos,
+  generateStoryboardImage,
+  generateStoryboardImagePrompt,
+  generateStoryboardVideo,
+  generateStoryboardVideoPrompt,
   generateStoryboard,
   getShotVideo,
   getStoryboard,
-  previewShotProduction,
-  previewShotVideo,
-  startShotProduction,
-  startShotVideo,
+  type BatchStoryboardMediaResult,
   type Storyboard,
   type StoryboardShotTextField,
-  type ShotVideoPreview,
   type ShotVideoProduction,
   rewriteStoryboardShotText,
   updateStoryboardShotAssets,
@@ -95,6 +102,7 @@ import {
   appendProjectSourceChapters,
   clearAdaptationEpisodes,
   createProjectSource,
+  deleteProjectSourceChapter,
   deleteAdaptationEpisode,
   generateAdaptationScript,
   generateProductionScriptForEpisode,
@@ -105,9 +113,13 @@ import {
   regenerateAdaptationEpisode,
   regenerateProductionScript,
   updateAdaptationEpisode,
+  updateProductionScriptScene,
+  updateProjectSourceChapter,
   type AdaptationScript,
+  type ProductionScriptSceneDraft,
   type ProductionScriptPackage,
   type ProjectSource,
+  type SourceChapter,
   type StoryMaterialAnalysis,
 } from "../api/projectSources";
 import { VersionPicker } from "../components/VersionPicker";
@@ -889,6 +901,8 @@ export function SourcePage() {
   const [importContent, setImportContent] = useState("");
   const [importFileName, setImportFileName] = useState("");
   const [importMode, setImportMode] = useState<"create" | "append">("create");
+  const [chapterEditor, setChapterEditor] = useState<{ id: string; title: string; content: string } | null>(null);
+  const [chapterSaving, setChapterSaving] = useState(false);
   const fileModeRef = useRef<"create" | "append">("create");
   const [analysis, setAnalysis] = useState<StoryMaterialAnalysis | null>(null);
   const [analysisSourceId, setAnalysisSourceId] = useState<string>();
@@ -1032,6 +1046,60 @@ export function SourcePage() {
     } finally {
       setImporting(false);
     }
+  };
+
+  const markAnalysisStale = (source: ProjectSource) => {
+    if (!analysis) return;
+    setAnalysis({
+      ...analysis,
+      isStale: true,
+      staleReason: `原文资料已更新到 v${source.version}，章节分析需要重新生成。`,
+    });
+  };
+
+  const saveChapter = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!activeSource || !chapterEditor) return;
+    setChapterSaving(true);
+    setError("");
+    try {
+      const source = await updateProjectSourceChapter(
+        projectId,
+        activeSource.id,
+        chapterEditor.id,
+        { title: chapterEditor.title, content: chapterEditor.content },
+      );
+      setSources((current) => current.map((item) => item.id === source.id ? source : item));
+      setSelectedChapterId(chapterEditor.id);
+      markAnalysisStale(source);
+      setChapterEditor(null);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "章节保存失败。");
+    } finally {
+      setChapterSaving(false);
+    }
+  };
+
+  const deleteChapter = async (chapterId: string) => {
+    if (!activeSource) return;
+    const deletedIndex = activeSource.chapters.findIndex((chapter) => chapter.id === chapterId);
+    setChapterSaving(true);
+    setError("");
+    try {
+      const source = await deleteProjectSourceChapter(projectId, activeSource.id, chapterId);
+      setSources((current) => current.map((item) => item.id === source.id ? source : item));
+      setSelectedChapterId(source.chapters[Math.min(deletedIndex, source.chapters.length - 1)]?.id);
+      markAnalysisStale(source);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "章节删除失败。");
+    } finally {
+      setChapterSaving(false);
+    }
+  };
+
+  const editChapter = (chapter: SourceChapter) => {
+    setError("");
+    setChapterEditor({ id: chapter.id, title: chapter.title, content: chapter.content });
   };
 
   const requestAnalysis = async () => {
@@ -1298,19 +1366,38 @@ export function SourcePage() {
                       ? { className: "analyzed", label: "已分析" }
                       : { className: "pending", label: "未分析" };
                 return (
-                  <button
-                    type="button"
-                    className={selectedChapter?.id === chapter.id ? "tree-section active" : "tree-section"}
-                    onClick={() => setSelectedChapterId(chapter.id)}
-                    key={chapter.id}
-                  >
-                    <span className="tree-section-number">{String(chapter.number).padStart(2, "0")}</span>
-                    <strong title={chapter.title}>{chapter.title}</strong>
-                    <span className={`tree-analysis-status ${status.className}`} title={`分析状态：${status.label}`}>
-                      {isAnalyzed && analysisLoadState === "ready" && <Check size={10} />}
-                      {status.label}
-                    </span>
-                  </button>
+                  <div className="tree-section-row" key={chapter.id}>
+                    <button
+                      type="button"
+                      className={selectedChapter?.id === chapter.id ? "tree-section active" : "tree-section"}
+                      onClick={() => setSelectedChapterId(chapter.id)}
+                    >
+                      <span className="tree-section-number">{String(chapter.number).padStart(2, "0")}</span>
+                      <strong title={chapter.title}>{chapter.title}</strong>
+                      <span className={`tree-analysis-status ${status.className}`} title={`分析状态：${status.label}`}>
+                        {isAnalyzed && analysisLoadState === "ready" && <Check size={10} />}
+                        {status.label}
+                      </span>
+                    </button>
+                    <div className="tree-section-actions">
+                      <button type="button" title="编辑章节" aria-label={`编辑 ${chapter.title}`} onClick={() => editChapter(chapter)}>
+                        <Edit3 size={12} />
+                      </button>
+                      <Popconfirm
+                        title="删除章节"
+                        description="删除后将保存为新的原文版本。"
+                        okText="删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        disabled={activeSource.chapters.length <= 1 || chapterSaving}
+                        onConfirm={() => void deleteChapter(chapter.id)}
+                      >
+                        <button type="button" title="删除章节" aria-label={`删除 ${chapter.title}`} disabled={activeSource.chapters.length <= 1 || chapterSaving}>
+                          <Trash2 size={12} />
+                        </button>
+                      </Popconfirm>
+                    </div>
+                  </div>
                 );
               })}
             </div>
@@ -1322,6 +1409,35 @@ export function SourcePage() {
                 <h2>{selectedChapter?.title}</h2>
               </div>
               <div className="button-group">
+                <button
+                  className="secondary-button icon-button"
+                  type="button"
+                  disabled={!selectedChapter || chapterSaving}
+                  onClick={() => selectedChapter && editChapter(selectedChapter)}
+                  aria-label="编辑当前章节"
+                  title="编辑章节"
+                >
+                  <Edit3 size={14} />
+                </button>
+                <Popconfirm
+                  title="删除当前章节"
+                  description="删除后将保存为新的原文版本。"
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  disabled={!selectedChapter || (activeSource?.chapters.length ?? 0) <= 1 || chapterSaving}
+                  onConfirm={() => selectedChapter && void deleteChapter(selectedChapter.id)}
+                >
+                  <button
+                    className="secondary-button icon-button"
+                    type="button"
+                    disabled={!selectedChapter || (activeSource?.chapters.length ?? 0) <= 1 || chapterSaving}
+                    aria-label="删除当前章节"
+                    title={(activeSource?.chapters.length ?? 0) <= 1 ? "至少保留一个章节" : "删除章节"}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </Popconfirm>
                 <button
                   className="secondary-button icon-button"
                   type="button"
@@ -1392,6 +1508,30 @@ export function SourcePage() {
               <button className="secondary-button" type="button" onClick={() => setImportOpen(false)} disabled={importing}>取消</button>
               <button className="primary-button" type="submit" disabled={importing}>
                 <Upload size={13} />{importing ? "保存中" : importMode === "append" ? "保存新版本" : "导入资料"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {chapterEditor && (
+        <div className="modal-backdrop" onMouseDown={() => !chapterSaving && setChapterEditor(null)}>
+          <form className="dialog chapter-editor-dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={saveChapter}>
+            <span className="eyebrow">原文章节</span>
+            <h2>编辑章节</h2>
+            <p>保存后生成原文 v{(activeSource?.version ?? 0) + 1}，已有分析会标记为需要更新。</p>
+            <label>
+              <span>章节标题</span>
+              <input autoFocus required maxLength={300} value={chapterEditor.title} onChange={(event) => setChapterEditor({ ...chapterEditor, title: event.target.value })} />
+            </label>
+            <label>
+              <span>章节正文</span>
+              <textarea required value={chapterEditor.content} onChange={(event) => setChapterEditor({ ...chapterEditor, content: event.target.value })} />
+            </label>
+            {error && <div className="settings-error">{error}</div>}
+            <div>
+              <button className="secondary-button" type="button" disabled={chapterSaving} onClick={() => setChapterEditor(null)}>取消</button>
+              <button className="primary-button" type="submit" disabled={chapterSaving}>
+                <Save size={13} />{chapterSaving ? "保存中" : "保存新版本"}
               </button>
             </div>
           </form>
@@ -2561,8 +2701,9 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
   const [selectedId, setSelectedId] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState<"import" | "save" | "reference" | "upload-reference" | null>(null);
+  const [working, setWorking] = useState<"import" | "save" | "prompt" | "image" | "batch-prompt" | "batch-image" | "upload-reference" | null>(null);
   const [error, setError] = useState("");
+  const [batchMessage, setBatchMessage] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [referenceFeedbackOpen, setReferenceFeedbackOpen] = useState(false);
   const [referenceFeedback, setReferenceFeedback] = useState("");
@@ -2655,25 +2796,62 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     }
   };
 
-  const generateReference = async (instruction?: string, basedOnCurrent = false) => {
+  const generateReferencePrompt = async (instruction?: string, basedOnCurrent = false) => {
     if (!selected) return;
-    setWorking("reference");
+    setWorking("prompt");
     setError("");
+    setBatchMessage("");
     try {
-      const referenceImage = await generateVisualReference(
+      const referencePrompt = await generateVisualReferencePrompt(
         projectId,
         selected.resourceId,
         instruction,
         basedOnCurrent,
       );
       setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
-        ? { ...item, referenceImage }
+        ? { ...item, referencePrompt }
         : item));
       setPromptCopied(false);
       setReferenceFeedbackOpen(false);
       setReferenceFeedback("");
     } catch (generateError) {
+      setError(generateError instanceof Error ? generateError.message : "提示词生成失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const generateReferenceImage = async () => {
+    if (!selected?.referencePrompt) return;
+    setWorking("image");
+    setError("");
+    setBatchMessage("");
+    try {
+      const referenceImage = await generateVisualReferenceImage(projectId, selected.resourceId);
+      setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
+        ? { ...item, referenceImage }
+        : item));
+    } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "参考图生成失败。");
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const generateBatch = async (target: "prompt" | "image") => {
+    setWorking(target === "prompt" ? "batch-prompt" : "batch-image");
+    setError("");
+    setBatchMessage("");
+    try {
+      const result = target === "prompt"
+        ? await generateMissingVisualReferencePrompts(projectId, kindConfig.kind)
+        : await generateMissingVisualReferenceImages(projectId, kindConfig.kind);
+      const loaded = await listVisualAssets(projectId);
+      setAssets(loaded);
+      setBatchMessage(`${target === "prompt" ? "提示词" : "图片"}批量完成：生成 ${result.generated}，跳过 ${result.skipped}，失败 ${result.failed}`);
+      if (result.errors.length > 0) setError(result.errors.join("；"));
+    } catch (batchError) {
+      setError(batchError instanceof Error ? batchError.message : "批量生成失败。");
     } finally {
       setWorking(null);
     }
@@ -2714,6 +2892,12 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
             </label>
           </div>
           <div className="asset-bible-actions">
+            <button className="secondary-button" onClick={() => void generateBatch("prompt")} disabled={working !== null || kindAssets.length === 0}>
+              <Sparkles size={14} />{working === "batch-prompt" ? "提示词生成中" : "批量提示词"}
+            </button>
+            <button className="secondary-button" onClick={() => void generateBatch("image")} disabled={working !== null || kindAssets.length === 0}>
+              <ImagePlus size={14} />{working === "batch-image" ? "图片生成中" : "批量图片"}
+            </button>
             <button
               className="secondary-button"
               onClick={importMaterials}
@@ -2728,6 +2912,7 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
           </div>
         </header>
         {error && <div className="settings-error asset-error">{error}</div>}
+        {batchMessage && <div className="asset-batch-message">{batchMessage}</div>}
         <div className="asset-workspace">
           <section className="asset-list-panel">
           {visibleAssets.map((asset, index) => (
@@ -2797,25 +2982,17 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                 </button>
                 <button
                   className="primary-button asset-reference-generate-button"
-                  onClick={() => {
-                    if (selected.referenceImage) {
-                      setReferenceFeedback("");
-                      setUseCurrentReference(true);
-                      setReferenceFeedbackOpen(true);
-                    } else {
-                      void generateReference();
-                    }
-                  }}
-                  disabled={working !== null}
-                  title={`${assetReferenceSpecs[selected.kind].title} · 1024 × 1024 · 纯白背景`}
-                  aria-label={working === "reference"
-                    ? "正在生成设定图"
-                    : selected.referenceImage ? "重新生成设定图" : "生成设定图"}
+                  onClick={() => void generateReferenceImage()}
+                  disabled={working !== null || !selected.referencePrompt}
+                  title={selected.referencePrompt
+                    ? `${assetReferenceSpecs[selected.kind].title} · 1024 × 1024 · 纯白背景`
+                    : "请先生成提示词"}
+                  aria-label={working === "image" ? "正在生成图片" : selected.referenceImage ? "重新生成图片" : "生成图片"}
                 >
                   <RefreshCw size={13} />
-                  <span>{working === "reference"
+                  <span>{working === "image"
                     ? "生成中"
-                    : selected.referenceImage ? "重生成" : "生成设定图"}</span>
+                    : selected.referenceImage ? "重新生成图片" : "生成图片"}</span>
                 </button>
               </div>
             </header>
@@ -2866,19 +3043,35 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                 )}
                 <aside className="asset-prompt-panel">
                   <header>
-                    <div className="asset-prompt-title"><span>生成提示词</span><small>{selected.referenceImage ? `v${selected.referenceImage.version}` : "待生成"}</small></div>
+                    <div className="asset-prompt-title"><span>生成提示词</span><small>{selected.referencePrompt ? `v${selected.referencePrompt.version}` : "待生成"}</small></div>
                     <div className="asset-prompt-actions">
-                      {selected.referenceImage && (
-                        <VersionPicker projectId={projectId} assetId={selected.referenceImage.assetId} label="设定图版本" compact />
+                      <button
+                        type="button"
+                        className="secondary-button asset-prompt-generate-button"
+                        disabled={working !== null}
+                        onClick={() => {
+                          if (selected.referencePrompt) {
+                            setReferenceFeedback("");
+                            setUseCurrentReference(Boolean(selected.referenceImage));
+                            setReferenceFeedbackOpen(true);
+                          } else {
+                            void generateReferencePrompt();
+                          }
+                        }}
+                      >
+                        <Sparkles size={12} />{working === "prompt" ? "生成中" : selected.referencePrompt ? "重生成提示词" : "生成提示词"}
+                      </button>
+                      {selected.referencePrompt && (
+                        <VersionPicker projectId={projectId} assetId={selected.referencePrompt.assetId} label="提示词版本" compact />
                       )}
-                      {selected.referenceImage?.prompt && (
+                      {selected.referencePrompt?.prompt && (
                       <button
                         type="button"
                         className="icon-button"
                         title="复制提示词"
                         aria-label="复制提示词"
                         onClick={() => {
-                          void navigator.clipboard.writeText(selected.referenceImage?.prompt ?? "");
+                          void navigator.clipboard.writeText(selected.referencePrompt?.prompt ?? "");
                           setPromptCopied(true);
                         }}
                       >
@@ -2887,7 +3080,7 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
                       )}
                     </div>
                   </header>
-                  <pre>{selected.referenceImage?.prompt || "提示词会在首次生成后随图片版本保存，并在这里完整显示。"}</pre>
+                  <pre>{selected.referencePrompt?.prompt || "先生成提示词，确认后再单独生成图片。"}</pre>
                 </aside>
               </div>
             </div>
@@ -2910,18 +3103,18 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
         </div>
       </div>
       {referenceFeedbackOpen && selected && (
-        <div className="modal-backdrop" onMouseDown={() => working !== "reference" && setReferenceFeedbackOpen(false)}>
+        <div className="modal-backdrop" onMouseDown={() => working !== "prompt" && setReferenceFeedbackOpen(false)}>
           <form
             className="dialog asset-reference-feedback-dialog"
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
-              if (referenceFeedback.trim()) void generateReference(referenceFeedback.trim(), useCurrentReference);
+              if (referenceFeedback.trim()) void generateReferencePrompt(referenceFeedback.trim(), useCurrentReference);
             }}
           >
-            <span className="eyebrow">{kindConfig.label}设定图 / 重新生成</span>
-            <h2>输入本轮修改意见</h2>
-            <p>将基于当前资产定义重新生成一个新版本，现有图片和历史版本会保留。</p>
+            <span className="eyebrow">{kindConfig.label}提示词 / 重新生成</span>
+            <h2>生成新版提示词</h2>
+            <p>这里只更新提示词，不会立即生成图片。确认提示词后再点击“生成图片”。</p>
             <div className="asset-reference-basis">
               <div>
                 <strong>基于当前参考图修改</strong>
@@ -2930,7 +3123,7 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
               <Switch
                 checked={useCurrentReference}
                 onChange={setUseCurrentReference}
-                disabled={working === "reference"}
+                disabled={working === "prompt" || !selected.referenceImage}
                 aria-label="基于当前参考图修改"
               />
             </div>
@@ -2947,9 +3140,9 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
               />
             </label>
             <div>
-              <button className="secondary-button" type="button" disabled={working === "reference"} onClick={() => setReferenceFeedbackOpen(false)}>取消</button>
-              <button className="primary-button" type="submit" disabled={working === "reference" || !referenceFeedback.trim()}>
-                <RefreshCw size={13} />{working === "reference" ? "生成中" : "按意见重新生成"}
+              <button className="secondary-button" type="button" disabled={working === "prompt"} onClick={() => setReferenceFeedbackOpen(false)}>取消</button>
+              <button className="primary-button" type="submit" disabled={working === "prompt" || !referenceFeedback.trim()}>
+                <Sparkles size={13} />{working === "prompt" ? "生成中" : "生成新版提示词"}
               </button>
             </div>
           </form>
@@ -3032,6 +3225,8 @@ export function ScriptPage() {
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState("");
   const [productionEpisodes, setProductionEpisodes] = useState<ProductionEpisodeRecord[]>([]);
+  const [sceneEditor, setSceneEditor] = useState<ProductionScriptSceneDraft | null>(null);
+  const [sceneSaving, setSceneSaving] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -3148,6 +3343,43 @@ export function ScriptPage() {
     }
   };
 
+  const openSceneEditor = () => {
+    if (!activeScene || scriptPackage.isLegacyOutline) return;
+    setRegenerateError("");
+    setSceneEditor(structuredClone(activeScene));
+  };
+
+  const saveScene = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sceneEditor) return;
+    setSceneSaving(true);
+    setRegenerateError("");
+    try {
+      const normalizedScene = {
+        ...sceneEditor,
+        characters: normalizeEditorLines(sceneEditor.characters),
+        props: normalizeEditorLines(sceneEditor.props),
+        dialogues: sceneEditor.dialogues.map((dialogue) => ({
+          ...dialogue,
+          lines: normalizeEditorLines(dialogue.lines),
+        })),
+      };
+      const updated = await updateProductionScriptScene(
+        projectId,
+        productionEpisodeId,
+        sceneEditor.sceneNumber,
+        normalizedScene,
+      );
+      setScriptPackage(updated);
+      setActiveSceneNumber(sceneEditor.sceneNumber);
+      setSceneEditor(null);
+    } catch (saveError) {
+      setRegenerateError(saveError instanceof Error ? saveError.message : "正式剧本场次保存失败。");
+    } finally {
+      setSceneSaving(false);
+    }
+  };
+
   return (
     <div className="page full-height-page production-script-page">
       <ScriptStageTabs
@@ -3220,7 +3452,14 @@ export function ScriptPage() {
                   <span>S{String(activeScene.sceneNumber).padStart(2, "0")}</span>
                   <small>第 {activeScene.sceneNumber} / {episode.scenes.length} 场</small>
                 </div>
-                <h2>{activeScene.heading}</h2>
+                <div className="production-scene-title-row">
+                  <h2>{activeScene.heading}</h2>
+                  {!scriptPackage.isLegacyOutline && (
+                    <button className="secondary-button" type="button" onClick={openSceneEditor}>
+                      <Edit3 size={13} />编辑场次
+                    </button>
+                  )}
+                </div>
                 <p>{activeScene.storyFunction}</p>
               </div>
               <div className="production-scene-facts" aria-label="场次摘要">
@@ -3339,8 +3578,75 @@ export function ScriptPage() {
         )}
         </div>
       </div>
+      {sceneEditor && (
+        <div className="modal-backdrop" onMouseDown={() => !sceneSaving && setSceneEditor(null)}>
+          <form className="dialog production-scene-editor-dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={saveScene}>
+            <header className="production-scene-editor-heading">
+              <div>
+                <span className="eyebrow">正式剧本 / S{String(sceneEditor.sceneNumber).padStart(2, "0")}</span>
+                <h2>编辑场次</h2>
+                <p>保存后创建正式剧本 v{scriptPackage.version + 1}，已有分镜会识别为旧版本。</p>
+              </div>
+              <button className="secondary-button icon-button" type="button" title="关闭" aria-label="关闭场次编辑" disabled={sceneSaving} onClick={() => setSceneEditor(null)}>
+                <X size={14} />
+              </button>
+            </header>
+            <div className="production-scene-editor-body">
+              <div className="production-scene-editor-grid">
+                <label className="wide"><span>场景标题</span><input autoFocus required maxLength={200} value={sceneEditor.heading} onChange={(event) => setSceneEditor({ ...sceneEditor, heading: event.target.value })} /></label>
+                <label className="wide"><span>场次摘要</span><textarea required value={sceneEditor.summary} onChange={(event) => setSceneEditor({ ...sceneEditor, summary: event.target.value })} /></label>
+                <label className="wide"><span>故事功能</span><textarea required value={sceneEditor.storyFunction} onChange={(event) => setSceneEditor({ ...sceneEditor, storyFunction: event.target.value })} /></label>
+                <label className="wide"><span>对白意图</span><textarea value={sceneEditor.dialogueIntent ?? ""} onChange={(event) => setSceneEditor({ ...sceneEditor, dialogueIntent: event.target.value || null })} /></label>
+                <label className="wide"><span>动作正文</span><textarea className="scene-action-input" required value={sceneEditor.action} onChange={(event) => setSceneEditor({ ...sceneEditor, action: event.target.value })} /></label>
+                <label><span>人物（每行一个）</span><textarea value={sceneEditor.characters.join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, characters: splitEditorLines(event.target.value) })} /></label>
+                <label><span>道具（每行一个）</span><textarea value={sceneEditor.props.join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, props: splitEditorLines(event.target.value) })} /></label>
+                <label><span>目标时长（秒）</span><input type="number" required min={1} step={0.1} value={sceneEditor.targetSeconds} onChange={(event) => setSceneEditor({ ...sceneEditor, targetSeconds: Number(event.target.value) })} /></label>
+                <label><span>节奏设计</span><input required value={sceneEditor.rhythm} onChange={(event) => setSceneEditor({ ...sceneEditor, rhythm: event.target.value })} /></label>
+                <label className="wide"><span>视觉对比</span><textarea required value={sceneEditor.visualContrast} onChange={(event) => setSceneEditor({ ...sceneEditor, visualContrast: event.target.value })} /></label>
+              </div>
+              <section className="production-scene-editor-section">
+                <header><div><strong>对白</strong><span>{sceneEditor.dialogues.length} 组</span></div><button className="secondary-button" type="button" onClick={() => setSceneEditor({ ...sceneEditor, dialogues: [...sceneEditor.dialogues, { character: "", parenthetical: null, lines: [""] }] })}><Plus size={12} />添加对白</button></header>
+                {sceneEditor.dialogues.map((dialogue, index) => (
+                  <div className="production-dialogue-editor-row" key={index}>
+                    <input required placeholder="角色" value={dialogue.character} onChange={(event) => setSceneEditor({ ...sceneEditor, dialogues: sceneEditor.dialogues.map((item, itemIndex) => itemIndex === index ? { ...item, character: event.target.value } : item) })} />
+                    <input placeholder="表演提示（可选）" value={dialogue.parenthetical ?? ""} onChange={(event) => setSceneEditor({ ...sceneEditor, dialogues: sceneEditor.dialogues.map((item, itemIndex) => itemIndex === index ? { ...item, parenthetical: event.target.value || null } : item) })} />
+                    <textarea required placeholder="每行一句对白" value={dialogue.lines.join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, dialogues: sceneEditor.dialogues.map((item, itemIndex) => itemIndex === index ? { ...item, lines: splitEditorLines(event.target.value) } : item) })} />
+                    <button className="icon-button" type="button" title="删除对白" aria-label={`删除第 ${index + 1} 组对白`} onClick={() => setSceneEditor({ ...sceneEditor, dialogues: sceneEditor.dialogues.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={13} /></button>
+                  </div>
+                ))}
+              </section>
+              <section className="production-scene-editor-section">
+                <header><div><strong>镜头规划</strong><span>{sceneEditor.shotPlan.length} 镜</span></div></header>
+                {sceneEditor.shotPlan.map((shot, index) => (
+                  <div className="production-shot-editor-row" key={index}>
+                    <strong>{String(index + 1).padStart(2, "0")}</strong>
+                    <input required placeholder="镜头目的" value={shot.purpose} onChange={(event) => setSceneEditor({ ...sceneEditor, shotPlan: sceneEditor.shotPlan.map((item, itemIndex) => itemIndex === index ? { ...item, purpose: event.target.value } : item) })} />
+                    <input required placeholder="景别" value={shot.shotSize} onChange={(event) => setSceneEditor({ ...sceneEditor, shotPlan: sceneEditor.shotPlan.map((item, itemIndex) => itemIndex === index ? { ...item, shotSize: event.target.value } : item) })} />
+                    <input required placeholder="机位" value={shot.cameraAngle} onChange={(event) => setSceneEditor({ ...sceneEditor, shotPlan: sceneEditor.shotPlan.map((item, itemIndex) => itemIndex === index ? { ...item, cameraAngle: event.target.value } : item) })} />
+                    <input required placeholder="运镜" value={shot.cameraMovement} onChange={(event) => setSceneEditor({ ...sceneEditor, shotPlan: sceneEditor.shotPlan.map((item, itemIndex) => itemIndex === index ? { ...item, cameraMovement: event.target.value } : item) })} />
+                    <input type="number" required min={0.1} step={0.1} title="时长（秒）" value={shot.durationSeconds} onChange={(event) => setSceneEditor({ ...sceneEditor, shotPlan: sceneEditor.shotPlan.map((item, itemIndex) => itemIndex === index ? { ...item, durationSeconds: Number(event.target.value) } : item) })} />
+                  </div>
+                ))}
+              </section>
+            </div>
+            {regenerateError && <div className="settings-error">{regenerateError}</div>}
+            <footer>
+              <button className="secondary-button" type="button" disabled={sceneSaving} onClick={() => setSceneEditor(null)}>取消</button>
+              <button className="primary-button" type="submit" disabled={sceneSaving}><Save size={13} />{sceneSaving ? "保存中" : "保存新版本"}</button>
+            </footer>
+          </form>
+        </div>
+      )}
     </div>
   );
+}
+
+function splitEditorLines(value: string) {
+  return value.split(/\r?\n/);
+}
+
+function normalizeEditorLines(lines: string[]) {
+  return lines.map((item) => item.trim()).filter(Boolean);
 }
 
 export function ScriptDemoPage() {
@@ -3481,6 +3787,8 @@ export function StoryboardPage() {
   const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
   const [loadedEpisodeId, setLoadedEpisodeId] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [batchAction, setBatchAction] = useState("");
+  const [batchFeedback, setBatchFeedback] = useState<{ label: string; result: BatchStoryboardMediaResult } | null>(null);
   const [framePreviewIndex, setFramePreviewIndex] = useState(0);
   const [framePreviewOpen, setFramePreviewOpen] = useState(false);
   const [error, setError] = useState("");
@@ -3517,7 +3825,6 @@ export function StoryboardPage() {
     return <Navigate to={`episodes/${productionEpisodes[0].id}`} replace />;
   }
 
-  const activeEpisode = productionEpisodes.find((item) => item.id === productionEpisodeId);
   const loading = productionEpisodeId !== "" && loadedEpisodeId !== productionEpisodeId;
   const currentStoryboard = storyboard?.productionEpisodeId === productionEpisodeId ? storyboard : null;
   const framePreviews = (currentStoryboard?.shots ?? [])
@@ -3535,9 +3842,6 @@ export function StoryboardPage() {
     setFramePreviewIndex(index);
     setFramePreviewOpen(true);
   };
-  const episodeCode = activeEpisode
-    ? `E${String(activeEpisode.episodeNumber).padStart(2, "0")}`
-    : "生产集";
   const generate = async () => {
     setGenerating(true);
     setError("");
@@ -3551,17 +3855,28 @@ export function StoryboardPage() {
       setGenerating(false);
     }
   };
+  const runBatch = async (
+    action: string,
+    label: string,
+    operation: () => Promise<BatchStoryboardMediaResult>,
+  ) => {
+    setBatchAction(action);
+    setBatchFeedback(null);
+    setError("");
+    try {
+      const result = await operation();
+      setBatchFeedback({ label, result });
+      setStoryboard(await getStoryboard(projectId, productionEpisodeId));
+    } catch (batchError) {
+      setError(batchError instanceof Error ? batchError.message : `${label}失败。`);
+    } finally {
+      setBatchAction("");
+    }
+  };
   return (
     <div className="page full-height-page storyboard-page">
       <div className="storyboard-workspace">
         <header className="storyboard-toolbar">
-          <div className="storyboard-context">
-            <span>{episodeCode}{currentStoryboard ? ` · v${currentStoryboard.revision}` : ""}</span>
-            <strong>{currentStoryboard?.title ?? activeEpisode?.title ?? "分镜工作区"}</strong>
-            <small>{currentStoryboard
-              ? `${currentStoryboard.shots.length} 镜 · ${currentStoryboard.totalDurationSeconds} / ${currentStoryboard.targetSeconds} 秒 · ${currentStoryboard.model}`
-              : "从正式剧本和资产圣经生成结构化分镜"}</small>
-          </div>
           <div className="storyboard-toolbar-actions">
             <Select
               aria-label="切换分镜生产集"
@@ -3576,8 +3891,37 @@ export function StoryboardPage() {
               <WandSparkles size={14} />
               {generating ? "正在设计分镜" : currentStoryboard ? "重新生成草稿" : "生成分镜草稿"}
             </button>
+            <div className="storyboard-batch-actions" aria-label="分镜批量生成">
+              <Tooltip title={batchAction === "image-prompts" ? "正在批量生成图片提示词" : "批量生成图片提示词"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("image-prompts", "批量图片提示词", () => generateMissingStoryboardImagePrompts(projectId, productionEpisodeId))}>
+                  <WandSparkles size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip title={batchAction === "images" ? "正在批量生成图片" : "批量生成图片"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("images", "批量图片", () => generateMissingStoryboardImages(projectId, productionEpisodeId))}>
+                  <ImagePlus size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip title={batchAction === "video-prompts" ? "正在批量生成视频提示词" : "批量生成视频提示词"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("video-prompts", "批量视频提示词", () => generateMissingStoryboardVideoPrompts(projectId, productionEpisodeId))}>
+                  <Sparkles size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip title={batchAction === "videos" ? "正在批量生成视频" : "批量生成视频"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("videos", "批量视频", () => generateMissingStoryboardVideos(projectId, productionEpisodeId))}>
+                  <Play size={14} />
+                </button>
+              </Tooltip>
+            </div>
           </div>
         </header>
+      {batchFeedback && (
+        <div className={`storyboard-batch-feedback${batchFeedback.result.failed ? " has-errors" : ""}`} role="status">
+          <strong>{batchFeedback.label}</strong>
+          <span>生成 {batchFeedback.result.generated} · 跳过 {batchFeedback.result.skipped} · 失败 {batchFeedback.result.failed}</span>
+          {batchFeedback.result.errors.length > 0 && <small>{batchFeedback.result.errors.join("；")}</small>}
+        </div>
+      )}
       {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
       {!error && (loading || !currentStoryboard) && (
         <div className="source-empty-state development-empty-state">
@@ -3664,8 +4008,11 @@ export function StoryboardPage() {
               </span>
               <span>{shot.shotSize} · {shot.cameraAngle}</span>
               <span>{shot.durationSeconds}s</span>
-              <span className={`state-label ${shot.production?.status ?? "draft"}`}>
-                {productionStatusLabel(shot.production?.status ?? "draft")}
+              <span className="storyboard-stage-status">
+                <small className={shot.imagePrompt ? "ready" : ""}>图词</small>
+                <small className={shot.production?.status === "completed" ? "ready" : ""}>图片</small>
+                <small className={shot.videoPrompt ? "ready" : ""}>视词</small>
+                <small className={shot.videoProduction?.status === "completed" ? "ready" : shot.videoProduction?.status ?? ""}>视频</small>
               </span>
             </button>
           ))}
@@ -3764,10 +4111,8 @@ export function StoryboardShotPage() {
   const [savingAssociations, setSavingAssociations] = useState(false);
   const [startingProduction, setStartingProduction] = useState(false);
   const [productionConfirmation, setProductionConfirmation] = useState(false);
-  const [productionPreview, setProductionPreview] = useState<ImageGenerationPreview | null>(null);
   const [productionInstruction, setProductionInstruction] = useState("");
   const [video, setVideo] = useState<ShotVideoProduction | null>(null);
-  const [videoPreview, setVideoPreview] = useState<ShotVideoPreview | null>(null);
   const [videoConfirmation, setVideoConfirmation] = useState(false);
   const [videoInstruction, setVideoInstruction] = useState("");
   const [startingVideo, setStartingVideo] = useState(false);
@@ -3934,35 +4279,40 @@ export function StoryboardShotPage() {
     setTextRewriteInstruction("");
     setTextRewriteOpen(true);
   };
-  const previewProduction = async () => {
+  const createProductionPrompt = async () => {
     if (!shot) return;
     setStartingProduction(true);
     setError("");
     try {
-      setProductionPreview(await previewShotProduction(
+      const imagePrompt = await generateStoryboardImagePrompt(
         projectId,
         productionEpisodeId,
         shot.resourceId,
         productionInstruction,
-      ));
-    } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : "首帧生成规格加载失败。");
+      );
+      setStoryboard((current) => current ? {
+        ...current,
+        shots: current.shots.map((item) => item.resourceId === shot.resourceId
+          ? { ...item, imagePrompt }
+          : item),
+      } : current);
+      setProductionConfirmation(false);
+      setProductionInstruction("");
+    } catch (promptError) {
+      setError(promptError instanceof Error ? promptError.message : "图片提示词生成失败。");
     } finally {
       setStartingProduction(false);
     }
   };
   const startProduction = async () => {
-    if (!shot || !productionPreview) return;
-    if (!shot) return;
+    if (!shot || !shot.imagePrompt) return;
     setStartingProduction(true);
     setError("");
     try {
-      const production = await startShotProduction(
+      const production = await generateStoryboardImage(
         projectId,
         productionEpisodeId,
         shot.resourceId,
-        productionPreview.prompt,
-        productionInstruction,
       );
       setStoryboard((current) => current ? {
         ...current,
@@ -3970,49 +4320,48 @@ export function StoryboardShotPage() {
           ? { ...item, production }
           : item),
       } : current);
-      setProductionConfirmation(false);
-      setProductionPreview(null);
-      setProductionInstruction("");
     } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "镜头开始制作失败。");
+      setError(startError instanceof Error ? startError.message : "镜头图片生成失败。");
     } finally {
       setStartingProduction(false);
     }
   };
-  const previewVideo = async () => {
+  const createVideoPrompt = async () => {
     if (!shot) return;
     setStartingVideo(true);
     setError("");
     try {
-      setVideoPreview(await previewShotVideo(
+      const videoPrompt = await generateStoryboardVideoPrompt(
         projectId,
         productionEpisodeId,
         shot.resourceId,
         videoInstruction,
-      ));
-    } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : "视频生成规格加载失败。");
+      );
+      setStoryboard((current) => current ? {
+        ...current,
+        shots: current.shots.map((item) => item.resourceId === shot.resourceId
+          ? { ...item, videoPrompt }
+          : item),
+      } : current);
+      setVideoConfirmation(false);
+      setVideoInstruction("");
+    } catch (promptError) {
+      setError(promptError instanceof Error ? promptError.message : "视频提示词生成失败。");
     } finally {
       setStartingVideo(false);
     }
   };
   const createVideo = async () => {
-    if (!shot || !videoPreview) return;
+    if (!shot || !shot.videoPrompt) return;
     setStartingVideo(true);
     setError("");
     try {
-      const started = await startShotVideo(
+      const started = await generateStoryboardVideo(
         projectId,
         productionEpisodeId,
         shot.resourceId,
-        videoPreview.prompt,
-        videoPreview.previewHash,
-        videoInstruction,
       );
       setVideo(started);
-      setVideoConfirmation(false);
-      setVideoPreview(null);
-      setVideoInstruction("");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "镜头视频任务创建失败。");
     } finally {
@@ -4035,7 +4384,6 @@ export function StoryboardShotPage() {
   }
 
   const shotCode = `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")}`;
-  const generatesOnlyLastFrame = shot.productionMode === "first-last-continuous" && Boolean(shot.production?.outputUrl);
   const shotIndex = storyboard?.shots.findIndex((item) => item.resourceId === shotResourceId) ?? -1;
   const previousShot = shotIndex > 0 ? storyboard?.shots[shotIndex - 1] : undefined;
   const nextShot = shotIndex >= 0 && shotIndex < (storyboard?.shots.length ?? 0) - 1
@@ -4089,25 +4437,28 @@ export function StoryboardShotPage() {
               onCancel={() => setEditingTextField(null)}
             />
           </div>
-          {!shot.production?.outputUrl && (
-            <div className="shot-production-actions">
-              <button
-                className="primary-button"
-                onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
-                disabled={startingProduction
-                  || associationsDirty
-                  || associationDraft.length === 0
-                  || ["queued", "running"].includes(shot.production?.status ?? "")}
-              >
-                <Play size={14} />
-                {startingProduction
-                  ? shot.productionMode === "first-last-continuous" ? "正在生成首尾帧" : "正在生成首帧"
-                  : ["queued", "running"].includes(shot.production?.status ?? "")
-                    ? "正在制作"
-                    : shot.productionMode === "first-last-continuous" ? "开始制作首尾帧" : "开始制作首帧"}
-              </button>
-            </div>
-          )}
+          <div className="shot-production-actions">
+            <button
+              className="secondary-button"
+              onClick={() => { setProductionInstruction(shot.imagePrompt?.instruction ?? ""); setProductionConfirmation(true); }}
+              disabled={startingProduction || associationsDirty || associationDraft.length === 0}
+            >
+              <Sparkles size={14} />
+              {startingProduction ? "处理中" : shot.imagePrompt ? "重生成图片提示词" : "生成图片提示词"}
+            </button>
+            <button
+              className="primary-button"
+              onClick={() => void startProduction()}
+              disabled={!shot.imagePrompt
+                || startingProduction
+                || associationsDirty
+                || associationDraft.length === 0
+                || ["queued", "running"].includes(shot.production?.status ?? "")}
+            >
+              <ImagePlus size={14} />
+              {startingProduction ? "处理中" : shot.production?.outputUrl ? "重新生成图片" : "生成图片"}
+            </button>
+          </div>
         </header>
         <section className={`shot-directing-analysis ${shot.productionMode === "first-last-continuous" ? "continuous" : "direct"}`} aria-label="镜头执行分析">
           <div className="shot-directing-toolbar">
@@ -4156,6 +4507,12 @@ export function StoryboardShotPage() {
             <div><span className="eyebrow">声音</span><EditableShotText field="sound" value={shot.sound} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
           </div>
         </section>
+        <section className="shot-prompt-stage" aria-label="图片提示词">
+          <header><span className="eyebrow">图片提示词</span><strong>{shot.imagePrompt ? `v${shot.imagePrompt.version}` : "未生成"}</strong></header>
+          {shot.imagePrompt
+            ? <textarea readOnly rows={7} value={shot.imagePrompt.prompt} />
+            : <p>先生成提示词，再按提示词生成首帧或首尾帧。</p>}
+        </section>
         {shot.hooks?.length > 0 && (
           <section className="shot-hook-details" aria-label="本镜头爆点">
             <header><span className="eyebrow">本镜头落实的爆点</span><strong>{shot.hooks.length} 项</strong></header>
@@ -4179,7 +4536,8 @@ export function StoryboardShotPage() {
                   <button
                     className="media-regenerate-button"
                     type="button"
-                    onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
+                    onClick={() => void startProduction()}
+                    disabled={!shot.imagePrompt || startingProduction}
                   >
                     <RefreshCw size={13} />{shot.productionMode === "first-last-continuous"
                       ? shot.production.lastFrameUrl ? "重新生成尾帧" : "生成尾帧"
@@ -4204,7 +4562,8 @@ export function StoryboardShotPage() {
                   <button
                     className="media-regenerate-button"
                     type="button"
-                    onClick={() => { setProductionInstruction(""); setProductionPreview(null); setProductionConfirmation(true); }}
+                    onClick={() => void startProduction()}
+                    disabled={!shot.imagePrompt || startingProduction}
                   >
                     <RefreshCw size={13} />重新生成尾帧
                   </button>
@@ -4228,20 +4587,32 @@ export function StoryboardShotPage() {
             </div>
             <div className="shot-production-actions">
               {video && <span className={`state-label ${video.status}`}>{productionStatusLabel(video.status)}</span>}
-              {!video?.url && (
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={() => { setVideoInstruction(""); setVideoPreview(null); setVideoConfirmation(true); }}
-                  disabled={!shot.production?.outputAssetId || startingVideo || ["queued", "running"].includes(video?.status ?? "")}
-                >
-                  <Play size={14} />
-                  {startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : "生成视频"}
-                </button>
-              )}
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => { setVideoInstruction(shot.videoPrompt?.instruction ?? ""); setVideoConfirmation(true); }}
+                disabled={!shot.production?.outputAssetId || startingVideo}
+              >
+                <Sparkles size={14} />{startingVideo ? "处理中" : shot.videoPrompt ? "重生成视频提示词" : "生成视频提示词"}
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void createVideo()}
+                disabled={!shot.videoPrompt || startingVideo || ["queued", "running"].includes(video?.status ?? "")}
+              >
+                <Play size={14} />
+                {startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : video?.url ? "重新生成视频" : "生成视频"}
+              </button>
               {video && <NavLink className="secondary-button" to={`/projects/${projectId}/production/runs/${video.runId}`}>查看运行</NavLink>}
             </div>
           </header>
+          {shot.videoPrompt && (
+            <details className="shot-saved-prompt" open={!video?.url}>
+              <summary>当前视频提示词 · v{shot.videoPrompt.version}</summary>
+              <textarea readOnly rows={8} value={shot.videoPrompt.prompt} />
+            </details>
+          )}
           {video?.url && (
             <div className="shot-video-output">
               <div className="shot-video-shell">
@@ -4251,7 +4622,8 @@ export function StoryboardShotPage() {
                 <button
                   className="media-regenerate-button"
                   type="button"
-                  onClick={() => { setVideoInstruction(""); setVideoPreview(null); setVideoConfirmation(true); }}
+                  onClick={() => void createVideo()}
+                  disabled={!shot.videoPrompt || startingVideo}
                 >
                   <RefreshCw size={13} />重新生成
                 </button>
@@ -4379,41 +4751,26 @@ export function StoryboardShotPage() {
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
-              void (videoPreview ? createVideo() : previewVideo());
+              void createVideoPrompt();
             }}
           >
             <span className="eyebrow">MINIMAX H3 / {shotCode}</span>
-            <h2>{videoPreview ? "核对视频生成规格" : video?.status === "completed" ? "重新生成镜头视频" : "生成镜头视频"}</h2>
-            <p>{videoPreview ? "确认后任务进入后台队列，关闭页面不会中断生成。" : "先锁定当前项目分辨率、关键帧版本、提示词和 H3 参数。"}</p>
-            {!videoPreview && (
-              <label className="generation-instruction-field">
-                <span>本次修改意见（可选）</span>
-                <textarea
-                  rows={4}
-                  value={videoInstruction}
-                  onChange={(event) => setVideoInstruction(event.target.value)}
-                  placeholder="例如：动作更克制，固定机位，结尾多停留半秒"
-                />
-              </label>
-            )}
-            {videoPreview && (
-              <div className="generation-preview">
-                <label><span>完整提示词</span><textarea readOnly rows={10} value={videoPreview.prompt} /></label>
-                <dl className="generation-parameters">
-                  <div><dt>输出</dt><dd>{videoPreview.width} × {videoPreview.height}</dd></div>
-                  <div><dt>时长</dt><dd>{videoPreview.durationSeconds} 秒</dd></div>
-                  <div><dt>采样</dt><dd>{videoPreview.frameCount} 帧 · {videoPreview.fps} FPS</dd></div>
-                  <div><dt>关键帧</dt><dd>{videoPreview.lastFrameAssetId ? "首帧 + 尾帧" : "仅首帧"}</dd></div>
-                  <div><dt>Workflow</dt><dd>{videoPreview.workflowProfile}</dd></div>
-                  <div><dt>参数</dt><dd>euler · simple · 4 steps</dd></div>
-                </dl>
-              </div>
-            )}
+            <h2>{shot.videoPrompt ? "重新生成视频提示词" : "生成视频提示词"}</h2>
+            <p>根据当前镜头文本、项目设定和已生成关键帧保存一版视频提示词。此步骤不会启动视频生成。</p>
+            <label className="generation-instruction-field">
+              <span>本次修改意见（可选）</span>
+              <textarea
+                rows={4}
+                value={videoInstruction}
+                onChange={(event) => setVideoInstruction(event.target.value)}
+                placeholder="例如：动作更克制，固定机位，结尾多停留半秒"
+              />
+            </label>
             <div>
-              <button className="secondary-button" type="button" onClick={() => { setVideoConfirmation(false); setVideoPreview(null); }}>取消</button>
+              <button className="secondary-button" type="button" onClick={() => setVideoConfirmation(false)}>取消</button>
               <button className="primary-button" type="submit" disabled={startingVideo}>
-                <Play size={13} />
-                {startingVideo ? "处理中" : videoPreview ? "确认并加入队列" : "预览生成规格"}
+                <Sparkles size={13} />
+                {startingVideo ? "正在生成" : "生成提示词"}
               </button>
             </div>
           </form>
@@ -4426,39 +4783,26 @@ export function StoryboardShotPage() {
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
-              void (productionPreview ? startProduction() : previewProduction());
+              void createProductionPrompt();
             }}
           >
             <span className="eyebrow">图像模型 / {shotCode}</span>
-            <h2>{productionPreview
-              ? `核对${generatesOnlyLastFrame ? "尾帧" : "镜头帧"}生成规格`
-              : generatesOnlyLastFrame
-                ? "制作尾帧"
-                : `${shot.production?.status === "completed" ? "重新制作" : "制作"}${shot.productionMode === "first-last-continuous" ? "首帧与尾帧" : "首帧"}`}</h2>
-            <p>{productionPreview
-              ? generatesOnlyLastFrame
-                ? "确认后将复用当前首帧作为连续性锚点，只生成尾帧。"
-                : `确认后将按当前输入版本生成${shot.productionMode === "first-last-continuous" ? "首帧，再以首帧为连续性锚点生成尾帧" : "首帧"}。`
-              : generatesOnlyLastFrame
-                ? "当前首帧会保持不变；先预览尾帧完整生成规格。"
-                : "先预览完整生成规格；每张图片、输入资产版本和对应提示词都会随结果保存。"}</p>
-            {!productionPreview && (
-              <label className="generation-instruction-field">
-                <span>本次修改意见（可选）</span>
-                <textarea
-                  rows={4}
-                  value={productionInstruction}
-                  onChange={(event) => setProductionInstruction(event.target.value)}
-                  placeholder="例如：人物表情更克制，晨光更柔和，保持当前场景构图"
-                />
-              </label>
-            )}
-            {productionPreview && <GenerationPreviewDetails preview={productionPreview} />}
+            <h2>{shot.imagePrompt ? "重新生成图片提示词" : "生成图片提示词"}</h2>
+            <p>根据当前镜头、项目设定和关联资产保存一版图片提示词。此步骤不会生成图片。</p>
+            <label className="generation-instruction-field">
+              <span>本次修改意见（可选）</span>
+              <textarea
+                rows={4}
+                value={productionInstruction}
+                onChange={(event) => setProductionInstruction(event.target.value)}
+                placeholder="例如：人物表情更克制，晨光更柔和，保持当前场景构图"
+              />
+            </label>
             <div>
-              <button className="secondary-button" type="button" onClick={() => { setProductionConfirmation(false); setProductionPreview(null); }}>取消</button>
+              <button className="secondary-button" type="button" onClick={() => setProductionConfirmation(false)}>取消</button>
               <button className="primary-button" type="submit" disabled={startingProduction}>
                 <Sparkles size={13} />
-                {startingProduction ? "处理中" : productionPreview ? "确认并开始制作" : "预览生成规格"}
+                {startingProduction ? "正在生成" : "生成提示词"}
               </button>
             </div>
           </form>

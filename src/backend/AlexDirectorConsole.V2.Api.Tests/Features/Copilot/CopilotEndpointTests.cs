@@ -87,13 +87,16 @@ public sealed class CopilotEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Reset_removes_conversation_history()
+    public async Task Reset_clears_history_but_keeps_session()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
         await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/copilot/messages",
             new { content = "你好" });
+        var beforeReset = await client.GetFromJsonAsync<ConversationResponse>(
+            $"/api/v2/projects/{projectId}/copilot/messages");
+        Assert.NotNull(beforeReset);
 
         var response = await client.DeleteAsync($"/api/v2/projects/{projectId}/copilot/messages");
 
@@ -101,7 +104,7 @@ public sealed class CopilotEndpointTests(V2ApiFactory factory)
         var conversation = await client.GetFromJsonAsync<ConversationResponse>(
             $"/api/v2/projects/{projectId}/copilot/messages");
         Assert.NotNull(conversation);
-        Assert.Null(conversation.ConversationId);
+        Assert.Equal(beforeReset.ConversationId, conversation.ConversationId);
         Assert.Empty(conversation.Messages);
     }
 

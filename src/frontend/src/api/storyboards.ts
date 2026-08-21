@@ -24,7 +24,10 @@ export interface StoryboardShot {
   lastFrameDescription: string
   cutDescription: string
   linkedAssets: StoryboardLinkedAsset[]
+  imagePrompt: StoryboardMediaPrompt | null
+  videoPrompt: StoryboardMediaPrompt | null
   production: ShotProduction | null
+  videoProduction: ShotVideoProduction | null
   status: string
   updatedAtUtc: string
 }
@@ -288,3 +291,104 @@ export interface StoryboardHook {
   type: 'small' | 'big'
   description: string
 }
+
+export interface StoryboardMediaPrompt {
+  assetId: string
+  shotResourceId: string
+  kind: 'image' | 'video'
+  version: number
+  prompt: string
+  instruction?: string | null
+  previewHash?: string | null
+  createdAtUtc: string
+}
+
+export interface BatchStoryboardMediaResult {
+  generated: number
+  skipped: number
+  failed: number
+  errors: string[]
+}
+
+function shotImageRoute(projectId: string, productionEpisodeId: string, shotResourceId: string) {
+  return `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/image`
+}
+
+export async function generateStoryboardImagePrompt(
+  projectId: string,
+  productionEpisodeId: string,
+  shotResourceId: string,
+  instruction?: string,
+): Promise<StoryboardMediaPrompt> {
+  const response = await fetch(`${shotImageRoute(projectId, productionEpisodeId, shotResourceId)}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction }),
+  })
+  if (!response.ok) throw await readError(response, '图片提示词生成失败。')
+  return response.json() as Promise<StoryboardMediaPrompt>
+}
+
+export async function generateStoryboardImage(
+  projectId: string,
+  productionEpisodeId: string,
+  shotResourceId: string,
+): Promise<ShotProduction> {
+  const response = await fetch(`${shotImageRoute(projectId, productionEpisodeId, shotResourceId)}/generate`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await readError(response, '镜头图片生成失败。')
+  return response.json() as Promise<ShotProduction>
+}
+
+export async function generateStoryboardVideoPrompt(
+  projectId: string,
+  productionEpisodeId: string,
+  shotResourceId: string,
+  instruction?: string,
+): Promise<StoryboardMediaPrompt> {
+  const response = await fetch(`${shotVideoRoute(projectId, productionEpisodeId, shotResourceId)}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction }),
+  })
+  if (!response.ok) throw await readError(response, '视频提示词生成失败。')
+  return response.json() as Promise<StoryboardMediaPrompt>
+}
+
+export async function generateStoryboardVideo(
+  projectId: string,
+  productionEpisodeId: string,
+  shotResourceId: string,
+): Promise<ShotVideoProduction> {
+  const response = await fetch(`${shotVideoRoute(projectId, productionEpisodeId, shotResourceId)}/generate`, {
+    method: 'POST',
+  })
+  if (!response.ok) throw await readError(response, '镜头视频任务创建失败。')
+  return response.json() as Promise<ShotVideoProduction>
+}
+
+async function runStoryboardBatch(
+  projectId: string,
+  productionEpisodeId: string,
+  operation: 'image-prompts' | 'images' | 'video-prompts' | 'videos',
+): Promise<BatchStoryboardMediaResult> {
+  const response = await fetch(
+    `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/batch/${operation}`,
+    { method: 'POST' },
+  )
+  if (!response.ok) throw await readError(response, '分镜批量操作失败。')
+  return response.json() as Promise<BatchStoryboardMediaResult>
+}
+
+export const generateMissingStoryboardImagePrompts = (projectId: string, productionEpisodeId: string) =>
+  runStoryboardBatch(projectId, productionEpisodeId, 'image-prompts')
+
+export const generateMissingStoryboardImages = (projectId: string, productionEpisodeId: string) =>
+  runStoryboardBatch(projectId, productionEpisodeId, 'images')
+
+export const generateMissingStoryboardVideoPrompts = (projectId: string, productionEpisodeId: string) =>
+  runStoryboardBatch(projectId, productionEpisodeId, 'video-prompts')
+
+export const generateMissingStoryboardVideos = (projectId: string, productionEpisodeId: string) =>
+  runStoryboardBatch(projectId, productionEpisodeId, 'videos')

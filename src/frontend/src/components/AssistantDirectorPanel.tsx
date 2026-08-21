@@ -3,6 +3,7 @@ import { Bot, RotateCcw, SendHorizontal, Sparkles, X } from "lucide-react";
 import {
   getScopedSession,
   resetSession,
+  retrySessionMessage,
   sendSessionMessage,
   type SessionMessage,
   type SessionRecord,
@@ -105,10 +106,28 @@ export function AssistantDirectorPanel({
     setError(null);
     try {
       await resetSession(activeSession.id);
-      setActiveSession(null);
+      setActiveSession({ ...activeSession, messages: [] });
       setMessages([]);
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : "副导演会话清空失败。");
+    }
+  }
+
+  async function retryMessage(messageId: string) {
+    if (sending || !activeSession) return;
+    setSending(true);
+    setError(null);
+    try {
+      const updatedSession = await retrySessionMessage(activeSession.id, messageId, {
+        page: session.page,
+        episode: session.episode ?? "未选择",
+      });
+      setActiveSession(updatedSession);
+      setMessages(updatedSession.messages);
+    } catch (retryError) {
+      setError(retryError instanceof Error ? retryError.message : "副导演消息重试失败。");
+    } finally {
+      setSending(false);
     }
   }
 
@@ -159,7 +178,20 @@ export function AssistantDirectorPanel({
           <div className="agent-messages">
             {messages.map((item) => (
               <article className={`agent-message ${item.role}`} key={item.id}>
-                <header>{item.role === "user" ? "导演" : "副导演"}</header>
+                <header>
+                  <span>{item.role === "user" ? "导演" : "副导演"}</span>
+                  {item.role === "user" && (
+                    <button
+                      className="agent-message-retry"
+                      onClick={() => void retryMessage(item.id)}
+                      disabled={sending}
+                      aria-label="从这条消息重试"
+                      title="从这条消息重试；已执行的项目操作不会撤销"
+                    >
+                      <RotateCcw size={12} />
+                    </button>
+                  )}
+                </header>
                 <p>{item.content}</p>
               </article>
             ))}

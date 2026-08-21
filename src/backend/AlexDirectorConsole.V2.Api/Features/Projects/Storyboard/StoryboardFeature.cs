@@ -87,7 +87,10 @@ public sealed record StoryboardShotView(
     string LastFrameDescription,
     string CutDescription,
     IReadOnlyList<StoryboardLinkedAssetView> LinkedAssets,
+    StoryboardMediaPromptView? ImagePrompt,
+    StoryboardMediaPromptView? VideoPrompt,
     ShotProductionView? Production,
+    ShotVideoProductionView? VideoProduction,
     string Status,
     DateTimeOffset UpdatedAtUtc);
 
@@ -197,7 +200,8 @@ public sealed record StartShotProductionCommand(
     Guid ProductionEpisodeId,
     Guid ShotResourceId,
     string ConfirmedPrompt,
-    string? Instruction)
+    string? Instruction,
+    bool FirstFrameOnly = false)
     : ICommand<ShotProductionView?>;
 
 public sealed record UpdateStoryboardShotAssetsRequest(IReadOnlyList<Guid>? AssetResourceIds);
@@ -632,6 +636,19 @@ internal static class StoryboardQueries
         var states = await dbContext.ResourceStates.AsNoTracking()
             .Where(item => item.ProjectId == projectId && resourceIds.Contains(item.ResourceId))
             .ToDictionaryAsync(item => item.ResourceId, cancellationToken);
+        var shotResourceIdsByAssetId = definitions.ToDictionary(item => item.ShotAssetId, item => item.ShotResourceId);
+        var imagePrompts = await StoryboardMediaPromptQueries.GetCurrentByShotAsync(
+            dbContext,
+            projectId,
+            shotResourceIdsByAssetId,
+            StoryboardMediaPromptService.ImageKind,
+            cancellationToken);
+        var videoPrompts = await StoryboardMediaPromptQueries.GetCurrentByShotAsync(
+            dbContext,
+            projectId,
+            shotResourceIdsByAssetId,
+            StoryboardMediaPromptService.VideoKind,
+            cancellationToken);
         var shots = new List<StoryboardShotView>();
         foreach (var definition in definitions)
         {
@@ -643,6 +660,12 @@ internal static class StoryboardQueries
                 ?? throw new InvalidOperationException("镜头资产内容无效。");
             var linkedAssets = await GetLinkedAssetsAsync(dbContext, definition, cancellationToken);
             var production = await GetProductionAsync(dbContext, definition, cancellationToken);
+            var videoProduction = await ShotVideoQueries.GetAsync(
+                dbContext,
+                projectId,
+                productionEpisodeId,
+                definition.ShotResourceId,
+                cancellationToken);
             shots.Add(new StoryboardShotView(
                 asset.Id,
                 asset.ResourceId,
@@ -671,7 +694,10 @@ internal static class StoryboardQueries
                     ? document.Action
                     : document.CutDescription,
                 linkedAssets,
+                imagePrompts.GetValueOrDefault(definition.ShotResourceId),
+                videoPrompts.GetValueOrDefault(definition.ShotResourceId),
                 production,
+                videoProduction,
                 state.LifecycleStatus,
                 asset.UpdatedAtUtc));
             }
@@ -712,8 +738,6 @@ internal static class StoryboardQueries
                 .Select(item => item.SourceAssetId)
                 .ToArrayAsync(cancellationToken);
         }
-        if (linkedIds.Length == 0) return [];
-
         var linkedResourceIds = await dbContext.Assets.AsNoTracking()
             .Where(item => linkedIds.Contains(item.Id))
             .Select(item => item.ResourceId)
@@ -853,7 +877,8 @@ internal static class StoryboardQueries
             shotAsset.DocumentJson ?? "{}",
             StoryboardDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前镜头内容无法读取。");
-        return ShotProductionModes.ForShot(shot) == ShotProductionModes.DirectFirstFrame
+        return view.Mode == ShotProductionModes.DirectFirstFrame
+            || ShotProductionModes.ForShot(shot) == ShotProductionModes.DirectFirstFrame
             ? view with
             {
                 Mode = ShotProductionModes.DirectFirstFrame,
@@ -1541,7 +1566,9 @@ public sealed class StartShotProductionCommandHandler(
             shotAsset.DocumentJson ?? "{}",
             StoryboardDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前镜头内容无法读取。");
-        var mode = ShotProductionModes.ForShot(shotDocument);
+        var mode = command.FirstFrameOnly
+            ? ShotProductionModes.DirectFirstFrame
+            : ShotProductionModes.ForShot(shotDocument);
         var reusableFirstFrame = mode == ShotProductionModes.FirstLastContinuous
             ? await frameService.ResolveCurrentFrameAsync(
                 command.ProjectId,

@@ -48,21 +48,33 @@ public sealed class SkillCatalogSynchronizer(
         dbContext.SkillDefinitions.RemoveRange(removedSystemSkills);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        const string projectManagementSkillId = "project-management";
-        if (catalogIds.Contains(projectManagementSkillId)
-            && await dbContext.AgentDefinitions.AnyAsync(
-                agent => agent.Id == BuiltInAgents.AssistantDirectorId,
-                cancellationToken)
-            && !await dbContext.AgentSkills.AnyAsync(
-                link => link.AgentId == BuiltInAgents.AssistantDirectorId
-                    && link.SkillId == projectManagementSkillId,
-                cancellationToken))
+        var assistantDirectorSkillIds = new[]
         {
-            dbContext.AgentSkills.Add(new AgentSkill
+            "project-management",
+            "script-writing",
+            "script-breakdown",
+            "storyboard-design",
+            "shot-first-frame"
+        };
+        if (await dbContext.AgentDefinitions.AnyAsync(
+            agent => agent.Id == BuiltInAgents.AssistantDirectorId,
+            cancellationToken))
+        {
+            var existingSkillIds = (await dbContext.AgentSkills
+                .Where(link => link.AgentId == BuiltInAgents.AssistantDirectorId)
+                .Select(link => link.SkillId)
+                .ToArrayAsync(cancellationToken))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var skillId in assistantDirectorSkillIds
+                .Where(catalogIds.Contains)
+                .Where(skillId => !existingSkillIds.Contains(skillId)))
             {
-                AgentId = BuiltInAgents.AssistantDirectorId,
-                SkillId = projectManagementSkillId
-            });
+                dbContext.AgentSkills.Add(new AgentSkill
+                {
+                    AgentId = BuiltInAgents.AssistantDirectorId,
+                    SkillId = skillId
+                });
+            }
             await dbContext.SaveChangesAsync(cancellationToken);
         }
     }
