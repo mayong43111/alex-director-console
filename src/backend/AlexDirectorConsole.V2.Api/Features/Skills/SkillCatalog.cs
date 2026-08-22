@@ -1,5 +1,4 @@
 using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
 
 namespace AlexDirectorConsole.V2.Api.Features.Skills;
 
@@ -34,55 +33,67 @@ public sealed class SkillCatalog(IWebHostEnvironment environment) : ISkillCatalo
         if (!Directory.Exists(root)) return [];
 
         var deserializer = new DeserializerBuilder()
-            .WithNamingConvention(HyphenatedNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
             .Build();
         var loaded = new List<SkillMetadata>();
-        foreach (var filePath in Directory.EnumerateFiles(root, "SKILL.md", SearchOption.AllDirectories))
+        foreach (var filePath in Directory.EnumerateFiles(root, "skill.yaml", SearchOption.AllDirectories))
         {
             var content = File.ReadAllText(filePath);
-            var parts = content.Split("---", 3, StringSplitOptions.None);
-            if (parts.Length != 3 || !string.IsNullOrWhiteSpace(parts[0]))
-            {
-                throw new InvalidOperationException($"Skill 文件缺少 YAML frontmatter：{filePath}");
-            }
-
-            var frontmatter = deserializer.Deserialize<SkillFrontmatter>(parts[1])
-                ?? throw new InvalidOperationException($"Skill frontmatter 无效：{filePath}");
+            var definition = deserializer.Deserialize<SkillYamlDefinition>(content)
+                ?? throw new InvalidOperationException($"Skill YAML 无效：{filePath}");
             var directoryName = Path.GetFileName(Path.GetDirectoryName(filePath));
-            if (string.IsNullOrWhiteSpace(frontmatter.Name)
-                || !frontmatter.Name.Equals(directoryName, StringComparison.Ordinal)
-                || !frontmatter.Name.All(character => char.IsLower(character)
+            if (definition.SchemaVersion != 1 || definition.Kind != "skill")
+            {
+                throw new InvalidOperationException($"Skill YAML schemaVersion/kind 无效：{filePath}");
+            }
+            if (string.IsNullOrWhiteSpace(definition.Id)
+                || !definition.Id.Equals(directoryName, StringComparison.Ordinal)
+                || !definition.Id.All(character => char.IsLower(character)
                     || char.IsDigit(character)
                     || character == '-'))
             {
-                throw new InvalidOperationException($"Skill name 必须是与目录名一致的小写短横线标识：{filePath}");
+                throw new InvalidOperationException($"Skill id 必须是与目录名一致的小写短横线标识：{filePath}");
             }
-            if (string.IsNullOrWhiteSpace(frontmatter.Description))
+            if (string.IsNullOrWhiteSpace(definition.Description)
+                || string.IsNullOrWhiteSpace(definition.Instructions))
             {
-                throw new InvalidOperationException($"Skill description 不能为空：{filePath}");
+                throw new InvalidOperationException($"Skill description/instructions 不能为空：{filePath}");
             }
 
             loaded.Add(new SkillMetadata(
-                frontmatter.Name,
-                string.IsNullOrWhiteSpace(frontmatter.Title) ? frontmatter.Name : frontmatter.Title.Trim(),
-                frontmatter.Description.Trim(),
-                string.IsNullOrWhiteSpace(frontmatter.Version) ? "1.0.0" : frontmatter.Version.Trim(),
-                (frontmatter.AllowedTools ?? string.Empty)
-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-                content,
+                definition.Id,
+                string.IsNullOrWhiteSpace(definition.Name) ? definition.Id : definition.Name.Trim(),
+                definition.Description.Trim(),
+                string.IsNullOrWhiteSpace(definition.Version) ? "1.0.0" : definition.Version.Trim(),
+                definition.AllowedTools
+                    .Where(tool => !string.IsNullOrWhiteSpace(tool))
+                    .Select(tool => tool.Trim())
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                definition.Instructions.Trim(),
                 Path.GetRelativePath(root, filePath).Replace('\\', '/')));
         }
 
         return loaded.OrderBy(skill => skill.Title, StringComparer.Ordinal).ToArray();
     }
 
-    private sealed class SkillFrontmatter
+    private sealed class SkillYamlDefinition
     {
+        [YamlMember(Alias = "schemaVersion")]
+        public int SchemaVersion { get; set; }
+        [YamlMember(Alias = "kind")]
+        public string Kind { get; set; } = string.Empty;
+        [YamlMember(Alias = "id")]
+        public string Id { get; set; } = string.Empty;
+        [YamlMember(Alias = "name")]
         public string Name { get; set; } = string.Empty;
-        public string Title { get; set; } = string.Empty;
+        [YamlMember(Alias = "description")]
         public string Description { get; set; } = string.Empty;
+        [YamlMember(Alias = "version")]
         public string Version { get; set; } = string.Empty;
-        public string? AllowedTools { get; set; }
+        [YamlMember(Alias = "allowedTools")]
+        public string[] AllowedTools { get; set; } = [];
+        [YamlMember(Alias = "instructions")]
+        public string Instructions { get; set; } = string.Empty;
     }
 }

@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
+using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Models;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Features.Sessions;
 
@@ -114,6 +116,99 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
         Assert.Equal(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
     }
 
+    [Fact]
+    public void Continue_after_partial_first_frames_requires_the_next_frame_tool()
+    {
+        var history = new SessionHistoryMessage[]
+        {
+            new("assistant", "镜头首帧已生成 1 张，剩余未生成首帧：4 张。")
+        };
+        var allowedTools = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "generate_next_storyboard_first_frame"
+        };
+
+        var required = MafSessionAgent.GetRequiredToolName(history, "继续", allowedTools);
+
+        Assert.Equal("generate_next_storyboard_first_frame", required);
+    }
+
+    [Fact]
+    public async Task Async_message_task_persists_without_project_and_can_be_stopped()
+    {
+        using var client = factory.CreateClient();
+        var enqueue = await client.PostAsJsonAsync(
+            "/api/v2/sessions/messages/async",
+            new
+            {
+                agentId = BuiltInAgents.AssistantDirectorId,
+                scopeKey = "global:project-center:assistant-director",
+                content = "创建项目测试",
+                page = "项目中心"
+            });
+
+        Assert.Equal(HttpStatusCode.Accepted, enqueue.StatusCode);
+        var queued = await enqueue.Content.ReadFromJsonAsync<AgentTaskResponse>();
+        Assert.NotNull(queued);
+        Assert.Equal("queued", queued.Status);
+        Assert.Null(queued.SessionId);
+
+        var restored = await client.GetFromJsonAsync<AgentTaskResponse>(
+            $"/api/v2/sessions/agent-tasks/{queued.Id}");
+        Assert.NotNull(restored);
+        Assert.Equal("queued", restored.Status);
+
+        var stop = await client.PostAsync(
+            $"/api/v2/sessions/agent-tasks/{queued.Id}/stop",
+            null);
+        Assert.Equal(HttpStatusCode.OK, stop.StatusCode);
+        var stopped = await stop.Content.ReadFromJsonAsync<AgentTaskResponse>();
+        Assert.NotNull(stopped);
+        Assert.Equal("cancelled", stopped.Status);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<AlexDirectorConsole.V2.Database.Data.V2DbContext>();
+        var events = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToArrayAsync(
+            dbContext.AgentTaskEvents.Where(item => item.TaskId == queued.Id).OrderBy(item => item.Sequence));
+        Assert.Equal([1L, 2L], events.Select(item => item.Sequence));
+        Assert.Equal(["queued", "cancelled"], events.Select(item => item.Stage));
+    }
+
+    [Fact]
+    public async Task Worker_completes_persistent_message_task_and_writes_session()
+    {
+        using var client = factory.CreateClient();
+        var worker = new SessionAgentTaskWorker(
+            factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            factory.Services.GetRequiredService<SessionAgentTaskCancellation>(),
+            factory.Services.GetRequiredService<SessionAgentExecutionContext>(),
+            TimeProvider.System,
+            factory.Services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<SessionAgentTaskWorker>>());
+        var enqueue = await client.PostAsJsonAsync(
+                "/api/v2/sessions/messages/async",
+                new
+                {
+                    agentId = BuiltInAgents.AssistantDirectorId,
+                    scopeKey = "global:worker-test:assistant-director",
+                    content = "列出项目",
+                    page = "项目中心"
+                });
+        var task = await enqueue.Content.ReadFromJsonAsync<AgentTaskResponse>();
+        Assert.NotNull(task);
+
+        Assert.True(await worker.ProcessNextAsync(CancellationToken.None));
+        var completed = await client.GetFromJsonAsync<AgentTaskResponse>(
+            $"/api/v2/sessions/agent-tasks/{task.Id}");
+        Assert.NotNull(completed);
+        Assert.Equal("completed", completed.Status);
+        Assert.NotNull(completed.SessionId);
+        var session = await client.GetFromJsonAsync<SessionResponse>(
+            $"/api/v2/sessions/{completed.SessionId}");
+        Assert.NotNull(session);
+        Assert.Equal(2, session.Messages.Length);
+        worker.Dispose();
+    }
+
     private static async Task<SessionResponse> SendAsync(
         HttpClient client,
         string scopeKey,
@@ -147,6 +242,8 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
     }
 
     private sealed record ProjectResponse(Guid Id);
+
+    private sealed record AgentTaskResponse(Guid Id, Guid? SessionId, string Status);
 
     private sealed record SessionSummaryResponse(
         Guid Id,

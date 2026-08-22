@@ -2274,6 +2274,18 @@ button { color: inherit; }
 .settings-cover > .ant-image { width: 100%; height: 100%; display: block; }
 .settings-cover > .ant-image > img { width: 100%; height: 100%; display: block; object-fit: contain; }
 .settings-cover-empty { height: 100%; display: grid; place-content: center; justify-items: center; gap: 7px; color: #94a3b8; }
+.settings-cover-generating {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: #fff;
+  background: rgba(15, 23, 42, .72);
+  backdrop-filter: blur(2px);
+}
 .settings-cover-actions {
   position: absolute;
   z-index: 2;

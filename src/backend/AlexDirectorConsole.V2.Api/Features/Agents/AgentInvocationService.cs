@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using Microsoft.Agents.AI;
@@ -32,7 +33,7 @@ public interface IAgentTextInvoker
 public sealed class MafAgentTextInvoker(
     V2DbContext dbContext,
     IDataProtectionProvider dataProtectionProvider,
-    IWebHostEnvironment environment,
+    ISkillCatalog skillCatalog,
     ILoggerFactory loggerFactory) : IAgentTextInvoker
 {
     public async Task<AgentTextInvocationResult> InvokeAsync(
@@ -47,30 +48,17 @@ public sealed class MafAgentTextInvoker(
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
 
-        var sourcePaths = await (
+        var skillIds = await (
             from link in dbContext.AgentSkills.AsNoTracking()
             join skill in dbContext.SkillDefinitions.AsNoTracking() on link.SkillId equals skill.Id
             where link.AgentId == invocation.Agent.Id && skill.IsEnabled
-            select skill.SourcePath)
+            select skill.Id)
             .ToListAsync(cancellationToken);
-        var skillsRoot = Path.GetFullPath(Path.Combine(environment.ContentRootPath, "Skills"));
-        var skillPaths = sourcePaths
-            .Select(sourcePath => Path.GetDirectoryName(sourcePath.Replace('/', Path.DirectorySeparatorChar)))
-            .Where(directory => !string.IsNullOrWhiteSpace(directory))
-            .Select(directory => Path.GetFullPath(Path.Combine(skillsRoot, directory!)))
-            .Where(path => path.StartsWith(skillsRoot, StringComparison.OrdinalIgnoreCase) && Directory.Exists(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var skillInstructions = skillIds
+            .Select(skillCatalog.Get)
+            .Where(skill => skill is not null)
+            .Select(skill => $"## Skill: {skill!.Title}\n{skill.Content}")
             .ToArray();
-        var skillsProvider = new AgentSkillsProvider(
-            skillPaths,
-            scriptRunner: null,
-            fileOptions: null,
-            options: new AgentSkillsProviderOptions
-            {
-                DisableLoadSkillApproval = true,
-                DisableReadSkillResourceApproval = true
-            },
-            loggerFactory);
         var lengthInstruction = invocation.MaxLength is int maxLength
             ? $"候选正文不得超过 {maxLength} 个字符。"
             : string.Empty;
@@ -89,11 +77,11 @@ public sealed class MafAgentTextInvoker(
                     DisableTodoProvider = true,
                     DisableAgentModeProvider = true,
                     DisableAgentSkillsProvider = true,
-                    AIContextProviders = [skillsProvider],
                     ChatOptions = new ChatOptions
                     {
                         Instructions = $$"""
                             {{invocation.Agent.SystemPrompt}}
+                            {{string.Join("\n\n", skillInstructions)}}
                             输出将作为多行文本字段的候选内容。只返回候选正文，不要解释、标题、Markdown 围栏或 JSON。
                             {{lengthInstruction}}
                             """,

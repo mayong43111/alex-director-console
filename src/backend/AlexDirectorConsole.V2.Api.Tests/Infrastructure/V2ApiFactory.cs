@@ -37,6 +37,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IFoundryConnectionTester>();
             services.RemoveAll<IComfyUiConnectionTester>();
             services.RemoveAll<IComfyUiVideoClient>();
+            services.RemoveAll<IComfyUiDialogueClient>();
             services.RemoveAll<IComfyUiWorkflowProvider>();
             services.RemoveAll<IHostedService>();
             services.RemoveAll<ISessionAgent>();
@@ -57,6 +58,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestComfyUiVideoClient>();
             services.AddSingleton<IComfyUiVideoClient>(provider =>
                 provider.GetRequiredService<TestComfyUiVideoClient>());
+            services.AddSingleton<IComfyUiDialogueClient, TestComfyUiDialogueClient>();
             services.AddSingleton<IComfyUiWorkflowProvider, TestComfyUiWorkflowProvider>();
             services.AddScoped<ISessionAgent, TestSessionAgent>();
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
@@ -220,6 +222,24 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     "cpu",
                     48000,
                     0));
+    }
+
+    private sealed class TestComfyUiDialogueClient : IComfyUiDialogueClient
+    {
+        private static readonly byte[] WavBytes =
+        [
+            0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
+            0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+            0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+            0x80, 0xbb, 0x00, 0x00, 0x00, 0x77, 0x01, 0x00,
+            0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
+            0x00, 0x00, 0x00, 0x00
+        ];
+
+        public Task<GeneratedDialogueAudio> GenerateAsync(
+            ComfyUiDialogueRequest request,
+            CancellationToken cancellationToken) => Task.FromResult(
+                new GeneratedDialogueAudio(WavBytes, 48000, 0));
     }
 
     private sealed class TestStoryMaterialAnalyzer : IStoryMaterialAnalyzer

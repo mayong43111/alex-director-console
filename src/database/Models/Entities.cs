@@ -175,7 +175,9 @@ public sealed class ValidationResult
 public sealed class AgentTask
 {
     public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid ProjectId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public Guid? AgentId { get; set; }
+    public Guid? SessionId { get; set; }
     public Guid? ProductionEpisodeId { get; set; }
     public Guid? ParentTaskId { get; set; }
     public string Intent { get; set; } = string.Empty;
@@ -190,6 +192,9 @@ public sealed class AgentTask
     public Guid? RequestedByMessageId { get; set; }
     public string? Model { get; set; }
     public string? LastError { get; set; }
+    public string? LeaseOwner { get; set; }
+    public DateTimeOffset? LeaseExpiresAtUtc { get; set; }
+    public DateTimeOffset? CancellationRequestedAtUtc { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? StartedAtUtc { get; set; }
     public DateTimeOffset? CompletedAtUtc { get; set; }

@@ -336,20 +336,21 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   }
 
   async function generateCover() {
-    const currentSettings = settings;
-    if (!currentSettings || !coverPreview || generatingCover) return;
+    if (!settings || !coverPreview || generatingCover) return;
+    const instruction = coverInstruction.trim() || undefined;
+    const confirmedPrompt = coverPreview.prompt;
     setGeneratingCover(true);
     setError(null);
+    setCoverConfirmation(false);
+    setCoverPreview(null);
+    setCoverInstruction("");
     try {
       const cover = await generateProjectCover(
         projectId,
-        coverInstruction.trim() || undefined,
-        coverPreview.prompt,
+        instruction,
+        confirmedPrompt,
       );
-      setSettings({ ...currentSettings, cover });
-      setCoverConfirmation(false);
-      setCoverPreview(null);
-      setCoverInstruction("");
+      setSettings((current) => current ? { ...current, cover } : current);
       setStatus("saved");
     } catch (coverError) {
       setError(coverError instanceof Error ? coverError.message : "概念封面生成失败。");
@@ -489,6 +490,12 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
               />
             ) : (
               <div className="settings-cover-empty"><ImagePlus size={22} strokeWidth={1.5} /><span>尚未生成封面</span></div>
+            )}
+            {generatingCover && (
+              <div className="settings-cover-generating" role="status" aria-live="polite">
+                <span className="spinner" />
+                <span>正在生成新封面...</span>
+              </div>
             )}
             <div className="settings-cover-actions">
               {settings.cover && (
@@ -635,6 +642,20 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
                     const [width, height] = item.sizes[settings.aspectRatio];
                     return <option value={item.id} key={item.id}>{item.label} · {width} × {height}</option>;
                   })}
+                </select>
+              </label>
+              <label className="resolution-selector">
+                <span>视频提示词模型</span>
+                <select
+                  aria-label="视频提示词模型"
+                  value={settings.videoPromptModel}
+                  onChange={(event) => updateField("videoPromptModel", event.target.value)}
+                >
+                  <option value="minimax-h3-fl2va">当前默认 · MiniMax H3 FL2VA</option>
+                  <option value="minimax-h3">MiniMax H3 · 官方结构</option>
+                  {!['minimax-h3-fl2va', 'minimax-h3'].includes(settings.videoPromptModel) && (
+                    <option value={settings.videoPromptModel}>{settings.videoPromptModel} · 使用默认提示词</option>
+                  )}
                 </select>
               </label>
               <div><span>画面方向</span><strong>{settings.outputWidth > settings.outputHeight ? "横向" : "纵向"}</strong></div>

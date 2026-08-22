@@ -606,6 +606,18 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
     }
 
+    [Theory]
+    [InlineData("药物柜", 2, true)]
+    [InlineData("药物柜", 1, false)]
+    [InlineData("研究文件夹", 3, false)]
+    public void Agent_asset_breakdown_only_keeps_large_recurring_props(
+        string name,
+        int sceneCount,
+        bool expected)
+    {
+        Assert.Equal(expected, SpecialPropPolicy.RequiresLargeRecurringAsset(name, sceneCount));
+    }
+
     private static async Task<Guid> CreateProjectAsync(HttpClient client)
     {
         var response = await client.PostAsJsonAsync(

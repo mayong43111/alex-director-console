@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Reflection;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
@@ -23,7 +24,6 @@ namespace AlexDirectorConsole.V2.Api.Features.Sessions;
 public sealed class MafSessionAgent(
     V2DbContext dbContext,
     IDataProtectionProvider dataProtectionProvider,
-    IWebHostEnvironment environment,
     ISkillCatalog skillCatalog,
     ICommandDispatcher commandDispatcher,
     IQueryDispatcher queryDispatcher,
@@ -31,6 +31,7 @@ public sealed class MafSessionAgent(
     IStoryProductionToolService storyProductionToolService,
     IVisualAssetProductionToolService visualAssetProductionToolService,
     IStoryboardMediaBatchService storyboardMediaBatchService,
+    SessionAgentExecutionContext executionContext,
     ILoggerFactory loggerFactory) : ISessionAgent
 {
     public async Task<SessionAgentReply> ReplyAsync(
@@ -54,24 +55,11 @@ public sealed class MafSessionAgent(
             where link.AgentId == agentDefinition.Id && skill.IsEnabled
             select new { skill.Id, skill.SourcePath })
             .ToArrayAsync(cancellationToken);
-        var skillsRoot = Path.GetFullPath(Path.Combine(environment.ContentRootPath, "Skills"));
-        var skillPaths = enabledSkills
-            .Select(skill => Path.GetDirectoryName(skill.SourcePath.Replace('/', Path.DirectorySeparatorChar)))
-            .Where(directory => !string.IsNullOrWhiteSpace(directory))
-            .Select(directory => Path.GetFullPath(Path.Combine(skillsRoot, directory!)))
-            .Where(path => path.StartsWith(skillsRoot, StringComparison.OrdinalIgnoreCase) && Directory.Exists(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var skillInstructions = enabledSkills
+            .Select(skill => skillCatalog.Get(skill.Id))
+            .Where(skill => skill is not null)
+            .Select(skill => $"## Skill: {skill!.Title}\n{skill.Content}")
             .ToArray();
-        var skillsProvider = new AgentSkillsProvider(
-            skillPaths,
-            scriptRunner: null,
-            fileOptions: null,
-            options: new AgentSkillsProviderOptions
-            {
-                DisableLoadSkillApproval = true,
-                DisableReadSkillResourceApproval = true
-            },
-            loggerFactory);
 
         var allowedToolNames = enabledSkills
             .Select(skill => skillCatalog.Get(skill.Id))
@@ -80,8 +68,9 @@ public sealed class MafSessionAgent(
             .ToHashSet(StringComparer.Ordinal);
         var tools = CreateProjectTools(context)
             .Where(item => allowedToolNames.Contains(item.Name))
-            .Select(item => item.Function)
+            .Select(item => (AIFunction)new ReportingAIFunction(item.Function, executionContext))
             .ToArray();
+        var requiredToolName = GetRequiredToolName(history, message, allowedToolNames);
         var projectContext = context.ProjectId is Guid projectId
             ? $"当前项目：{context.ProjectName}（{projectId:D}）。"
             : "当前没有固定项目；需要操作单个项目时，先查询并确认项目 ID。";
@@ -100,11 +89,11 @@ public sealed class MafSessionAgent(
                     DisableTodoProvider = true,
                     DisableAgentModeProvider = true,
                     DisableAgentSkillsProvider = true,
-                    AIContextProviders = [skillsProvider],
                     ChatOptions = new ChatOptions
                     {
                         Instructions = $$"""
                             {{agentDefinition.SystemPrompt}}
+                            {{string.Join("\n\n", skillInstructions)}}
                             {{projectContext}}
                             当前页面：{{context.Page}}。当前生产集：{{context.Episode}}。
                             用户是导演，拥有最终决定权。使用简洁中文回答。
@@ -112,7 +101,10 @@ public sealed class MafSessionAgent(
                             只能根据工具的真实返回报告执行结果。没有注册项目删除工具；删除项目必须提示用户在项目中心手动操作。
                             """,
                         MaxOutputTokens = 8_192,
-                        Tools = tools
+                            Tools = tools,
+                        ToolMode = requiredToolName is not null
+                            ? ChatToolMode.RequireSpecific(requiredToolName)
+                                : ChatToolMode.Auto
                     }
                 },
                 loggerFactory);
@@ -135,6 +127,35 @@ public sealed class MafSessionAgent(
             response.Text.Trim(),
             LlmChatClientFactory.GetModel(configuration!),
             "MAF HarnessAgent");
+    }
+
+    internal static string? GetRequiredToolName(
+        IReadOnlyList<SessionHistoryMessage> history,
+        string message,
+        IReadOnlySet<string> allowedToolNames)
+    {
+        var previous = history.LastOrDefault();
+        if (previous?.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase) != true)
+        {
+            return null;
+        }
+
+        if (allowedToolNames.Contains("create_project")
+            && previous.Content.Contains("请直接回复我一个项目名称", StringComparison.Ordinal)
+            && message.Trim().Length is > 0 and <= 100)
+        {
+            return "create_project";
+        }
+
+        var isContinuation = message.Trim() is "继续" or "继续生成首帧";
+        if (isContinuation
+            && allowedToolNames.Contains("generate_next_storyboard_first_frame")
+            && previous.Content.Contains("剩余未生成首帧", StringComparison.Ordinal))
+        {
+            return "generate_next_storyboard_first_frame";
+        }
+
+        return null;
     }
 
     private IReadOnlyList<ProjectTool> CreateProjectTools(SessionAgentContext context)
@@ -388,7 +409,7 @@ public sealed class MafSessionAgent(
                 }
             }),
             name: "generate_missing_visual_images",
-            description: "为指定资产类型分步生成缺失参考图。kind 只能是 character、scene 或 prop；maxItems 默认为 1、最多 3。返回 generated、alreadyPresent、failed、remaining 和 errors。一次调用后应立即向用户报告，不要在同一轮对话重复调用；remaining 大于 0 时由下一轮继续。");
+            description: "为指定资产类型分步生成缺失参考图。kind 只能是 character、scene 或 prop；maxItems 默认为 1、最多 3。返回 generated、alreadyPresent、failed、remaining 和 errors；remaining 大于 0 时在同一后台任务中继续调用。失败或收到停止信号时终止。");
         var generateStoryboard = AIFunctionFactory.Create(
             (Func<string?, string, CancellationToken, Task<string>>)(async (
                 projectId,
@@ -502,7 +523,11 @@ public sealed class MafSessionAgent(
                 }
             }),
             name: "generate_next_storyboard_first_frame",
-            description: "每次只为下一条缺失分镜生成首帧图片，绝不创建视频任务。调用一次后立即报告 generated、alreadyPresent、remaining 和错误；remaining 大于 0 时等待下一轮继续。");
+            description: "每次只为下一条缺失分镜生成首帧图片，绝不创建视频任务。返回 generated、alreadyPresent、remaining 和错误；remaining 大于 0 时继续自动调用。");
+        var refreshFrontend = AIFunctionFactory.Create(
+            (Func<string>)(() => Serialize(new { status = "ok", action = "refresh-frontend" })),
+            name: "refresh_frontend",
+            description: "完成项目数据写入后调用，通知当前浏览器刷新并显示最新数据。只读操作不调用。");
 
         return
         [
@@ -519,7 +544,8 @@ public sealed class MafSessionAgent(
             new("generate_missing_visual_images", generateMissingVisualImages),
             new("generate_storyboard", generateStoryboard),
             new("generate_missing_storyboard_image_prompts", generateMissingStoryboardImagePrompts),
-            new("generate_next_storyboard_first_frame", generateNextStoryboardFirstFrame)
+            new("generate_next_storyboard_first_frame", generateNextStoryboardFirstFrame),
+            new("refresh_frontend", refreshFrontend)
         ];
     }
 
@@ -536,5 +562,46 @@ public sealed class MafSessionAgent(
         JsonSerializer.Serialize(value, JsonSerializerOptions.Web);
 
     private sealed record ProjectTool(string Name, AIFunction Function);
+
+    private sealed class ReportingAIFunction(
+        AIFunction inner,
+        SessionAgentExecutionContext executionContext) : AIFunction
+    {
+        public override string Name => inner.Name;
+        public override string Description => inner.Description;
+        public override JsonElement JsonSchema => inner.JsonSchema;
+        public override JsonSerializerOptions JsonSerializerOptions => inner.JsonSerializerOptions;
+        public override MethodInfo? UnderlyingMethod => inner.UnderlyingMethod;
+
+        protected override async ValueTask<object?> InvokeCoreAsync(
+            AIFunctionArguments arguments,
+            CancellationToken cancellationToken)
+        {
+            await executionContext.PublishToolAsync(
+                "tool-started",
+                Name,
+                $"正在执行工具：{Name}",
+                cancellationToken);
+            try
+            {
+                var result = await inner.InvokeAsync(arguments, cancellationToken);
+                await executionContext.PublishToolAsync(
+                    "tool-completed",
+                    Name,
+                    $"工具已完成：{Name}",
+                    cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await executionContext.PublishToolAsync(
+                    "tool-failed",
+                    Name,
+                    $"工具执行失败：{Name}",
+                    CancellationToken.None);
+                throw;
+            }
+        }
+    }
 }
 #pragma warning restore MAAI001

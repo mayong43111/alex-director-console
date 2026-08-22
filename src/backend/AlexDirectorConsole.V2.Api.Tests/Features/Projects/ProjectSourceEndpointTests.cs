@@ -839,7 +839,7 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Visual_asset_production_tool_builds_assets_from_formal_script_idempotently()
+    public async Task Visual_asset_production_tool_builds_assets_without_one_off_small_props_idempotently()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
@@ -861,22 +861,21 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var created = await assetTool.BuildFromCurrentScriptsAsync(projectId, CancellationToken.None);
         var repeated = await assetTool.BuildFromCurrentScriptsAsync(projectId, CancellationToken.None);
 
-        Assert.Equal(3, created.Created);
+        Assert.Equal(2, created.Created);
         Assert.Equal(0, created.Skipped);
-        Assert.Equal(3, created.ActiveTotal);
+        Assert.Equal(2, created.ActiveTotal);
         Assert.Collection(
             created.Kinds,
             result => Assert.Equal(("character", "达达尼昂"), (result.Kind, Assert.Single(result.Names))),
-            result => Assert.Equal(("prop", "推荐信"), (result.Kind, Assert.Single(result.Names))),
             result => Assert.Equal(("scene", "外景 · 巴黎街道 · 日"), (result.Kind, Assert.Single(result.Names))));
         Assert.Equal(0, repeated.Created);
-        Assert.Equal(3, repeated.Skipped);
-        Assert.Equal(3, repeated.ActiveTotal);
+        Assert.Equal(2, repeated.Skipped);
+        Assert.Equal(2, repeated.ActiveTotal);
 
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        Assert.Equal(3, await dbContext.Assets.CountAsync(
+        Assert.Equal(2, await dbContext.Assets.CountAsync(
             asset => asset.ProjectId == projectId && asset.Type == "visual-asset"));
-        Assert.Equal(3, await dbContext.AssetDependencies.CountAsync(
+        Assert.Equal(2, await dbContext.AssetDependencies.CountAsync(
             dependency => dependency.ProjectId == projectId
                 && dependency.SourceAssetId == production.Script.AssetId
                 && dependency.Role == "derived-from"));

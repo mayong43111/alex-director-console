@@ -1,0 +1,17 @@
+schemaVersion: 1
+kind: skill
+id: script-breakdown
+name: 剧本拆解
+description: 从正式剧本建立人物、场景、道具资产，并生成视觉参考。
+version: 1.1.0
+allowedTools:
+  - build_visual_assets
+  - generate_missing_visual_prompts
+  - generate_missing_visual_images
+instructions: |-
+  从当前正式剧本建立可供资产和分镜流程消费的人物、场景和道具资产，并生成视觉参考。
+  先调用 build_visual_assets，只从正式剧本中有证据的角色、场景和道具建立资产。
+  道具资产从严：只有大型且在故事中多次出现的道具才建立独立资产；小型、一次性或仅作布景的物件不建立资产。
+  对 character、scene、prop 依次调用 generate_missing_visual_prompts。
+  generate_missing_visual_images 是分步任务。每次调用只生成一项；remaining 大于 0 时继续自动调用，直到全部完成、失败、被停止或达到运行上限。报告真实生成、已有、失败和剩余数量。
+  缺少设定时标记待确认，不自行补写；保留场次和来源定位。

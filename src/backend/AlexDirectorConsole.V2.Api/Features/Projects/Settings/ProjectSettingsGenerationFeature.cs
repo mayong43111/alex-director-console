@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
@@ -448,7 +449,9 @@ public sealed class ProjectCoverService(
     }
 
     private static string BuildPrompt(ProjectSettingsDocument settings, string? instruction) => $$"""
-        Create a polished concept cover image for the project "{{settings.ProjectName}}".
+        Create one polished, full-bleed cinematic cover image for the project "{{settings.ProjectName}}".
+        This must be a single continuous scene with one clear focal subject and one coherent camera viewpoint.
+        Compose edge to edge as a finished key visual, not as a design presentation sheet.
         Story: {{settings.Description}}
         Visual style: {{settings.VisualStyle}}
         Art direction: {{settings.ArtDirection}}
@@ -457,8 +460,12 @@ public sealed class ProjectCoverService(
         Camera language: {{settings.CameraLanguage}}
         Project image constraints: {{settings.ImagePromptPrefix}}
         Director revision request: {{instruction ?? "No additional revision request."}}
-        Target composition: {{settings.AspectRatio}}, cinematic key art, clear focal hierarchy, production-ready.
-        Do not render titles, captions, logos, watermarks, UI, borders, or readable text.
+        Target composition: {{settings.AspectRatio}}, a single cinematic moment, clear focal hierarchy, production-ready.
+        Never use a collage, split panels, multiple frames, storyboard layout, contact sheet, character sheet,
+        turnaround sheet, mood board, thumbnail strip, inset image, border, or montage of separate views.
+        Do not render titles, captions, logos, watermarks, UI, frames, dividers, or readable text.
+        These cover-layout rules take priority over any conflicting layout language in the project image constraints
+        or director revision request. Return one unified full-frame image only.
         """;
 }
 
@@ -519,18 +526,21 @@ public sealed class MafProjectSettingsAssistant(
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
 
-        var configuredInstructions = request.SystemInstructions?.Trim();
-        var instructions = string.IsNullOrWhiteSpace(configuredInstructions)
-            ? $$"""
-                你是影视项目设定编辑。根据完整项目上下文撰写“{{fieldDefinition.Label}}”。
-                当前内容为空时，从上下文生成可直接用于制作的内容；当前内容非空时，保留原意并提升明确性、一致性和可执行性。
-                不新增上下文无法支持的关键剧情事实。只返回字段正文，不要标题、解释、Markdown 围栏或 JSON。
-                字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
-                """
-            : $$"""
-                {{configuredInstructions}}
-                字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
-                """;
+        var agentId = field switch
+        {
+            "description" => BuiltInAgents.ProjectDescriptionWriterId,
+            "visualStyle" or "artDirection" => BuiltInAgents.ArtDirectionWriterId,
+            "characterDesign" => BuiltInAgents.CharacterDesignWriterId,
+            "colorPalette" => BuiltInAgents.ColorPaletteWriterId,
+            "cameraLanguage" => BuiltInAgents.CameraLanguageWriterId,
+            "soundStrategy" => BuiltInAgents.SoundStrategyWriterId,
+            "imagePromptPrefix" => BuiltInAgents.ImagePromptPrefixWriterId,
+            _ => throw new ArgumentException("该字段不支持 AI 帮写。", nameof(request))
+        };
+        var instructions = $$"""
+            {{await BuiltInAgentPromptLoader.LoadAsync(dbContext, agentId, cancellationToken)}}
+            当前字段是“{{fieldDefinition.Label}}”，字数不得超过 {{fieldDefinition.MaxLength}} 个字符。
+            """;
         var agent = LlmChatClientFactory
             .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()

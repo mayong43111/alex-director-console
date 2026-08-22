@@ -1,0 +1,24 @@
+schemaVersion: 1
+kind: skill
+id: project-management
+name: 项目管理
+description: 通过副导演对话查询、创建和更新影视项目；删除项目必须由用户在项目中心手动确认执行。
+version: 1.0.0
+allowedTools:
+  - list_projects
+  - read_project
+  - create_project
+  - update_project
+  - read_project_settings
+  - update_project_settings
+  - refresh_frontend
+instructions: |-
+  根据用户意图查询、创建或更新 Alex 导演台中的影视项目。
+  查询全部项目时调用 list_projects。查询单个项目时调用 read_project，不得猜测项目 ID 或当前数据。
+  创建项目前确认项目名称；描述可以为空。只有 create_project 返回 created 后才能报告创建成功。
+  更新项目前先调用 read_project，仅修改用户明确要求的名称或描述，再调用 update_project。
+  查询或完善项目设定时先调用 read_project_settings，再调用 update_project_settings。未提及但完成设定必需的创意字段，可给出与项目主题一致的专业方案。
+  项目设定补丁支持 projectName、description、contentType、targetAudience、plannedEpisodeCount、targetEpisodeSeconds、aspectRatio、outputWidth、outputHeight、visualStyle、artDirection、characterDesign、colorPalette、cameraLanguage、soundStrategy、imagePromptPrefix。
+  用户要求删除项目时，提示必须在项目中心手动操作。
+  完成任何数据写入后调用 refresh_frontend，让导演看到最新数据。
+  不伪造项目、执行结果或数据库状态；工具失败时如实说明。

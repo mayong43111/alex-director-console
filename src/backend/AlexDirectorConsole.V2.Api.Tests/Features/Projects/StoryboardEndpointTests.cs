@@ -37,6 +37,65 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Dialogue_audio_is_generated_by_comfyui_and_saved_as_a_versioned_asset()
+    {
+        using var client = factory.CreateClient();
+        var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
+        var importResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/import-story-materials",
+            null);
+        importResponse.EnsureSuccessStatusCode();
+        var visualAssets = await importResponse.Content.ReadFromJsonAsync<VisualAssetView[]>();
+        var character = Assert.Single(visualAssets!, asset => asset.Kind == "character");
+        var voiceResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile",
+            new
+            {
+                name = "测试角色普通话",
+                designPrompt = "清晰自然的青年普通话声线，语速中等，情绪克制。",
+                sampleText = "巴黎，我来了。",
+                language = "Chinese",
+                seed = 2718
+            });
+        voiceResponse.EnsureSuccessStatusCode();
+        (await client.PutAsJsonAsync(
+            "/api/v2/system/comfyui-configuration",
+            new { baseUrl = "http://127.0.0.1:8188", isEnabled = true })).EnsureSuccessStatusCode();
+        var storyboardResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/generate",
+            null);
+        storyboardResponse.EnsureSuccessStatusCode();
+        var storyboard = await storyboardResponse.Content.ReadFromJsonAsync<StoryboardView>();
+        var dialogueShot = Assert.Single(storyboard!.Shots, shot => !string.IsNullOrWhiteSpace(shot.Dialogue));
+        Assert.NotNull(dialogueShot.DialogueAudio);
+
+        var route = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/dialogue-audio";
+        var result = await (await client.PostAsync(route, null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.Equal(0, result?.Generated);
+        Assert.Equal(2, result?.Skipped);
+        Assert.Equal(0, result?.Failed);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var audio = Assert.Single(await dbContext.Assets
+            .Where(item => item.ProjectId == projectId && item.Type == StoryboardDialogueAudioService.AssetType)
+            .ToListAsync());
+        Assert.Equal("audio/wav", audio.ContentType);
+        Assert.NotNull(audio.BlobContent);
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == audio.Id && item.Role == "dialogue-for-shot"));
+        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
+            item.ConsumerAssetId == audio.Id && item.Role == "uses-voice-profile"));
+        var content = await client.GetByteArrayAsync(
+            $"/api/v2/projects/{projectId}/storyboard/dialogue-audio/{audio.Id}/content");
+        Assert.Equal("RIFF"u8.ToArray(), content[..4]);
+
+        var repeated = await (await client.PostAsync(route, null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
+        Assert.Equal(0, repeated?.Generated);
+        Assert.Equal(2, repeated?.Skipped);
+    }
+
+    [Fact]
     public async Task Local_comfyui_video_normalizes_project_resolution_and_allows_missing_last_frame()
     {
         const string spokenDialogue = "达达尼昂：巴黎，我来了。";
@@ -137,7 +196,8 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                     colorPalette = "宝石红、法国蓝、羊皮纸金",
                     cameraLanguage = "动态漫画构图",
                     soundStrategy = "管弦乐冒险主题",
-                    imagePromptPrefix = "清晰墨线，制作级细节"
+                    imagePromptPrefix = "清晰墨线，制作级细节",
+                    videoPromptModel = "minimax-h3"
                 }),
                 ContentType = "application/json",
                 SizeBytes = 2,
@@ -247,6 +307,11 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(24, preview.Fps);
         Assert.DoesNotContain(videoInstruction, preview.Prompt);
         Assert.Equal(videoInstruction, factory.LastShotVideoPromptAgentInput?.Instruction);
+        Assert.Equal("minimax-h3", factory.LastShotVideoPromptAgentInput?.VideoPromptModel);
+        Assert.StartsWith("For the target video, at 0.00 seconds", preview.Prompt);
+        Assert.Contains("integrated_multimodal_description:", preview.Prompt);
+        Assert.Contains("overall_soundscape:", preview.Prompt);
+        Assert.Contains("non_diegetic_music: N/A", preview.Prompt);
         Assert.Contains("says exactly once in Mandarin Chinese", preview.Prompt);
         Assert.Contains("absolute vocal silence", preview.Prompt);
         Assert.Contains("completely blank lower third", preview.Prompt);

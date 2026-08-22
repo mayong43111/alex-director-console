@@ -27,7 +27,8 @@ public sealed class SkillEndpointTests(V2ApiFactory factory)
         Assert.Equal("2.2.0", storyboard.Version);
         Assert.True(storyboard.IsEnabled);
         Assert.Equal(["generate_storyboard"], storyboard.AllowedTools);
-        Assert.Contains("# 分镜设计", storyboard.Content, StringComparison.Ordinal);
+        Assert.Contains("生成结构化镜头", storyboard.Content, StringComparison.Ordinal);
+        Assert.Equal("storyboard-design/skill.yaml", storyboard.SourcePath);
         var firstFrame = Assert.Single(skills, skill => skill.Id == "shot-first-frame");
         Assert.Equal("1.1.0", firstFrame.Version);
         Assert.Equal(
@@ -41,7 +42,8 @@ public sealed class SkillEndpointTests(V2ApiFactory factory)
                 "create_project",
                 "update_project",
                 "read_project_settings",
-                "update_project_settings"
+                "update_project_settings",
+                "refresh_frontend"
             ],
             projectManagement.AllowedTools);
         Assert.DoesNotContain("delete_project", projectManagement.AllowedTools);

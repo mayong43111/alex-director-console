@@ -17,31 +17,59 @@ using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
+using Azure.Core;
+using Azure.Identity;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("V2Database")
     ?? $"Data Source={DatabasePaths.GetDefaultDatabasePath()}";
-DatabasePaths.EnsureDatabaseDirectory(connectionString);
+var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
+var useSqlServer = databaseProvider.Equals("SqlServer", StringComparison.OrdinalIgnoreCase);
+if (!useSqlServer)
+{
+    DatabasePaths.EnsureDatabaseDirectory(connectionString);
+}
 
 builder.Services.AddProblemDetails();
 var dataProtection = builder.Services.AddDataProtection()
     .SetApplicationName("AlexDirectorConsole.V2");
 if (!builder.Environment.IsEnvironment("Testing"))
 {
-    var dataProtectionPath = Path.Combine(
-        builder.Environment.ContentRootPath,
-        "App_Data",
-        "DataProtection");
-    Directory.CreateDirectory(dataProtectionPath);
-    dataProtection.PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
-    if (OperatingSystem.IsWindows())
+    var dataProtectionBlobUri = builder.Configuration["DataProtection:BlobUri"];
+    if (!string.IsNullOrWhiteSpace(dataProtectionBlobUri))
     {
-        dataProtection.ProtectKeysWithDpapi();
+        var managedIdentityClientId = builder.Configuration["Azure:ManagedIdentityClientId"];
+        TokenCredential credential = string.IsNullOrWhiteSpace(managedIdentityClientId)
+            ? new DefaultAzureCredential()
+            : new ManagedIdentityCredential(managedIdentityClientId);
+        dataProtection.PersistKeysToAzureBlobStorage(new Uri(dataProtectionBlobUri), credential);
+    }
+    else
+    {
+        var configuredDataProtectionPath = builder.Configuration["DataProtection:KeysPath"];
+        var dataProtectionPath = string.IsNullOrWhiteSpace(configuredDataProtectionPath)
+            ? Path.Combine(builder.Environment.ContentRootPath, "App_Data", "DataProtection")
+            : Path.GetFullPath(configuredDataProtectionPath);
+        Directory.CreateDirectory(dataProtectionPath);
+        dataProtection.PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
+        if (OperatingSystem.IsWindows())
+        {
+            dataProtection.ProtectKeysWithDpapi();
+        }
     }
 }
-builder.Services.AddDbContext<V2DbContext>(options => options.UseSqlite(connectionString));
+builder.Services.AddDbContext<V2DbContext>(options =>
+{
+    if (useSqlServer)
+    {
+        options.UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure());
+        return;
+    }
+
+    options.UseSqlite(connectionString);
+});
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IFoundryConnectionTester, AzureFoundryConnectionTester>();
 builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromSeconds(30));
@@ -67,8 +95,12 @@ builder.Services.AddScoped<IStoryboardMediaBatchService, StoryboardMediaBatchSer
 builder.Services.AddScoped<IStoryboardDialogueAudioService, StoryboardDialogueAudioService>();
 builder.Services.AddHostedService<ShotVideoWorker>();
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
+builder.Services.AddSingleton<IAgentCatalog, AgentCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();
 builder.Services.AddScoped<ISessionAgent, MafSessionAgent>();
+builder.Services.AddSingleton<SessionAgentTaskCancellation>();
+builder.Services.AddSingleton<SessionAgentExecutionContext>();
+builder.Services.AddHostedService<SessionAgentTaskWorker>();
 builder.Services.AddHttpClient<IProjectCoverGenerator, AzureFoundryProjectCoverGenerator>(client =>
     client.Timeout = TimeSpan.FromMinutes(5));
 builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerator>(client =>
@@ -154,12 +186,50 @@ var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-    await dbContext.Database.MigrateAsync();
+    if (useSqlServer)
+    {
+        await dbContext.Database.EnsureCreatedAsync();
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            IF OBJECT_ID(N'[AgentTasks]', N'U') IS NOT NULL
+            BEGIN
+                IF COL_LENGTH('AgentTasks', 'AgentId') IS NULL
+                    ALTER TABLE [AgentTasks] ADD [AgentId] uniqueidentifier NULL;
+                IF COL_LENGTH('AgentTasks', 'SessionId') IS NULL
+                    ALTER TABLE [AgentTasks] ADD [SessionId] uniqueidentifier NULL;
+                IF COL_LENGTH('AgentTasks', 'LeaseOwner') IS NULL
+                    ALTER TABLE [AgentTasks] ADD [LeaseOwner] nvarchar(200) NULL;
+                IF COL_LENGTH('AgentTasks', 'LeaseExpiresAtUtc') IS NULL
+                    ALTER TABLE [AgentTasks] ADD [LeaseExpiresAtUtc] datetimeoffset NULL;
+                IF COL_LENGTH('AgentTasks', 'CancellationRequestedAtUtc') IS NULL
+                    ALTER TABLE [AgentTasks] ADD [CancellationRequestedAtUtc] datetimeoffset NULL;
+
+                ALTER TABLE [AgentTasks] ALTER COLUMN [ProjectId] uniqueidentifier NULL;
+
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_AgentTasks_AgentId' AND object_id = OBJECT_ID('AgentTasks'))
+                    CREATE INDEX [IX_AgentTasks_AgentId] ON [AgentTasks] ([AgentId]);
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_AgentTasks_SessionId' AND object_id = OBJECT_ID('AgentTasks'))
+                    CREATE INDEX [IX_AgentTasks_SessionId] ON [AgentTasks] ([SessionId]);
+                IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_AgentTasks_AgentDefinitions_AgentId')
+                    ALTER TABLE [AgentTasks] ADD CONSTRAINT [FK_AgentTasks_AgentDefinitions_AgentId]
+                        FOREIGN KEY ([AgentId]) REFERENCES [AgentDefinitions] ([Id]);
+                IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_AgentTasks_Sessions_SessionId')
+                    ALTER TABLE [AgentTasks] ADD CONSTRAINT [FK_AgentTasks_Sessions_SessionId]
+                        FOREIGN KEY ([SessionId]) REFERENCES [Sessions] ([Id]) ON DELETE SET NULL;
+            END
+            """);
+    }
+    else
+    {
+        await dbContext.Database.MigrateAsync();
+    }
     var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
     await skillSynchronizer.SynchronizeAsync();
 }
 
 app.UseExceptionHandler();
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.MapCreateProject();
 app.MapProjectManagement();
 app.MapProjectQueries();
@@ -182,6 +252,7 @@ app.MapSkills();
 app.MapAgents();
 app.MapSessions();
 app.MapCopilot();
+app.MapFallbackToFile("index.html");
 app.Run();
 
 public partial class Program;

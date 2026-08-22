@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $apiPath = Join-Path $PSScriptRoot "src/backend/AlexDirectorConsole.V2.Api"
 $webPath = Join-Path $PSScriptRoot "src/frontend"
+$vitePath = Join-Path $webPath "node_modules/vite/bin/vite.js"
 $apiProcess = $null
 $webProcess = $null
 
@@ -78,6 +79,7 @@ function Wait-HttpReady(
 
 Assert-CommandExists "dotnet"
 Assert-CommandExists "npm.cmd"
+Assert-CommandExists "node"
 $apiPort = Get-AvailablePort $ApiPort "API"
 $webPort = Get-AvailablePort $WebPort "Frontend"
 
@@ -87,6 +89,10 @@ if (-not $SkipInstall -and -not (Test-Path (Join-Path $webPath "node_modules")))
     if ($LASTEXITCODE -ne 0) {
         throw "npm install failed with exit code $LASTEXITCODE."
     }
+}
+
+if (-not (Test-Path $vitePath)) {
+    throw "Vite was not found at '$vitePath'. Run without -SkipInstall to install frontend dependencies."
 }
 
 $previousWatchRestart = $env:DOTNET_WATCH_RESTART_ON_RUDE_EDIT
@@ -106,8 +112,8 @@ try {
     Wait-HttpReady "http://127.0.0.1:$apiPort/api/v2/projects" $apiProcess
 
     Write-Host "Starting frontend HMR: http://127.0.0.1:$webPort" -ForegroundColor Cyan
-    $webProcess = Start-Process npm.cmd `
-        -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", $webPort, "--strictPort") `
+    $webProcess = Start-Process node `
+        -ArgumentList @($vitePath, "--host", "127.0.0.1", "--port", $webPort, "--strictPort") `
         -WorkingDirectory $webPath `
         -NoNewWindow `
         -PassThru

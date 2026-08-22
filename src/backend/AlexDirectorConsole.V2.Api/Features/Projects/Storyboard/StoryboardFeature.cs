@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
@@ -927,6 +928,11 @@ public sealed class MafStoryboardDesigner(
         if (!LlmChatClientFactory.IsConfigured(configuration))
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
 
+        var instructions = await BuiltInAgentPromptLoader.LoadAsync(
+            dbContext,
+            BuiltInAgents.StoryboardDesignerId,
+            cancellationToken);
+
         var agent = LlmChatClientFactory
             .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
@@ -944,19 +950,7 @@ public sealed class MafStoryboardDesigner(
                     DisableAgentSkillsProvider = true,
                     ChatOptions = new ChatOptions
                     {
-                        Instructions = """
-                            你是动画导演和分镜师。将当前正式剧本中的上游拍摄计划细化为可生产的结构化镜头。
-                            不得改写事件顺序、人物身份和对白。每个镜头必须属于输入中的真实场次，sceneNumber 必须原样使用；shotNumber 在每场从 1 连续编号。
-                            episode.scenes[].shotPlan 是正式剧本已确定的摄影骨架。必须逐镜保留其中的 sceneNumber、shotNumber、durationSeconds、shotSize、cameraAngle 和 cameraMovement，不得新增、删除、合并、拆分或重新定时；只负责细化构图、画面、动作、对白与声音。
-                            必须把 episode.scenes[].action 分解落实到本场镜头动作中；episode.scenes[].dialogues 中每一句 lines 台词都必须逐字出现在本场某个镜头的 dialogue 中，不得遗漏、改写或新增剧情信息。
-                            characters 只能使用输入剧本或资产中的名称。props 不是画面物件清单，只用于声明生成时必须加载设定图以保持外观连续的特殊道具；props 只能逐字使用 input.specialPropNames 中的名称，不得从剧本 props 自行抄录其他物件。通常每镜最多 1 个；只有两个特殊道具在同一动作中同时被操作且都需要外观连续时才可写 2 个。普通武器、家具、交通工具、钱袋、衣物、食物、工具、布景，以及仅出现但未推动本镜动作的物件一律不写。若没有必须加载设定图的特殊道具，返回空数组。
-                            必须逐镜分析帧生成策略。productionMode 只能是 direct-first-frame 或 first-last-continuous。若主体方向、位置、姿态、表情、遮挡关系或关键道具状态在镜头结尾发生必须被明确控制的可见变化（例如背对转为正面、开门前后、交接前后、起身或倒下），使用 first-last-continuous；若主体保持同一朝向和主要状态，动作可由单一首帧自然延展，则使用 direct-first-frame。不得按时长机械判断。
-                            frameStrategyReason 用一句具体中文说明为什么只需首帧或必须首尾帧。firstFrameDescription 必须写清镜头开始瞬间每个主体的位置、朝向、姿态、视线、手部/道具状态、前中后景关系和光线。first-last-continuous 时 lastFrameDescription 必须写清结束瞬间相对于首帧的可见变化；direct-first-frame 时返回空字符串。
-                            cutDescription 必须达到实际拍摄 cut 的执行粒度：按时间顺序描述起始画面、演员调度、动作节拍、视线与轴线、摄影机运动的起止和速度、焦点转移、画面结束点；不得只复述剧情，不得使用“展现冲突”“营造氛围”等不可执行措辞。
-                            episode.smallHooks 和 episode.bigHooks 是当前剧本中的爆点。必须根据事件内容把每条爆点落实到最能体现它的一个具体镜头：在该镜头 hooks 中写入 type（small 或 big）和 description。description 必须逐字复制输入爆点，不得改写、遗漏、新增或重复；允许一个镜头承载多条爆点，无爆点镜头返回空数组。
-                            只返回 JSON，不要 Markdown。结构：
-                            {"shots":[{"sceneNumber":1,"shotNumber":1,"durationSeconds":3.5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","composition":"...","visualDescription":"...","action":"...","dialogue":"...","sound":"...","characters":["..."],"props":[],"hooks":[{"type":"small","description":"逐字复制的既有爆点"}],"productionMode":"direct-first-frame","frameStrategyReason":"主体始终朝向门口，姿态与空间关系无必须锁定的终态变化。","firstFrameDescription":"...","lastFrameDescription":"","cutDescription":"0.0-1.0 秒……；1.0-3.5 秒……；切在……"}]}
-                            """,
+                        Instructions = instructions,
                         MaxOutputTokens = 16_384
                     }
                 },
@@ -1024,6 +1018,10 @@ public sealed class MafStoryboardShotTextRewriter(
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (!LlmChatClientFactory.IsConfigured(configuration))
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
+        var instructions = await BuiltInAgentPromptLoader.LoadAsync(
+            dbContext,
+            BuiltInAgents.StoryboardShotTextWriterId,
+            cancellationToken);
         var agent = LlmChatClientFactory.Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
             .AsHarnessAgent(new HarnessAgentOptions
@@ -1039,11 +1037,7 @@ public sealed class MafStoryboardShotTextRewriter(
                 DisableAgentSkillsProvider = true,
                 ChatOptions = new ChatOptions
                 {
-                    Instructions = """
-                        你是动画导演和分镜师。只按用户意见重写输入中的单个镜头执行文本，不改变镜号、时长、景别、机位、运镜、人物、道具、剧情事实和 productionMode。
-                        firstFrameDescription 必须写清主体位置、朝向、姿态、视线、手部/道具、前中后景和光线。productionMode 为 first-last-continuous 时 lastFrameDescription 必须明确相对首帧的结束变化；direct-first-frame 时必须为空字符串。
-                        cutDescription 必须按时间顺序写清动作节拍、演员调度、摄影机运动和切出点。只返回 JSON，不要 Markdown。
-                        """,
+                    Instructions = instructions,
                     MaxOutputTokens = 6_000
                 }
             }, loggerFactory);

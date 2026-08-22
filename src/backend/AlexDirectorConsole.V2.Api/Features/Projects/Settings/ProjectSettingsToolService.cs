@@ -34,7 +34,8 @@ public sealed class ProjectSettingsToolService(
         "colorPalette",
         "cameraLanguage",
         "soundStrategy",
-        "imagePromptPrefix"
+        "imagePromptPrefix",
+        "videoPromptModel"
     ];
 
     public async Task<ProjectSettingsView> ReadAsync(
@@ -90,7 +91,8 @@ public sealed class ProjectSettingsToolService(
                 ReadString(changes, "colorPalette", current.ColorPalette),
                 ReadString(changes, "cameraLanguage", current.CameraLanguage),
                 ReadString(changes, "soundStrategy", current.SoundStrategy),
-                ReadString(changes, "imagePromptPrefix", current.ImagePromptPrefix)),
+                ReadString(changes, "imagePromptPrefix", current.ImagePromptPrefix),
+                ReadString(changes, "videoPromptModel", current.VideoPromptModel)),
             cancellationToken);
 
         return result.Status switch

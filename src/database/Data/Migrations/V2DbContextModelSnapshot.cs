@@ -69,6 +69,12 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("AgentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("CancellationRequestedAtUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTimeOffset?>("CompletedAtUtc")
                         .HasColumnType("TEXT");
 
@@ -92,6 +98,13 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasMaxLength(4000)
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Model")
                         .HasMaxLength(100)
                         .HasColumnType("TEXT");
@@ -112,7 +125,7 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<int?>("ProgressTotal")
                         .HasColumnType("INTEGER");
 
-                    b.Property<Guid>("ProjectId")
+                    b.Property<Guid?>("ProjectId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RequestedBy")
@@ -121,6 +134,9 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("RequestedByMessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("SessionId")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset?>("StartedAtUtc")
@@ -141,9 +157,13 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("AgentId");
+
                     b.HasIndex("ParentTaskId");
 
                     b.HasIndex("ProductionEpisodeId");
+
+                    b.HasIndex("SessionId");
 
                     b.HasIndex("ProjectId", "Status", "CreatedAtUtc");
 
@@ -768,7 +788,6 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("LastError")
-                        .HasMaxLength(4000)
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
@@ -873,7 +892,6 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ErrorDetail")
-                        .HasMaxLength(4000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ExternalJobId")
@@ -1479,6 +1497,11 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
 
             modelBuilder.Entity("AlexDirectorConsole.V2.Database.Models.AgentTask", b =>
                 {
+                    b.HasOne("AlexDirectorConsole.V2.Database.Models.AgentDefinition", null)
+                        .WithMany()
+                        .HasForeignKey("AgentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("AlexDirectorConsole.V2.Database.Models.AgentTask", null)
                         .WithMany()
                         .HasForeignKey("ParentTaskId")
@@ -1492,8 +1515,12 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.HasOne("AlexDirectorConsole.V2.Database.Models.Project", null)
                         .WithMany()
                         .HasForeignKey("ProjectId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("AlexDirectorConsole.V2.Database.Models.Session", null)
+                        .WithMany()
+                        .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.SetNull);
                 });
 
             modelBuilder.Entity("AlexDirectorConsole.V2.Database.Models.AgentTaskEvent", b =>

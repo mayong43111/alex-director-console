@@ -389,6 +389,12 @@ public sealed class ImportStoryMaterialAssetsCommandHandler(
 
 internal static class SpecialPropPolicy
 {
+    private static readonly string[] LargePropMarkers =
+    [
+        "柜", "桌", "台", "床", "车", "船", "架", "屏", "设备", "机器", "仪器",
+        "雕像", "钢琴"
+    ];
+
     private static readonly string[] NarrativeMarkers =
     [
         "信", "剑", "枪", "匣", "密", "秘方", "印章", "徽章", "戒指", "项链",
@@ -409,6 +415,15 @@ internal static class SpecialPropPolicy
         if (normalized.Length == 0 || SetDressing.Contains(normalized)) return false;
         return sceneCount > 1
             || NarrativeMarkers.Any(marker => normalized.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static bool RequiresLargeRecurringAsset(string name, int sceneCount)
+    {
+        var normalized = name.Trim();
+        return sceneCount > 1
+            && !SetDressing.Contains(normalized)
+            && LargePropMarkers.Any(marker =>
+                normalized.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 }
 

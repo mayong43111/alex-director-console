@@ -1,3 +1,4 @@
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
@@ -12,6 +13,7 @@ public interface ISkillCatalogSynchronizer
 public sealed class SkillCatalogSynchronizer(
     V2DbContext dbContext,
     ISkillCatalog catalog,
+    IAgentCatalog agentCatalog,
     TimeProvider timeProvider) : ISkillCatalogSynchronizer
 {
     public async Task SynchronizeAsync(CancellationToken cancellationToken = default)
@@ -48,34 +50,34 @@ public sealed class SkillCatalogSynchronizer(
         dbContext.SkillDefinitions.RemoveRange(removedSystemSkills);
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        var assistantDirectorSkillIds = new[]
+        var agents = await dbContext.AgentDefinitions
+            .ToDictionaryAsync(agent => agent.Id, cancellationToken);
+        foreach (var metadata in agentCatalog.List())
         {
-            "project-management",
-            "script-writing",
-            "script-breakdown",
-            "storyboard-design",
-            "shot-first-frame"
-        };
-        if (await dbContext.AgentDefinitions.AnyAsync(
-            agent => agent.Id == BuiltInAgents.AssistantDirectorId,
-            cancellationToken))
-        {
-            var existingSkillIds = (await dbContext.AgentSkills
-                .Where(link => link.AgentId == BuiltInAgents.AssistantDirectorId)
-                .Select(link => link.SkillId)
-                .ToArrayAsync(cancellationToken))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var skillId in assistantDirectorSkillIds
-                .Where(catalogIds.Contains)
-                .Where(skillId => !existingSkillIds.Contains(skillId)))
+            if (!agents.TryGetValue(metadata.Id, out var agent))
             {
-                dbContext.AgentSkills.Add(new AgentSkill
+                agent = new AgentDefinition
                 {
-                    AgentId = BuiltInAgents.AssistantDirectorId,
-                    SkillId = skillId
-                });
+                    Id = metadata.Id,
+                    CreatedAtUtc = now
+                };
+                dbContext.AgentDefinitions.Add(agent);
             }
-            await dbContext.SaveChangesAsync(cancellationToken);
+
+            agent.Name = metadata.Name;
+            agent.SystemPrompt = metadata.Prompt;
+            agent.UpdatedAtUtc = now;
+
+            var existingLinks = await dbContext.AgentSkills
+                .Where(link => link.AgentId == metadata.Id)
+                .ToListAsync(cancellationToken);
+            dbContext.AgentSkills.RemoveRange(existingLinks);
+            dbContext.AgentSkills.AddRange(metadata.SkillIds.Select(skillId => new AgentSkill
+            {
+                AgentId = metadata.Id,
+                SkillId = skillId
+            }));
         }
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 }

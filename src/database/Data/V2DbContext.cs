@@ -263,7 +263,10 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.RequestedBy).HasMaxLength(100).IsRequired();
             entity.Property(item => item.Model).HasMaxLength(100);
             entity.Property(item => item.LastError).HasMaxLength(4000);
+            entity.Property(item => item.LeaseOwner).HasMaxLength(200);
             entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<AgentDefinition>().WithMany().HasForeignKey(item => item.AgentId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Session>().WithMany().HasForeignKey(item => item.SessionId).OnDelete(DeleteBehavior.SetNull);
             entity.HasOne<ProductionEpisode>().WithMany().HasForeignKey(item => item.ProductionEpisodeId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<AgentTask>().WithMany().HasForeignKey(item => item.ParentTaskId).OnDelete(DeleteBehavior.Restrict);
         });
@@ -324,7 +327,6 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.Property(item => item.CurrentStage).HasMaxLength(30).IsRequired();
             entity.Property(item => item.OriginalInstruction).HasMaxLength(20000).IsRequired();
-            entity.Property(item => item.LastError).HasMaxLength(4000);
             entity.Property(item => item.LeaseOwner).HasMaxLength(200);
             entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ProductionEpisode>().WithMany().HasForeignKey(item => item.ProductionEpisodeId).OnDelete(DeleteBehavior.Restrict);
@@ -348,7 +350,6 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.InputFingerprint).HasMaxLength(128);
             entity.Property(item => item.ExternalJobId).HasMaxLength(200);
             entity.Property(item => item.ErrorCode).HasMaxLength(100);
-            entity.Property(item => item.ErrorDetail).HasMaxLength(4000);
             entity.HasOne<ProductionRun>().WithMany().HasForeignKey(item => item.RunId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId).OnDelete(DeleteBehavior.Restrict);
             entity.HasOne<ProductionEpisode>().WithMany().HasForeignKey(item => item.ProductionEpisodeId).OnDelete(DeleteBehavior.Restrict);

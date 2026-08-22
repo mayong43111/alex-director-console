@@ -31,4 +31,16 @@ public static class BuiltInAgents
 
     public static readonly Guid StoryboardShotTextWriterId =
         Guid.Parse("5c25f460-d7dc-4b23-83dc-03581542b17e");
+
+    public static readonly Guid StoryMaterialAnalystId =
+        Guid.Parse("6aeed5e5-cc93-4faf-8d24-bc5f6b26fa33");
+
+    public static readonly Guid ProductionScriptWriterId =
+        Guid.Parse("b7b8082c-37b0-4f68-9c77-5ed1879f3c40");
+
+    public static readonly Guid StoryboardDesignerId =
+        Guid.Parse("d097110a-6865-43f1-b5c4-4caf45c51913");
+
+    public static readonly Guid VideoPromptDirectorId =
+        Guid.Parse("8d586999-9a23-4811-8762-fbcb72b52551");
 }

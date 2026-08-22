@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Bot, RotateCcw, SendHorizontal, Sparkles, X } from "lucide-react";
+import { Bot, RotateCcw, SendHorizontal, Sparkles, Square, X } from "lucide-react";
 import {
+  enqueueSessionMessage,
+  getSessionAgentTask,
   getScopedSession,
   resetSession,
   retrySessionMessage,
-  sendSessionMessage,
+  stopSessionAgentTask,
+  subscribeSessionAgentTask,
+  type SessionAgentTaskEvent,
   type SessionMessage,
   type SessionRecord,
 } from "../api/sessions";
@@ -36,15 +40,39 @@ export function AssistantDirectorPanel({
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [taskEvents, setTaskEvents] = useState<SessionAgentTaskEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const scrollAnchor = useRef<HTMLDivElement>(null);
+  const taskStorageKey = `assistant-task:${agent.id}:${session.scopeKey}`;
+  const eventStorageKey = `${taskStorageKey}:event`;
 
   useEffect(() => {
     const controller = new AbortController();
-    getScopedSession(agent.id, session.scopeKey, controller.signal)
-      .then((loadedSession) => {
+    Promise.all([
+      getScopedSession(agent.id, session.scopeKey, controller.signal),
+      Promise.resolve(localStorage.getItem(taskStorageKey)),
+    ])
+      .then(async ([loadedSession, storedTaskId]) => {
         setActiveSession(loadedSession);
         setMessages(loadedSession?.messages ?? []);
+        if (storedTaskId) {
+          const task = await getSessionAgentTask(storedTaskId);
+          if (task.status === 'queued' || task.status === 'running' || task.status === 'cancellation-requested') {
+            setTaskId(task.id);
+            setSending(true);
+          } else {
+            if (task.status === 'completed') {
+              const refreshedSession = await getScopedSession(agent.id, session.scopeKey, controller.signal);
+              setActiveSession(refreshedSession);
+              setMessages(refreshedSession?.messages ?? []);
+            } else if (task.status === 'failed') {
+              setError(task.lastError ?? '副导演任务执行失败。');
+            }
+            localStorage.removeItem(taskStorageKey);
+            localStorage.removeItem(eventStorageKey);
+          }
+        }
       })
       .catch((loadError: unknown) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
@@ -55,6 +83,61 @@ export function AssistantDirectorPanel({
       });
     return () => controller.abort();
   }, [agent.id, session.scopeKey]);
+
+  useEffect(() => {
+    if (!taskId) return;
+    const source = subscribeSessionAgentTask(
+      taskId,
+      Number(localStorage.getItem(eventStorageKey) ?? '0'),
+      (event) => {
+        localStorage.setItem(eventStorageKey, String(event.sequence));
+        setTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'tool-completed' && event.dataJson) {
+          const data = JSON.parse(event.dataJson) as { toolName?: string };
+          if (data.toolName === 'refresh_frontend') {
+            window.location.reload();
+            return;
+          }
+        }
+        if (event.stage === 'completed') {
+          void getScopedSession(agent.id, session.scopeKey).then((loadedSession) => {
+            setActiveSession(loadedSession);
+            setMessages(loadedSession?.messages ?? []);
+            setSending(false);
+            setTaskId(null);
+            setTaskEvents([]);
+            localStorage.removeItem(taskStorageKey);
+            localStorage.removeItem(eventStorageKey);
+          });
+        } else if (event.stage === 'failed' || event.stage === 'cancelled') {
+          setSending(false);
+          setTaskId(null);
+          localStorage.removeItem(taskStorageKey);
+          localStorage.removeItem(eventStorageKey);
+          if (event.stage === 'failed') setError(event.message);
+        }
+      },
+      () => {
+        void getSessionAgentTask(taskId).then((task) => {
+          if (task.status === 'completed') {
+            return getScopedSession(agent.id, session.scopeKey).then((loadedSession) => {
+              setActiveSession(loadedSession);
+              setMessages(loadedSession?.messages ?? []);
+            });
+          }
+          if (task.status === 'failed') setError(task.lastError ?? '副导演任务执行失败。');
+          if (task.status !== 'queued' && task.status !== 'running' && task.status !== 'cancellation-requested') {
+            setSending(false);
+            setTaskId(null);
+            localStorage.removeItem(taskStorageKey);
+          }
+        });
+      },
+    );
+    return () => source.close();
+  }, [agent.id, session.scopeKey, taskId]);
 
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ block: "end" });
@@ -80,7 +163,7 @@ export function AssistantDirectorPanel({
       },
     ]);
     try {
-      const updatedSession = await sendSessionMessage({
+      const task = await enqueueSessionMessage({
         agentId: agent.id,
         scopeKey: session.scopeKey,
         sessionId: activeSession?.id,
@@ -90,14 +173,23 @@ export function AssistantDirectorPanel({
         page: session.page,
         episode: session.episode ?? "未选择",
       });
-      setActiveSession(updatedSession);
-      setMessages(updatedSession.messages);
+      setTaskId(task.id);
+      setTaskEvents([]);
+      localStorage.setItem(taskStorageKey, task.id);
+      localStorage.removeItem(eventStorageKey);
     } catch (sendError) {
       setMessages((current) => current.filter((item) => item.id !== pendingId));
       setMessage(trimmed);
       setError(sendError instanceof Error ? sendError.message : "AI 副导演暂时无法回复。");
-    } finally {
-      setSending(false);
+    }
+  }
+
+  async function stopTask() {
+    if (!taskId) return;
+    try {
+      await stopSessionAgentTask(taskId);
+    } catch (stopError) {
+      setError(stopError instanceof Error ? stopError.message : "副导演任务停止失败。");
     }
   }
 
@@ -196,7 +288,10 @@ export function AssistantDirectorPanel({
               </article>
             ))}
             {sending && (
-              <div className="agent-thinking"><span className="spinner" />副导演正在思考...</div>
+              <div className="agent-thinking">
+                <span className="spinner" />
+                {taskEvents.at(-1)?.message ?? '副导演任务正在后台运行...'}
+              </div>
             )}
           </div>
         )}
@@ -217,14 +312,15 @@ export function AssistantDirectorPanel({
             placeholder="向副导演提问…"
             disabled={loading || sending}
           />
-          <button
-            className="send-button"
-            disabled={!message.trim() || loading || sending}
-            aria-label="发送消息"
-            title="发送消息"
-          >
-            <SendHorizontal size={16} />
-          </button>
+          {sending ? (
+            <button type="button" className="send-button" onClick={() => void stopTask()} aria-label="停止任务" title="停止任务">
+              <Square size={15} />
+            </button>
+          ) : (
+            <button className="send-button" disabled={!message.trim() || loading} aria-label="发送消息" title="发送消息">
+              <SendHorizontal size={16} />
+            </button>
+          )}
         </div>
         <small className="composer-agent-name">Agent：{agent.name}</small>
       </form>

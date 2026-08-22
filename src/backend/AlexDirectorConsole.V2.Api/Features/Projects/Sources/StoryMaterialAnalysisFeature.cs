@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
@@ -432,6 +433,10 @@ public sealed class MafStoryMaterialAnalyzer(
         {
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         }
+        var instructions = await BuiltInAgentPromptLoader.LoadAsync(
+            dbContext,
+            BuiltInAgents.StoryMaterialAnalystId,
+            cancellationToken);
 
         var agent = LlmChatClientFactory
             .Create(configuration!, dataProtectionProvider)
@@ -450,15 +455,7 @@ public sealed class MafStoryMaterialAnalyzer(
                     DisableAgentSkillsProvider = true,
                     ChatOptions = new ChatOptions
                     {
-                        Instructions = """
-                            你是影视改编前期的故事编辑。只为剧本写作准备素材，不做学术型全文解析。
-                            从给定章节提取：主要人物、关键场景、按叙事顺序排列的情节节点，以及必要的人物/事件关系。
-                            原文人物和地点只是候选素材，不得写成已确定的美术设定。不要虚构原文中没有的事实。
-                            控制规模：人物不超过 16，场景不超过 12，情节不超过 16，关系不超过 30。
-                            全部说明使用简体中文；专有名称可保留常用译名并在必要时附原文。
-                            只返回一个 JSON 对象，不要 Markdown 围栏或解释。结构必须为：
-                            {"summary":"...","characters":[{"name":"...","role":"...","goal":"...","traits":["..."],"chapterNumbers":[1]}],"locations":[{"name":"...","function":"...","atmosphere":"...","chapterNumbers":[1]}],"plotBeats":[{"order":1,"title":"...","summary":"...","chapterNumbers":[1],"characterNames":["..."],"locationName":"...或null"}],"relations":[{"source":"...","target":"...","type":"...","evidence":"..."}]}
-                            """,
+                        Instructions = instructions,
                         MaxOutputTokens = 8_192
                     }
                 },

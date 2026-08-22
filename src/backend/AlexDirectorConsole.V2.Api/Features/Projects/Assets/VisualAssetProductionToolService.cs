@@ -251,7 +251,10 @@ public sealed class VisualAssetProductionToolService(
                 item.Reference
             }))
             .Where(item => item.Name.Length > 0)
-            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => SpecialPropPolicy.RequiresLargeRecurringAsset(
+                group.Key,
+                group.Select(item => item.Reference).Distinct().Count())))
         {
             var first = group.First();
             yield return new SaveVisualAssetRequest(

@@ -1,8 +1,10 @@
 using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.Agents.AI;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -26,6 +28,7 @@ public sealed record ShotVideoPromptCharacterContext(
 
 public sealed record ShotVideoPromptAgentInput(
     string ProjectName,
+    string? VideoPromptModel,
     string VisualStyle,
     string ArtDirection,
     string CameraLanguage,
@@ -72,6 +75,10 @@ public sealed class MafShotVideoPromptAgent(
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (!LlmChatClientFactory.IsConfigured(configuration))
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
+        var instructions = await BuiltInAgentPromptLoader.LoadAsync(
+            dbContext,
+            BuiltInAgents.VideoPromptDirectorId,
+            cancellationToken);
 
         var agent = LlmChatClientFactory.Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
@@ -88,15 +95,7 @@ public sealed class MafShotVideoPromptAgent(
                 DisableAgentSkillsProvider = true,
                 ChatOptions = new ChatOptions
                 {
-                    Instructions = """
-                        你是 MiniMax H3 FL2VA 视频与原生配音提示词导演。根据完整分镜、角色设定和角色音色设定，编写极其紧凑、可执行的英文生成指令。所有字段必须只使用英文，不得输出中文字符。
-                        不得改变剧情、镜头时长、人物身份、动作顺序或对白。对白由程序逐字锁定，你只负责说明谁说话、中文发音、语气、节奏、音高、年龄感、情绪、停连和口型同步；不得在输出中复述、翻译或改写对白。
-                        若有多个角色，必须依据分镜明确唯一说话者，禁止其他角色说话或动嘴。音色描述必须忠实使用输入的 voiceName、voiceDesignPrompt、voiceLanguage 和 voiceSeed，不得臆造冲突特征。
-                        visualMotionPrompt 只描述无声的可见动作、图标出现顺序与摄影机调度，不得出现 speak、speech、voice、dialogue、deliver、address、mouth、lip、word、text、subtitle、caption 或其变体，也不得描述人物何时开口或说完。voicePerformancePrompt 只描述声音表演，不得复述音色名称、seed、中文音色原文或对白。soundPrompt 只描述对白以外的环境声和混音。continuityNotes 只描述身份、服装、空间、光线与轴线连续性。
-                        每个字段最多 600 个英文字符。用户补充要求不能覆盖分镜事实或对白。不要输出任何禁止项或负向指令，这些规则由程序另行强制。
-                        只返回 JSON，不要 Markdown。结构：
-                        {"visualMotionPrompt":"...","voicePerformancePrompt":"...","soundPrompt":"...","continuityNotes":"..."}
-                        """,
+                    Instructions = instructions,
                     MaxOutputTokens = 4_096
                 }
             }, loggerFactory);
@@ -121,3 +120,17 @@ public sealed class MafShotVideoPromptAgent(
     }
 }
 #pragma warning restore MAAI001
+
+public static class ShotVideoPromptInstructions
+{
+    internal const string DefaultModel = "minimax-h3-fl2va";
+    internal const string MiniMaxH3Model = "minimax-h3";
+
+    public static bool UsesMiniMaxH3Format(string? model) => Normalize(model) == MiniMaxH3Model;
+
+    private static string Normalize(string? model) => model?.Trim().ToLowerInvariant() switch
+    {
+        "minimax-h3" or "minimax h3" or "hailuo-h3" or "hailuo h3" => MiniMaxH3Model,
+        _ => DefaultModel
+    };
+}

@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
+using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
@@ -27,6 +28,7 @@ public sealed record ProjectSettingsView(
     string CameraLanguage,
     string SoundStrategy,
     string ImagePromptPrefix,
+    string VideoPromptModel,
     Guid? AssetId,
     int ImpactedAssetCount,
     ProjectCoverView? Cover,
@@ -105,7 +107,8 @@ public sealed record SaveProjectSettingsCommand(
     string? ColorPalette,
     string? CameraLanguage,
     string? SoundStrategy,
-    string? ImagePromptPrefix) : ICommand<SaveProjectSettingsResult>;
+    string? ImagePromptPrefix,
+    string? VideoPromptModel) : ICommand<SaveProjectSettingsResult>;
 
 public enum SaveProjectSettingsStatus
 {
@@ -272,7 +275,8 @@ public sealed record SaveProjectSettingsRequest(
     string? ColorPalette,
     string? CameraLanguage,
     string? SoundStrategy,
-    string? ImagePromptPrefix);
+    string? ImagePromptPrefix,
+    string? VideoPromptModel);
 
 public static class ProjectSettingsEndpoints
 {
@@ -313,7 +317,8 @@ public static class ProjectSettingsEndpoints
                     request.ColorPalette,
                     request.CameraLanguage,
                     request.SoundStrategy,
-                    request.ImagePromptPrefix),
+                    request.ImagePromptPrefix,
+                    request.VideoPromptModel),
                 cancellationToken);
             return result.Status switch
             {
@@ -436,6 +441,7 @@ public static class ProjectSettingsEndpoints
                     statusCode: StatusCodes.Status502BadGateway);
             }
         });
+        group.MapPost("/approve", () => Results.NotFound());
         return app;
     }
 }
@@ -456,7 +462,8 @@ internal sealed record ProjectSettingsDocument(
     string ColorPalette,
     string CameraLanguage,
     string SoundStrategy,
-    string ImagePromptPrefix)
+    string ImagePromptPrefix,
+    string? VideoPromptModel = null)
 {
     public static ProjectSettingsDocument FromCommand(SaveProjectSettingsCommand command) => new(
         command.ProjectName!.Trim(),
@@ -474,7 +481,10 @@ internal sealed record ProjectSettingsDocument(
         command.ColorPalette?.Trim() ?? string.Empty,
         command.CameraLanguage?.Trim() ?? string.Empty,
         command.SoundStrategy?.Trim() ?? string.Empty,
-        command.ImagePromptPrefix?.Trim() ?? string.Empty);
+        command.ImagePromptPrefix?.Trim() ?? string.Empty,
+        string.IsNullOrWhiteSpace(command.VideoPromptModel)
+            ? ShotVideoPromptInstructions.DefaultModel
+            : command.VideoPromptModel.Trim());
 
     public ProjectSettingsView ToView(
         Guid projectId,
@@ -501,6 +511,9 @@ internal sealed record ProjectSettingsDocument(
         CameraLanguage,
         SoundStrategy,
         ImagePromptPrefix,
+        string.IsNullOrWhiteSpace(VideoPromptModel)
+            ? ShotVideoPromptInstructions.DefaultModel
+            : VideoPromptModel,
         assetId,
         impactedAssetCount,
         cover,
@@ -532,6 +545,7 @@ internal static class ProjectSettingsDefaults
         string.Empty,
         string.Empty,
         string.Empty,
+        ShotVideoPromptInstructions.DefaultModel,
         null,
         0,
         null,

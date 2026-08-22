@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -326,7 +327,7 @@ public sealed class ShotVideoService(
         if (context is null) return null;
         var workflow = await workflowProvider.ReadAsync(cancellationToken);
         var draft = await promptAgent.GenerateAsync(BuildAgentInput(context, instruction), cancellationToken);
-        var prompt = BuildPrompt(context.Shot, draft);
+        var prompt = BuildPrompt(context.Shot, draft, context.Settings.VideoPromptModel);
         return BuildPreview(context, prompt, workflow);
     }
 
@@ -822,6 +823,7 @@ public sealed class ShotVideoService(
 
     private static ShotVideoPromptAgentInput BuildAgentInput(ShotVideoContext context, string? instruction) => new(
         context.Settings.ProjectName,
+        context.Settings.VideoPromptModel,
         context.Settings.VisualStyle,
         context.Settings.ArtDirection,
         context.Settings.CameraLanguage,
@@ -843,6 +845,13 @@ public sealed class ShotVideoService(
 
     private static string BuildPrompt(
         StoryboardShotDocument shot,
+        ShotVideoPromptDraft draft,
+        string? videoPromptModel) => ShotVideoPromptInstructions.UsesMiniMaxH3Format(videoPromptModel)
+        ? BuildMiniMaxH3Prompt(shot, draft)
+        : BuildDefaultPrompt(shot, draft);
+
+    private static string BuildDefaultPrompt(
+        StoryboardShotDocument shot,
         ShotVideoPromptDraft draft) => $$"""
         Create one continuous {{shot.DurationSeconds:0.###}}-second cinematic take.
 
@@ -856,6 +865,25 @@ public sealed class ShotVideoService(
 
         IMAGE RESULT: A clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays. Treat every token in this prompt as an instruction only and never render prompt wording in the image.
         """;
+
+    private static string BuildMiniMaxH3Prompt(
+        StoryboardShotDocument shot,
+        ShotVideoPromptDraft draft)
+    {
+        var duration = shot.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture);
+        var alignment = ShotProductionModes.ForShot(shot) == ShotProductionModes.FirstLastContinuous
+            ? $"How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the {duration}-second mark of the target video."
+            : "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.";
+        return $$"""
+            {{alignment}}
+
+            integrated_multimodal_description: [Shot 1] {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}} The camera preserves the supplied first frame's exact framing and axis. {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}} {{BuildDialogueTimeline(shot)}} Voice performance: {{draft.VoicePerformancePrompt}} The image result is a clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays.
+
+            overall_soundscape: {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
+
+            non_diegetic_music: N/A
+            """;
+    }
 
     private static string BuildDialogueTimeline(StoryboardShotDocument shot)
     {

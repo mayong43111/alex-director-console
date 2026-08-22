@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
@@ -1921,6 +1922,11 @@ public sealed class MafAdaptationScriptWriter(
         if (!LlmChatClientFactory.IsConfigured(configuration))
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
 
+        var instructions = await BuiltInAgentPromptLoader.LoadAsync(
+            dbContext,
+            BuiltInAgents.ProductionScriptWriterId,
+            cancellationToken);
+
         var agent = LlmChatClientFactory
             .Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
@@ -1938,20 +1944,7 @@ public sealed class MafAdaptationScriptWriter(
                     DisableAgentSkillsProvider = true,
                     ChatOptions = new ChatOptions
                     {
-                        Instructions = """
-                            你是专业影视剧编剧。根据已经确定的单集改编大纲，重新编写可交付的正式剧本，不得把大纲摘要原样当作剧本。
-                            使用标准影视剧表达：每场有“内/外景 地点 时间”场景标题、可拍摄的动作描述，以及按角色分组的对白；对白包含角色名、可选表演提示和逐句台词。用动作和对白实际演出大纲中的冲突、转折和人物选择。
-                            dialogues 必须严格按实际说话顺序排列，一个 item 只表示一次连续发言；人物再次开口时必须创建新的 item，不得把同一角色在整场中的台词集中到一起。character 必须是场内真实说话者，禁止使用“对白说明”“台词提示”等占位角色。
-                            台词要短、自然、可说出口，服务人物当下目的和对手反应。不得复述画面、解释观众已经知道的设定、代替作者总结剧情或堆砌空泛金句；语言应符合人物身份、时代和处境，不使用网络梗。parenthetical 只写无法从台词推断的简短表演提示，不写动作段落。
-                            按正常中文对白每秒约 4 个字符估算，每场至少保留 35% 时长给动作、反应和停顿。每场 lines 全部字符数不得超过 scene.targetSeconds * 2.6；每句优选 8 到 20 字，绝对不得超过 32 字，不得靠机械拆句规避限制。
-                            返回前必须逐场统计 lines 的全部字符数并自行删改到预算以内。如果输入包含 correction，表示上一版未通过硬校验；错误消息中每个“最多 N 字”都是硬上限，必须把对应场次压到不超过 N-8 字，不能只删一两字或原样重交。
-                            如果输入包含 previousScript，必须进入定向返修模式：完整保留上一版的 title、logline、场次数量、heading、summary、action、characters、props、storyFunction、targetSeconds、rhythm、visualContrast、shotPlan、smallHooks 和 bigHooks，只按 correction 重写 dialogues。仍须返回完整 JSON，禁止借返修改动剧情、动作、时长或摄影骨架。
-                            严格遵循大纲主线与爆点，不重新引入已删支线；可以补充完成场景连接和人物动机所需的动作与对白，但不能改变核心事件结果。
-                            characterDesign 是角色造型与身份连续性的硬约束。动作、人物称谓和可拍摄描述必须遵守，禁止生成与其冲突的年龄、外貌、服装、物种或身份设定。
-                            同时为下游分镜给出最小摄影骨架：每场 targetSeconds、rhythm、visualContrast 和 shotPlan。镜号连续，镜头总时长等于单集目标时长；分镜只在此基础上细化构图、画面、动作、对白和声音。
-                            全部正文使用简体中文。只返回 JSON，不要 Markdown 围栏。结构必须为：
-                            {"title":"...","logline":"...","targetSeconds":100,"smallHooks":["..."],"bigHooks":["..."],"scenes":[{"sceneNumber":1,"heading":"外景 巴黎街道 日","summary":"本场剧情摘要","action":"现在时、可拍摄的连续动作描述","dialogues":[{"character":"达达尼昂","parenthetical":"压低声音","lines":["第一句台词。","第二句台词。"]}],"characters":["达达尼昂"],"props":["推荐信"],"storyFunction":"推进冲突","targetSeconds":20,"rhythm":"...","visualContrast":"...","shotPlan":[{"shotNumber":1,"durationSeconds":5,"shotSize":"全景","cameraAngle":"平视","cameraMovement":"固定","purpose":"建立空间"}]}]}
-                            """,
+                        Instructions = instructions,
                         MaxOutputTokens = 24_576
                     }
                 },

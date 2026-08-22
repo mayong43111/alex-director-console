@@ -36,6 +36,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Equal("16:9", settings.AspectRatio);
         Assert.Equal(1920, settings.OutputWidth);
         Assert.Equal(1080, settings.OutputHeight);
+        Assert.Equal("minimax-h3-fl2va", settings.VideoPromptModel);
     }
 
     [Fact]
@@ -60,6 +61,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         Assert.Equal(1, first.Version);
         Assert.Equal(2, second.Version);
         Assert.Equal("法式彩色冒险漫画", second.VisualStyle);
+        Assert.Equal("minimax-h3", second.VideoPromptModel);
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
@@ -259,6 +261,10 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         firstPreviewResponse.EnsureSuccessStatusCode();
         var firstPreview = await firstPreviewResponse.Content.ReadFromJsonAsync<ImageGenerationPreviewView>();
         Assert.NotNull(firstPreview);
+        Assert.Contains("single continuous scene", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Never use a collage", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("character sheet", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("one unified full-frame image only", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
         var firstResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
             new { instruction = (string?)null, confirmedPrompt = firstPreview.Prompt });
@@ -439,7 +445,8 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         "宝石红、法国蓝、羊皮纸金",
         "动态漫画构图与低机位英雄镜头",
         "管弦乐冒险主题与轻快喜剧节奏",
-        "法式彩色冒险漫画，拟人犬角色，清晰墨线");
+        "法式彩色冒险漫画，拟人犬角色，清晰墨线",
+        "minimax-h3");
 
     private sealed record CreatedProjectResponse(Guid Id);
 
@@ -459,7 +466,8 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         string ColorPalette,
         string CameraLanguage,
         string SoundStrategy,
-        string ImagePromptPrefix);
+        string ImagePromptPrefix,
+        string VideoPromptModel);
 
     private sealed record ProjectSettingsResponse(
         Guid ProjectId,
@@ -470,6 +478,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         int OutputWidth,
         int OutputHeight,
         string VisualStyle,
+        string VideoPromptModel,
         ProjectCoverResponse? Cover,
         Guid? AssetId = null);
 

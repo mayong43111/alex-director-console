@@ -19,6 +19,7 @@ export interface ProjectSettings {
   cameraLanguage: string
   soundStrategy: string
   imagePromptPrefix: string
+  videoPromptModel: string
   assetId: string | null
   impactedAssetCount: number
   updatedAtUtc: string | null
