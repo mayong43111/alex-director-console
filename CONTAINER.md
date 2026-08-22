@@ -23,6 +23,14 @@ The image serves the Vite frontend and `/api` from one ASP.NET Core process on p
 
 The production deployment uses Azure Container Apps Consumption because the subscription has no App Service worker quota in Japan East.
 
+Run the complete validated release from the repository root:
+
+```powershell
+.\deploy-production.ps1 -CommitMessage "feat: describe the release"
+```
+
+The script runs API tests and the frontend build, commits all current source changes, pushes the current branch, builds a commit-tagged Linux AMD64 image in ACR, updates the Container App, and verifies the deployed image and HTTPS endpoint. Use `-SkipValidation` only when validation has already completed for the exact working tree.
+
 - URL: `https://ca-alex-director-66595.happysmoke-d5662775.japaneast.azurecontainerapps.io/`
 - Container App: `ca-alex-director-66595`
 - Environment: `cae-alex-director-jpe`

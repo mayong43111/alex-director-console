@@ -46,6 +46,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IHostedService>();
             services.RemoveAll<ISessionAgent>();
             services.RemoveAll<IProjectCoverGenerator>();
+            services.RemoveAll<IProjectCoverPromptWriter>();
             services.RemoveAll<IShotFrameGenerator>();
             services.RemoveAll<ILocalVoiceDesigner>();
             services.RemoveAll<IProjectSettingsAssistant>();
@@ -66,6 +67,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IComfyUiWorkflowProvider, TestComfyUiWorkflowProvider>();
             services.AddScoped<ISessionAgent, TestSessionAgent>();
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
+            services.AddSingleton<TestProjectCoverPromptWriter>();
+            services.AddSingleton<IProjectCoverPromptWriter>(provider =>
+                provider.GetRequiredService<TestProjectCoverPromptWriter>());
             services.AddSingleton<TestShotFrameGenerator>();
             services.AddSingleton<IShotFrameGenerator>(provider =>
                 provider.GetRequiredService<TestShotFrameGenerator>());
@@ -95,6 +99,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         Services.GetRequiredService<TestComfyUiVideoClient>().Reset();
         Services.GetRequiredService<TestShotFrameGenerator>().Reset();
         Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
+        Services.GetRequiredService<TestProjectCoverPromptWriter>().Reset();
         Services.GetRequiredService<TestAgentTextInvoker>().Reset();
         Services.GetRequiredService<TestShotVideoPromptAgent>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
@@ -207,6 +212,32 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     "gpt-image-2",
                     "medium",
                     prompt));
+    }
+
+    public IReadOnlyList<ProjectCoverPromptWriterRequest> ProjectCoverPromptWriterCalls =>
+        Services.GetRequiredService<TestProjectCoverPromptWriter>().Calls;
+
+    private sealed class TestProjectCoverPromptWriter : IProjectCoverPromptWriter
+    {
+        private readonly ConcurrentQueue<ProjectCoverPromptWriterRequest> calls = new();
+
+        public IReadOnlyList<ProjectCoverPromptWriterRequest> Calls => calls.ToArray();
+
+        public Task<ProjectCoverPromptWriterResult> WriteAsync(
+            ProjectCoverPromptWriterRequest request,
+            CancellationToken cancellationToken)
+        {
+            calls.Enqueue(request with { ProjectContext = request.ProjectContext.Clone() });
+            return Task.FromResult(new ProjectCoverPromptWriterResult(
+                $"Agent-authored cinematic cover prompt v{calls.Count}",
+                "gpt-5.4",
+                "test"));
+        }
+
+        public void Reset()
+        {
+            while (calls.TryDequeue(out _)) { }
+        }
     }
 
     public IReadOnlyList<ShotFrameGenerationCall> ShotFrameCalls =>

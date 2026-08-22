@@ -261,13 +261,34 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         firstPreviewResponse.EnsureSuccessStatusCode();
         var firstPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(firstPreviewResponse);
         Assert.NotNull(firstPreview);
-        Assert.Contains("single continuous scene", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Never use a collage", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("character sheet", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("one unified full-frame image only", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Agent-authored cinematic cover prompt v1", firstPreview.Prompt);
+        Assert.False(string.IsNullOrWhiteSpace(firstPreview.PreviewHash));
+        var firstWriterCall = Assert.Single(factory.ProjectCoverPromptWriterCalls);
+        Assert.Equal("gpt-image-2", firstWriterCall.TargetImageModel);
+        Assert.Null(firstWriterCall.PreviousPrompt);
+        Assert.Null(firstWriterCall.Instruction);
+        Assert.Equal(
+            "法式彩色冒险漫画",
+            firstWriterCall.ProjectContext.GetProperty("visualStyle").GetString());
         var firstResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
-            new { instruction = (string?)null, confirmedPrompt = firstPreview.Prompt });
+            new
+            {
+                instruction = (string?)null,
+                confirmedPrompt = firstPreview.Prompt,
+                previewHash = firstPreview.PreviewHash
+            });
+        Assert.Equal(HttpStatusCode.Accepted, firstResponse.StatusCode);
+        var first = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(firstResponse);
+        Assert.Single(factory.ProjectCoverPromptWriterCalls);
+
+        var unchangedPreviewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = (string?)null });
+        var unchangedPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(
+            unchangedPreviewResponse);
+        Assert.Equal(firstPreview.Prompt, unchangedPreview.Prompt);
+        Assert.Single(factory.ProjectCoverPromptWriterCalls);
 
         const string revision = "强化三位犬类火枪手的动作姿态，减少背景人物";
         var secondPreviewResponse = await client.PostAsJsonAsync(
@@ -276,14 +297,23 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
         secondPreviewResponse.EnsureSuccessStatusCode();
         var secondPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(secondPreviewResponse);
         Assert.NotNull(secondPreview);
+        Assert.Equal("Agent-authored cinematic cover prompt v2", secondPreview.Prompt);
+        Assert.Equal(2, factory.ProjectCoverPromptWriterCalls.Count);
+        var secondWriterCall = factory.ProjectCoverPromptWriterCalls[1];
+        Assert.Equal(firstPreview.Prompt, secondWriterCall.PreviousPrompt);
+        Assert.Equal(revision, secondWriterCall.Instruction);
         var secondResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
-            new { instruction = revision, confirmedPrompt = secondPreview.Prompt });
+            new
+            {
+                instruction = revision,
+                confirmedPrompt = secondPreview.Prompt,
+                previewHash = secondPreview.PreviewHash
+            });
 
-        Assert.Equal(HttpStatusCode.Accepted, firstResponse.StatusCode);
-        var first = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(firstResponse);
         Assert.Equal(HttpStatusCode.Accepted, secondResponse.StatusCode);
         var second = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(secondResponse);
+        Assert.Equal(2, factory.ProjectCoverPromptWriterCalls.Count);
         Assert.NotNull(first);
         Assert.NotNull(second);
         Assert.Equal(1, first.Version);
@@ -331,6 +361,42 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
             ValidSettings("法式彩色冒险漫画"));
         var resaved = await resaveResponse.Content.ReadFromJsonAsync<ProjectSettingsResponse>();
         Assert.Equal(first.AssetId, resaved?.Cover?.AssetId);
+    }
+
+    [Fact]
+    public async Task Post_cover_accepts_prompt_edited_after_agent_preview()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var saveResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("法式彩色冒险漫画"));
+        saveResponse.EnsureSuccessStatusCode();
+        var previewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = "增加男性角色" });
+        var preview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(previewResponse);
+
+        const string editedPrompt = "Manually edited final cover prompt";
+        var response = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover",
+            new
+            {
+                instruction = "增加男性角色",
+                confirmedPrompt = editedPrompt,
+                previewHash = preview.PreviewHash
+            });
+        var cover = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(response);
+
+        Assert.Equal(1, cover.Version);
+        Assert.Single(factory.ProjectCoverPromptWriterCalls);
+        await using var scope = factory.Services.CreateAsyncScope();
+        var metadataJson = await scope.ServiceProvider.GetRequiredService<V2DbContext>()
+            .Assets.Where(item => item.Id == cover.AssetId)
+            .Select(item => item.GenerationMetadataJson)
+            .SingleAsync();
+        using var metadata = JsonDocument.Parse(metadataJson!);
+        Assert.Equal(editedPrompt, metadata.RootElement.GetProperty("prompt").GetString());
     }
 
     [Fact]

@@ -128,6 +128,7 @@ builder.Services.AddHttpClient<IProjectCoverGenerator, AzureFoundryProjectCoverG
 builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerator>(client =>
     client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddScoped<IProjectCoverService, ProjectCoverService>();
+builder.Services.AddScoped<IProjectCoverPromptWriter, MafProjectCoverPromptWriter>();
 builder.Services.AddScoped<IVisualReferenceService, VisualReferenceService>();
 builder.Services.AddScoped<IVoiceProfileService, VoiceProfileService>();
 builder.Services.AddScoped<IShotFrameService, ShotFrameService>();

@@ -49,6 +49,7 @@ public sealed record GenerationTaskPayload(
     Guid? ResourceId = null,
     string? Instruction = null,
     string? ConfirmedPrompt = null,
+    string? PreviewHash = null,
     bool UseCurrentReference = false,
     string? Kind = null,
     string? RequestJson = null);
@@ -225,6 +226,7 @@ public sealed class GenerationTaskJob(
                     payload.ProjectId,
                     payload.Instruction,
                     payload.ConfirmedPrompt ?? throw new InvalidOperationException("缺少已确认的封面提示词。"),
+                    payload.PreviewHash ?? throw new InvalidOperationException("缺少封面提示词预览凭据。"),
                     cancellationToken);
             case GenerationTaskTypes.ProjectCoverPreview:
                 return await services.GetRequiredService<IProjectCoverService>().PreviewAsync(

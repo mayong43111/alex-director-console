@@ -1,4 +1,6 @@
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
@@ -236,16 +238,21 @@ public interface IProjectCoverService
         Guid projectId,
         string? instruction,
         string confirmedPrompt,
+        string previewHash,
         CancellationToken cancellationToken);
 }
 
 public sealed record ProjectCoverPreviewRequest(string? Instruction);
 
-public sealed record ProjectCoverGenerateRequest(string? Instruction, string? ConfirmedPrompt);
+public sealed record ProjectCoverGenerateRequest(
+    string? Instruction,
+    string? ConfirmedPrompt,
+    string? PreviewHash);
 
 public sealed class ProjectCoverService(
     V2DbContext dbContext,
     IProjectCoverGenerator generator,
+    IProjectCoverPromptWriter promptWriter,
     TimeProvider timeProvider) : IProjectCoverService
 {
     public async Task<ImageGenerationPreviewView> PreviewAsync(
@@ -253,62 +260,89 @@ public sealed class ProjectCoverService(
         string? instruction,
         CancellationToken cancellationToken)
     {
-        var (_, settingsAsset, settings, prompt, modelSize) = await PrepareAsync(
+        var prepared = await PrepareAsync(
             projectId,
             instruction,
             cancellationToken);
-        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var prompt = prepared.Instruction is null
+            && !string.IsNullOrWhiteSpace(prepared.PreviousPrompt)
+                ? prepared.PreviousPrompt
+                : (await promptWriter.WriteAsync(
+                    new(
+                        JsonSerializer.SerializeToElement(prepared.Settings, ProjectSettingsDefaults.JsonOptions),
+                        prepared.TargetImageModel,
+                        prepared.ModelSize,
+                        prepared.PreviousPrompt,
+                        prepared.Instruction),
+                    cancellationToken)).Prompt;
+        var previewHash = ComputePreviewHash(prepared);
         return new(
             "generate-project-cover",
             prompt,
             new(
-                FoundryConfigurationView.TextToImageModel(configuration),
-                GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
-                modelSize,
+                prepared.TargetImageModel,
+                prepared.Quality,
+                prepared.ModelSize,
                 "png",
-                settings.OutputWidth,
-                settings.OutputHeight),
-            [GenerationProvenance.Reference(settingsAsset, "uses-settings")]);
+                prepared.Settings.OutputWidth,
+                prepared.Settings.OutputHeight),
+            [GenerationProvenance.Reference(prepared.SettingsAsset, "uses-settings")],
+            previewHash);
     }
 
     public Task<ProjectCoverView> GenerateAsync(
         Guid projectId,
         string? instruction,
-        CancellationToken cancellationToken) => GenerateCoreAsync(
-            projectId,
-            instruction,
-            null,
-            cancellationToken);
+        CancellationToken cancellationToken) => GenerateUnconfirmedAsync(
+            projectId, instruction, cancellationToken);
 
     public Task<ProjectCoverView> GenerateConfirmedAsync(
         Guid projectId,
         string? instruction,
         string confirmedPrompt,
+        string previewHash,
         CancellationToken cancellationToken) => GenerateCoreAsync(
             projectId,
             instruction,
             confirmedPrompt,
+            previewHash,
             cancellationToken);
+
+    private async Task<ProjectCoverView> GenerateUnconfirmedAsync(
+        Guid projectId,
+        string? instruction,
+        CancellationToken cancellationToken)
+    {
+        var preview = await PreviewAsync(projectId, instruction, cancellationToken);
+        return await GenerateCoreAsync(
+            projectId,
+            instruction,
+            preview.Prompt,
+            preview.PreviewHash!,
+            cancellationToken);
+    }
 
     private async Task<ProjectCoverView> GenerateCoreAsync(
         Guid projectId,
         string? instruction,
-        string? confirmedPrompt,
+        string confirmedPrompt,
+        string previewHash,
         CancellationToken cancellationToken)
     {
-        var (project, settingsAsset, settings, prompt, modelSize) = await PrepareAsync(
+        var prepared = await PrepareAsync(
             projectId,
             instruction,
             cancellationToken);
-        if (confirmedPrompt is not null
-            && !string.Equals(confirmedPrompt, prompt, StringComparison.Ordinal))
+        if (!string.Equals(
+                previewHash,
+                ComputePreviewHash(prepared),
+                StringComparison.Ordinal))
         {
             throw new InvalidOperationException("项目设定或生成意见已变化，请重新预览并确认提示词。");
         }
         var generated = await generator.GenerateAsync(
-            prompt,
-            modelSize,
+            confirmedPrompt,
+            prepared.ModelSize,
             cancellationToken);
         if (generated.Bytes.Length == 0)
         {
@@ -316,8 +350,8 @@ public sealed class ProjectCoverService(
         }
         var output = ProjectImageOutputProcessor.FitToProjectWhenNeeded(
             generated.Bytes,
-            settings.OutputWidth,
-            settings.OutputHeight);
+            prepared.Settings.OutputWidth,
+            prepared.Settings.OutputHeight);
 
         var previous = await dbContext.Assets
             .Where(item => item.ProjectId == projectId && item.Type == ProjectCoverQueries.AssetType)
@@ -341,40 +375,40 @@ public sealed class ProjectCoverService(
             Name = "项目概念封面",
             BlobKey = $"project-covers/{projectId:N}/{resourceId:N}/v{version}{generated.Extension}",
             BlobContent = output.Bytes,
-            FileName = $"{project.Name}-概念封面-v{version}{generated.Extension}",
+            FileName = $"{prepared.Project.Name}-概念封面-v{version}{generated.Extension}",
             ContentType = "image/png",
             SizeBytes = output.Bytes.LongLength,
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
                 operation = "generate-project-cover",
-                settingsAssetId = settingsAsset.Id,
+                settingsAssetId = prepared.SettingsAsset.Id,
                 deployment = generated.Deployment,
                 quality = generated.Quality,
                 instruction,
-                prompt,
+                prompt = confirmedPrompt,
                 parameters = new
                 {
                     deployment = generated.Deployment,
                     quality = generated.Quality,
-                    size = modelSize,
+                    size = prepared.ModelSize,
                     outputFormat = "png",
-                    outputWidth = settings.OutputWidth,
-                    outputHeight = settings.OutputHeight
+                    outputWidth = prepared.Settings.OutputWidth,
+                    outputHeight = prepared.Settings.OutputHeight
                 },
                 references = new[]
                 {
-                    GenerationProvenance.Reference(settingsAsset, "uses-settings")
+                    GenerationProvenance.Reference(prepared.SettingsAsset, "uses-settings")
                 },
                 projectStyle = new
                 {
-                    settings.VisualStyle,
-                    settings.ArtDirection,
-                    settings.CharacterDesign,
-                    settings.ColorPalette,
-                    settings.CameraLanguage,
-                    settings.ImagePromptPrefix
+                    prepared.Settings.VisualStyle,
+                    prepared.Settings.ArtDirection,
+                    prepared.Settings.CharacterDesign,
+                    prepared.Settings.ColorPalette,
+                    prepared.Settings.CameraLanguage,
+                    prepared.Settings.ImagePromptPrefix
                 },
-                modelSize,
+                modelSize = prepared.ModelSize,
                 sourceWidth = output.SourceWidth,
                 sourceHeight = output.SourceHeight,
                 outputWidth = output.Width,
@@ -404,7 +438,7 @@ public sealed class ProjectCoverService(
         {
             ProjectId = projectId,
             ConsumerAssetId = asset.Id,
-            SourceAssetId = settingsAsset.Id,
+            SourceAssetId = prepared.SettingsAsset.Id,
             Role = "uses-settings",
             IsRequired = true,
             CreatedAtUtc = now
@@ -413,7 +447,17 @@ public sealed class ProjectCoverService(
         return ProjectCoverQueries.ToView(asset);
     }
 
-    private async Task<(Project Project, Asset SettingsAsset, ProjectSettingsDocument Settings, string Prompt, string ModelSize)> PrepareAsync(
+    private sealed record PreparedCover(
+        Project Project,
+        Asset SettingsAsset,
+        ProjectSettingsDocument Settings,
+        string? Instruction,
+        string? PreviousPrompt,
+        string TargetImageModel,
+        string Quality,
+        string ModelSize);
+
+    private async Task<PreparedCover> PrepareAsync(
         Guid projectId,
         string? instruction,
         CancellationToken cancellationToken)
@@ -440,33 +484,47 @@ public sealed class ProjectCoverService(
             settingsAsset.DocumentJson ?? "{}",
             ProjectSettingsDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
-        var prompt = BuildPrompt(settings, instruction);
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
             settings.OutputWidth,
             settings.OutputHeight,
             settings.AspectRatio);
-        return (project, settingsAsset, settings, prompt, modelSize);
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var previousMetadata = await dbContext.Assets.AsNoTracking()
+            .Where(item => item.ProjectId == projectId && item.Type == ProjectCoverQueries.AssetType)
+            .OrderByDescending(item => item.Version)
+            .Select(item => item.GenerationMetadataJson)
+            .FirstOrDefaultAsync(cancellationToken);
+        return new(
+            project,
+            settingsAsset,
+            settings,
+            instruction,
+            ReadPrompt(previousMetadata),
+            FoundryConfigurationView.TextToImageModel(configuration),
+            GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
+            modelSize);
     }
 
-    private static string BuildPrompt(ProjectSettingsDocument settings, string? instruction) => $$"""
-        Create one polished, full-bleed cinematic cover image for the project "{{settings.ProjectName}}".
-        This must be a single continuous scene with one clear focal subject and one coherent camera viewpoint.
-        Compose edge to edge as a finished key visual, not as a design presentation sheet.
-        Story: {{settings.Description}}
-        Visual style: {{settings.VisualStyle}}
-        Art direction: {{settings.ArtDirection}}
-        Character rules: {{settings.CharacterDesign}}
-        Color strategy: {{settings.ColorPalette}}
-        Camera language: {{settings.CameraLanguage}}
-        Project image constraints: {{settings.ImagePromptPrefix}}
-        Director revision request: {{instruction ?? "No additional revision request."}}
-        Target composition: {{settings.AspectRatio}}, a single cinematic moment, clear focal hierarchy, production-ready.
-        Never use a collage, split panels, multiple frames, storyboard layout, contact sheet, character sheet,
-        turnaround sheet, mood board, thumbnail strip, inset image, border, or montage of separate views.
-        Do not render titles, captions, logos, watermarks, UI, frames, dividers, or readable text.
-        These cover-layout rules take priority over any conflicting layout language in the project image constraints
-        or director revision request. Return one unified full-frame image only.
-        """;
+    private static string? ReadPrompt(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return null;
+        using var document = JsonDocument.Parse(metadataJson);
+        return document.RootElement.TryGetProperty("prompt", out var prompt)
+            ? prompt.GetString()
+            : null;
+    }
+
+    private static string ComputePreviewHash(PreparedCover prepared)
+    {
+        var value = string.Join('\n',
+            prepared.SettingsAsset.Id,
+            prepared.Instruction ?? string.Empty,
+            prepared.TargetImageModel,
+            prepared.Quality,
+            prepared.ModelSize);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    }
 }
 
 public sealed record ProjectSettingsAssistRequest(

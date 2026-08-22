@@ -23,6 +23,7 @@ export interface ImageGenerationParameters {
 export interface ImageGenerationPreview {
   operation: string
   prompt: string
+  previewHash: string | null
   parameters: ImageGenerationParameters
   references: GenerationAssetReference[]
 }

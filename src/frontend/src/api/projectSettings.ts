@@ -92,11 +92,12 @@ export async function generateProjectCover(
   projectId: string,
   instruction?: string,
   confirmedPrompt?: string,
+  previewHash?: string,
 ): Promise<ProjectCover> {
   const response = await fetch(`/api/v2/projects/${projectId}/settings/cover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction, confirmedPrompt }),
+    body: JSON.stringify({ instruction, confirmedPrompt, previewHash }),
   })
   if (!response.ok) throw await readError(response, '概念封面生成失败。')
   return waitForGenerationResult<ProjectCover>(await response.json() as GenerationTask)

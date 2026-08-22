@@ -231,9 +231,11 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   const [activeSection, setActiveSection] = useState(settingSections[0].id);
   const [status, setStatus] = useState<"loading" | "idle" | "dirty" | "saving" | "saved" | "error">("loading");
   const [generatingCover, setGeneratingCover] = useState(false);
+  const [previewingCoverPrompt, setPreviewingCoverPrompt] = useState(false);
   const [coverConfirmation, setCoverConfirmation] = useState(false);
   const [coverInstruction, setCoverInstruction] = useState("");
   const [coverPreview, setCoverPreview] = useState<ImageGenerationPreview | null>(null);
+  const [coverPreviewInstruction, setCoverPreviewInstruction] = useState("");
   const [coverPreviewVisible, setCoverPreviewVisible] = useState(false);
   const [assistingField, setAssistingField] = useState<ProjectSettingsAssistField | null>(null);
   const [assistConfirmation, setAssistConfirmation] = useState<ProjectSettingsAssistField | null>(null);
@@ -311,11 +313,12 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
     }
   }
 
-  async function previewCover() {
+  async function previewCover(instruction?: string) {
     const currentSettings = settings;
-    if (!currentSettings || generatingCover || status === "saving") return;
+    if (!currentSettings || previewingCoverPrompt || generatingCover || status === "saving") return;
+    const normalizedInstruction = instruction?.trim() || undefined;
     const shouldSaveSettings = status === "dirty" || currentSettings.version === 0;
-    setGeneratingCover(true);
+    setPreviewingCoverPrompt(true);
     setError(null);
     try {
       let current = currentSettings;
@@ -325,13 +328,14 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
         setSettings(current);
         setStatus("saved");
       }
-      const preview = await previewProjectCover(projectId, coverInstruction.trim() || undefined);
+      const preview = await previewProjectCover(projectId, normalizedInstruction);
       setCoverPreview(preview);
+      setCoverPreviewInstruction(normalizedInstruction ?? "");
     } catch (coverError) {
       setError(coverError instanceof Error ? coverError.message : "概念封面生成规格加载失败。");
       if (shouldSaveSettings) setStatus("error");
     } finally {
-      setGeneratingCover(false);
+      setPreviewingCoverPrompt(false);
     }
   }
 
@@ -349,6 +353,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
         projectId,
         instruction,
         confirmedPrompt,
+        coverPreview.previewHash ?? undefined,
       );
       setSettings((current) => current ? { ...current, cover } : current);
       setStatus("saved");
@@ -363,7 +368,9 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
   function requestCoverGeneration() {
     setCoverInstruction("");
     setCoverPreview(null);
+    setCoverPreviewInstruction("");
     setCoverConfirmation(true);
+    void previewCover();
   }
 
   async function assistField(field: ProjectSettingsAssistField, instruction?: string) {
@@ -513,7 +520,7 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
                 className="icon-button"
                 type="button"
                 onClick={requestCoverGeneration}
-                disabled={generatingCover || status === "saving"}
+                disabled={previewingCoverPrompt || generatingCover || status === "saving"}
                 title={settings.cover ? "重新生成封面" : "生成封面"}
                 aria-label={settings.cover ? "重新生成封面" : "生成封面"}
               >
@@ -800,30 +807,60 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
-              void (coverPreview ? generateCover() : previewCover());
+              void generateCover();
             }}
           >
-            <span className="eyebrow">图像模型 / {settings.cover ? "重新生成" : "首次生成"}</span>
-            <h2>{coverPreview ? "核对概念封面生成规格" : `${settings.cover ? "重新生成" : "生成"}概念封面`}</h2>
-            <p>{coverPreview ? "确认后将严格按以下提示词、参数和输入资产版本执行。" : "先预览完整生成规格；生成结果会保存提示词、参数及输入版本。"}</p>
+            <span className="eyebrow">图像模型 / 概念封面</span>
+            <h2>预览概念封面提示词</h2>
+            <p>核对当前提示词；需要调整时输入意见并生成新提示词，确认后再生成图片。</p>
+            {coverPreview
+              ? (
+                <GenerationPreviewDetails
+                  preview={coverPreview}
+                  onPromptChange={(prompt) => setCoverPreview((current) => current ? { ...current, prompt } : current)}
+                />
+              )
+              : (
+                <section className="cover-prompt-loading" role="status" aria-live="polite">
+                  <span className="spinner" />
+                  <span>正在加载提示词...</span>
+                </section>
+              )}
             <label>
               <span>本次调整意见（可选）</span>
               <textarea
-                autoFocus={!coverPreview}
-                disabled={Boolean(coverPreview)}
                 rows={4}
                 maxLength={1000}
                 value={coverInstruction}
-                onChange={(event) => { setCoverInstruction(event.target.value); setCoverPreview(null); }}
+                disabled={previewingCoverPrompt || generatingCover}
+                onChange={(event) => setCoverInstruction(event.target.value)}
                 placeholder="例如：强化三位主角的动作姿态，减少背景人物，保留现有漫画风格"
               />
             </label>
-            {coverPreview && <GenerationPreviewDetails preview={coverPreview} />}
-            <div>
+            {coverPreview && coverInstruction.trim() !== coverPreviewInstruction && (
+              <p className="cover-prompt-stale">修改意见已变化，请先生成新提示词。</p>
+            )}
+            <div className="cover-prompt-actions">
               <button className="secondary-button" type="button" onClick={() => { setCoverConfirmation(false); setCoverPreview(null); }}>取消</button>
-              <button className="primary-button" type="submit">
-                <Sparkles size={13} />
-                {coverPreview ? "确认并生成" : "预览生成规格"}
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={!coverInstruction.trim() || previewingCoverPrompt || generatingCover}
+                onClick={() => void previewCover(coverInstruction)}
+              >
+                {previewingCoverPrompt ? <span className="spinner" /> : <Sparkles size={13} />}
+                生成新提示词
+              </button>
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={!coverPreview
+                  || previewingCoverPrompt
+                  || generatingCover
+                  || coverInstruction.trim() !== coverPreviewInstruction}
+              >
+                {generatingCover ? <span className="spinner" /> : <ImagePlus size={13} />}
+                生成图片
               </button>
             </div>
           </form>
@@ -4827,32 +4864,21 @@ export function StoryboardShotPage() {
   );
 }
 
-function GenerationPreviewDetails({ preview }: { preview: ImageGenerationPreview }) {
-  const { parameters } = preview;
+function GenerationPreviewDetails({
+  preview,
+  onPromptChange,
+}: {
+  preview: ImageGenerationPreview;
+  onPromptChange: (prompt: string) => void;
+}) {
   return (
     <div className="generation-preview">
-      <label>
-        <span>完整提示词</span>
-        <textarea readOnly rows={9} value={preview.prompt} />
-      </label>
-      <dl className="generation-parameters">
-        <div><dt>模型</dt><dd>{parameters.deployment}</dd></div>
-        <div><dt>质量</dt><dd>{parameters.quality}</dd></div>
-        <div><dt>模型尺寸</dt><dd>{parameters.modelSize}</dd></div>
-        <div><dt>输出</dt><dd>{parameters.outputWidth} × {parameters.outputHeight} · {parameters.outputFormat}</dd></div>
-        {parameters.productionMode && <div><dt>模式</dt><dd>{productionModeLabel(parameters.productionMode)}</dd></div>}
-        {parameters.durationSeconds != null && <div><dt>时长</dt><dd>{parameters.durationSeconds} 秒</dd></div>}
-        {parameters.stages?.length ? <div><dt>阶段</dt><dd>{parameters.stages.map(productionStageLabel).join("、")}</dd></div> : null}
-      </dl>
-      <section className="generation-references">
-        <strong>输入资产与锁定版本</strong>
-        {preview.references.map((reference) => (
-          <article key={`${reference.assetId}-${reference.role}`}>
-            {reference.contentUrl ? <img src={reference.contentUrl} alt="" /> : <span>{reference.name.slice(0, 1)}</span>}
-            <div><b>{reference.name}</b><small>{reference.type} · v{reference.version} · {reference.role}</small></div>
-          </article>
-        ))}
-      </section>
+      <textarea
+        aria-label="完整提示词"
+        rows={9}
+        value={preview.prompt}
+        onChange={(event) => onPromptChange(event.target.value)}
+      />
     </div>
   );
 }

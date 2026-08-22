@@ -26,7 +26,8 @@ public sealed record ImageGenerationPreviewView(
     string Operation,
     string Prompt,
     ImageGenerationParametersView Parameters,
-    IReadOnlyList<GenerationAssetReferenceView> References);
+    IReadOnlyList<GenerationAssetReferenceView> References,
+    string? PreviewHash = null);
 
 public static class GenerationProvenance
 {

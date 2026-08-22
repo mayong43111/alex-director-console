@@ -338,10 +338,18 @@ public static class ProjectSettingsEndpoints
             {
                 return Results.BadRequest(new { error = "请先预览并确认完整提示词和参数。" });
             }
+            if (string.IsNullOrWhiteSpace(request.PreviewHash))
+            {
+                return Results.BadRequest(new { error = "封面提示词预览凭据无效，请重新预览。" });
+            }
             return Results.Accepted(value: await scheduler.EnqueueAsync(
                 GenerationTaskTypes.ProjectCover,
                 "生成项目封面",
-                new(projectId, Instruction: request.Instruction, ConfirmedPrompt: request.ConfirmedPrompt),
+                new(
+                    projectId,
+                    Instruction: request.Instruction,
+                    ConfirmedPrompt: request.ConfirmedPrompt,
+                    PreviewHash: request.PreviewHash),
                 cancellationToken));
         });
         group.MapPost("/cover/preview", async (
