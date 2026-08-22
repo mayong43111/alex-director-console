@@ -1,6 +1,7 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 
@@ -54,86 +55,19 @@ public static class SessionEndpoints
 
         group.MapPost("/messages", async (
             SendSessionMessageRequest request,
-            ICommandDispatcher commandDispatcher,
+            V2DbContext dbContext,
+            IBackgroundJobClient backgroundJobs,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-        {
-            var result = await commandDispatcher.SendAsync(
-                new SendSessionMessageCommand(
-                    request.AgentId,
-                    request.ScopeKey,
-                    request.SessionId,
-                    request.ProjectId,
-                    request.Title,
-                    request.Content,
-                    request.Page,
-                    request.Episode),
-                cancellationToken);
-            return result.Status switch
-            {
-                SendSessionMessageStatus.Success => Results.Ok(result.Session),
-                SendSessionMessageStatus.AgentNotFound or
-                    SendSessionMessageStatus.ProjectNotFound or
-                    SendSessionMessageStatus.SessionNotFound => Results.NotFound(),
-                SendSessionMessageStatus.Invalid => Results.BadRequest(new { error = result.Error }),
-                SendSessionMessageStatus.NotConfigured => Results.Conflict(new { error = result.Error }),
-                _ => Results.Problem(result.Error, statusCode: StatusCodes.Status502BadGateway)
-            };
-        });
+            await EnqueueMessageAsync(request, dbContext, backgroundJobs, timeProvider, cancellationToken));
 
         group.MapPost("/messages/async", async (
             SendSessionMessageRequest request,
             V2DbContext dbContext,
+            IBackgroundJobClient backgroundJobs,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-        {
-            var content = request.Content?.Trim() ?? string.Empty;
-            var scopeKey = request.ScopeKey?.Trim() ?? string.Empty;
-            if (content.Length is 0 or > 10_000 || scopeKey.Length is 0 or > 500)
-            {
-                return Results.BadRequest(new { error = "消息或 Session scopeKey 无效。" });
-            }
-            if (!await dbContext.AgentDefinitions.AsNoTracking()
-                .AnyAsync(agent => agent.Id == request.AgentId, cancellationToken))
-            {
-                return Results.NotFound();
-            }
-            if (request.ProjectId is Guid projectId
-                && !await dbContext.Projects.AsNoTracking()
-                    .AnyAsync(project => project.Id == projectId, cancellationToken))
-            {
-                return Results.NotFound();
-            }
-
-            var now = timeProvider.GetUtcNow();
-            var task = new AgentTask
-            {
-                ProjectId = request.ProjectId,
-                AgentId = request.AgentId,
-                SessionId = request.SessionId,
-                Intent = content,
-                TaskType = "session-message",
-                ContextSnapshotJson = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
-                Status = "queued",
-                CurrentStep = "等待后台执行",
-                ProgressCompleted = 0,
-                ProgressTotal = 1,
-                RequestedBy = "session-api",
-                CreatedAtUtc = now,
-                UpdatedAtUtc = now
-            };
-            dbContext.AgentTasks.Add(task);
-            dbContext.AgentTaskEvents.Add(new AgentTaskEvent
-            {
-                TaskId = task.Id,
-                Sequence = 1,
-                EventType = "status",
-                Stage = "queued",
-                Message = "消息已进入后台队列。",
-                CreatedAtUtc = now
-            });
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return Results.Accepted($"/api/v2/sessions/agent-tasks/{task.Id}", ToTaskView(task));
-        });
+            await EnqueueMessageAsync(request, dbContext, backgroundJobs, timeProvider, cancellationToken));
 
         group.MapGet("/agent-tasks/{taskId:guid}", async (
             Guid taskId,
@@ -219,7 +153,7 @@ public static class SessionEndpoints
                 task.CurrentStep = "正在停止";
                 taskCancellation.Cancel(task.Id);
             }
-            await SessionAgentTaskWorker.AppendEventAsync(
+            await SessionAgentTaskJob.AppendEventAsync(
                 dbContext, task.Id, "status", task.Status, "已请求停止任务。", null, now, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             return Results.Ok(ToTaskView(task));
@@ -263,6 +197,76 @@ public static class SessionEndpoints
         });
 
         return app;
+    }
+
+    private static async Task<IResult> EnqueueMessageAsync(
+        SendSessionMessageRequest request,
+        V2DbContext dbContext,
+        IBackgroundJobClient backgroundJobs,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        var content = request.Content?.Trim() ?? string.Empty;
+        var scopeKey = request.ScopeKey?.Trim() ?? string.Empty;
+        if (content.Length is 0 or > 10_000 || scopeKey.Length is 0 or > 500)
+        {
+            return Results.BadRequest(new { error = "消息或 Session scopeKey 无效。" });
+        }
+        if (!await dbContext.AgentDefinitions.AsNoTracking()
+            .AnyAsync(agent => agent.Id == request.AgentId, cancellationToken))
+        {
+            return Results.NotFound();
+        }
+        if (request.ProjectId is Guid projectId
+            && !await dbContext.Projects.AsNoTracking()
+                .AnyAsync(project => project.Id == projectId, cancellationToken))
+        {
+            return Results.NotFound();
+        }
+        if (request.SessionId is Guid sessionId
+            && !await dbContext.Sessions.AsNoTracking().AnyAsync(
+                session => session.Id == sessionId
+                    && session.AgentId == request.AgentId
+                    && session.ScopeKey == scopeKey,
+                cancellationToken))
+        {
+            return Results.NotFound();
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var task = new AgentTask
+        {
+            ProjectId = request.ProjectId,
+            AgentId = request.AgentId,
+            SessionId = request.SessionId,
+            Intent = content,
+            TaskType = "session-message",
+            ContextSnapshotJson = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            Status = "queued",
+            CurrentStep = "等待 Hangfire 执行",
+            ProgressCompleted = 0,
+            ProgressTotal = 1,
+            RequestedBy = "session-api",
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        dbContext.AgentTasks.Add(task);
+        dbContext.AgentTaskEvents.Add(new AgentTaskEvent
+        {
+            TaskId = task.Id,
+            Sequence = 1,
+            EventType = "status",
+            Stage = "queued",
+            Message = "消息已进入 Hangfire 队列。",
+            CreatedAtUtc = now
+        });
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        var jobId = backgroundJobs.Enqueue<SessionAgentTaskJob>(
+            job => job.ExecuteAsync(task.Id, CancellationToken.None));
+        task.PlanJson = JsonSerializer.Serialize(new { hangfireJobId = jobId });
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Results.Accepted($"/api/v2/sessions/agent-tasks/{task.Id}", ToTaskView(task));
     }
 
     private static SessionAgentTaskView ToTaskView(AgentTask task) => new(

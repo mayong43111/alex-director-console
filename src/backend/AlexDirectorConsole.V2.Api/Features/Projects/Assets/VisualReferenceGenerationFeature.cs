@@ -1,3 +1,4 @@
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
@@ -873,87 +874,43 @@ public static class VisualReferenceEndpoints
             Guid projectId,
             Guid resourceId,
             GenerateVisualReferenceRequest? request,
-            IVisualReferenceService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await service.GeneratePromptAsync(
-                    projectId,
-                    resourceId,
-                    request?.Instruction,
-                    request?.UseCurrentReference ?? false,
-                    cancellationToken));
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.VisualReferencePrompt,
+                "生成视觉参考提示词",
+                new(projectId, ResourceId: resourceId, Instruction: request?.Instruction,
+                    UseCurrentReference: request?.UseCurrentReference ?? false),
+                cancellationToken)));
 
         group.MapPost("/{resourceId:guid}/reference/generate", async (
             Guid projectId,
             Guid resourceId,
-            IVisualReferenceService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await service.GenerateImageAsync(
-                    projectId,
-                    resourceId,
-                    cancellationToken));
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (ProjectGenerationConfigurationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
-            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
-            catch (HttpRequestException error)
-            {
-                return Results.Problem(
-                    title: "参考图生成失败",
-                    detail: error.Message,
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.VisualReferenceImage,
+                "生成视觉参考图片",
+                new(projectId, ResourceId: resourceId),
+                cancellationToken)));
 
         group.MapPost("/reference/prompts/generate-missing", async (
             Guid projectId,
             BatchVisualReferenceRequest request,
-            IVisualReferenceService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await service.GenerateMissingPromptsAsync(
-                    projectId,
-                    request.Kind,
-                    cancellationToken));
-            }
-            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.VisualReferencePromptBatch,
+                "批量生成缺失的视觉参考提示词",
+                new(projectId, Kind: request.Kind),
+                cancellationToken)));
 
         group.MapPost("/reference/images/generate-missing", async (
             Guid projectId,
             BatchVisualReferenceRequest request,
-            IVisualReferenceService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await service.GenerateMissingImagesAsync(
-                    projectId,
-                    request.Kind,
-                    cancellationToken));
-            }
-            catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.VisualReferenceImageBatch,
+                "批量生成缺失的视觉参考图片",
+                new(projectId, Kind: request.Kind),
+                cancellationToken)));
 
         group.MapPost("/{resourceId:guid}/reference/upload", async (
             Guid projectId,

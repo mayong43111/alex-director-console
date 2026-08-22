@@ -1,6 +1,8 @@
 using AlexDirectorConsole.V2.Database.Data;
+using AlexDirectorConsole.V2.Database.Models;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Copilot;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
@@ -18,6 +20,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using System.Collections.Concurrent;
+using System.Net;
+using System.Text.Json;
 
 namespace AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 
@@ -95,6 +99,48 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         Services.GetRequiredService<TestShotVideoPromptAgent>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
         await skillSynchronizer.SynchronizeAsync();
+    }
+
+    public async Task<T> CompleteGenerationTaskAsync<T>(HttpResponseMessage response)
+    {
+        if (response.StatusCode != HttpStatusCode.Accepted)
+        {
+            throw new InvalidOperationException($"Expected 202 but received {(int)response.StatusCode}.");
+        }
+        using var taskDocument = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var taskId = taskDocument.RootElement.GetProperty("id").GetGuid();
+        await Services.GetRequiredService<GenerationTaskJob>().ExecuteAsync(taskId, CancellationToken.None);
+
+        await using var scope = Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+        var task = await dbContext.AgentTasks.AsNoTracking().SingleAsync(item => item.Id == taskId);
+        if (task.Status != "completed")
+        {
+            throw new InvalidOperationException(task.LastError ?? $"Generation task ended as {task.Status}.");
+        }
+        var resultJson = await dbContext.AgentTaskEvents.AsNoTracking()
+            .Where(item => item.TaskId == taskId && item.EventType == "result")
+            .OrderByDescending(item => item.Sequence)
+            .Select(item => item.DataJson)
+            .FirstAsync();
+        return JsonSerializer.Deserialize<T>(resultJson!, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            ?? throw new InvalidOperationException("Generation task result was empty.");
+    }
+
+    public async Task<AgentTask> FailGenerationTaskAsync(HttpResponseMessage response)
+    {
+        using var taskDocument = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var taskId = taskDocument.RootElement.GetProperty("id").GetGuid();
+        try
+        {
+            await Services.GetRequiredService<GenerationTaskJob>().ExecuteAsync(taskId, CancellationToken.None);
+        }
+        catch
+        {
+        }
+        await using var scope = Services.CreateAsyncScope();
+        return await scope.ServiceProvider.GetRequiredService<V2DbContext>()
+            .AgentTasks.AsNoTracking().SingleAsync(item => item.Id == taskId);
     }
 
     protected override void Dispose(bool disposing)

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Database.Data;
@@ -330,63 +331,28 @@ public static class ProjectSettingsEndpoints
         group.MapPost("/cover", async (
             Guid projectId,
             ProjectCoverGenerateRequest request,
-            IProjectCoverService coverService,
+            IGenerationTaskScheduler scheduler,
             CancellationToken cancellationToken) =>
         {
-            try
+            if (string.IsNullOrWhiteSpace(request.ConfirmedPrompt))
             {
-                if (string.IsNullOrWhiteSpace(request.ConfirmedPrompt))
-                {
-                    return Results.BadRequest(new { error = "请先预览并确认完整提示词和参数。" });
-                }
-                return Results.Ok(await coverService.GenerateConfirmedAsync(
-                    projectId,
-                    request.Instruction,
-                    request.ConfirmedPrompt,
-                    cancellationToken));
+                return Results.BadRequest(new { error = "请先预览并确认完整提示词和参数。" });
             }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (ProjectGenerationConfigurationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-            catch (HttpRequestException error)
-            {
-                return Results.Problem(
-                    title: "封面生成失败",
-                    detail: error.Message,
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
+            return Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.ProjectCover,
+                "生成项目封面",
+                new(projectId, Instruction: request.Instruction, ConfirmedPrompt: request.ConfirmedPrompt),
+                cancellationToken));
         });
         group.MapPost("/cover/preview", async (
             Guid projectId,
             ProjectCoverPreviewRequest request,
-            IProjectCoverService coverService,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await coverService.PreviewAsync(
-                    projectId,
-                    request.Instruction,
-                    cancellationToken));
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.ProjectCoverPreview,
+                "生成项目封面提示词预览",
+                new(projectId, Instruction: request.Instruction),
+                cancellationToken)));
         group.MapGet("/cover/{assetId:guid}/content", async (
             Guid projectId,
             Guid assetId,
@@ -412,7 +378,7 @@ public static class ProjectSettingsEndpoints
             Guid projectId,
             ProjectSettingsAssistRequest request,
             V2DbContext dbContext,
-            IProjectSettingsAssistant assistant,
+            IGenerationTaskScheduler scheduler,
             CancellationToken cancellationToken) =>
         {
             if (!await dbContext.Projects.AsNoTracking().AnyAsync(
@@ -421,25 +387,11 @@ public static class ProjectSettingsEndpoints
             {
                 return Results.NotFound();
             }
-            try
-            {
-                return Results.Ok(await assistant.WriteAsync(request, cancellationToken));
-            }
-            catch (ArgumentException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-            catch (ProjectGenerationConfigurationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
-            catch (Exception error) when (error is not OperationCanceledException)
-            {
-                return Results.Problem(
-                    title: "AI 帮写失败",
-                    detail: error.Message,
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
+            return Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.ProjectSettingsAssist,
+                "生成项目设定文本",
+                new(projectId, RequestJson: JsonSerializer.Serialize(request)),
+                cancellationToken));
         });
         group.MapPost("/approve", () => Results.NotFound());
         return app;

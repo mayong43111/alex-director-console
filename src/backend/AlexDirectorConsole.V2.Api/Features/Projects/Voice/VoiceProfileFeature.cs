@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -470,32 +471,12 @@ public static class VoiceProfileEndpoints
         group.MapPost("/{characterResourceId:guid}/voice-profile/generate", async (
             Guid projectId,
             Guid characterResourceId,
-            IVoiceProfileService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                return Results.Ok(await service.GenerateAsync(
-                    projectId,
-                    characterResourceId,
-                    cancellationToken));
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound();
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-            catch (HttpRequestException error)
-            {
-                return Results.Problem(
-                    title: "本地配音生成失败",
-                    detail: error.Message,
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.VoiceProfile,
+                "生成角色音色",
+                new(projectId, ResourceId: characterResourceId),
+                cancellationToken)));
         group.MapGet("/voice-profiles/references/{assetId:guid}/content", async (
             Guid projectId,
             Guid assetId,

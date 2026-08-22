@@ -6,11 +6,13 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
 
 namespace AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
@@ -299,6 +301,7 @@ public interface IShotVideoService
     Task<ShotVideoPreview?> PreviewAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string? instruction, CancellationToken cancellationToken);
     Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, string? instruction, CancellationToken cancellationToken);
     Task<bool> ProcessNextAsync(CancellationToken cancellationToken);
+    Task<bool> ProcessAsync(Guid runId, CancellationToken cancellationToken);
 }
 
 public sealed class ShotVideoService(
@@ -308,6 +311,7 @@ public sealed class ShotVideoService(
     IComfyUiConnectionTester connectionTester,
     IShotVideoPromptAgent promptAgent,
     IVoiceProfileService voiceProfileService,
+    IBackgroundJobClient backgroundJobs,
     TimeProvider timeProvider,
     ILogger<ShotVideoService> logger) : IShotVideoService
 {
@@ -440,6 +444,44 @@ public sealed class ShotVideoService(
             CreatedAtUtc = now,
             UpdatedAtUtc = now
         };
+        var task = new AgentTask
+        {
+            ProjectId = projectId,
+            ProductionEpisodeId = episodeId,
+            Intent = "生成镜头视频",
+            TaskType = RunType,
+            ContextSnapshotJson = JsonSerializer.Serialize(new { runId = run.Id, shotResourceId }, StoryboardDefaults.JsonOptions),
+            Status = "queued",
+            CurrentStep = "等待 Hangfire 执行",
+            ProgressCompleted = 0,
+            ProgressTotal = 1,
+            RequestedBy = "storyboard-api",
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        run.RequestedByTaskId = task.Id;
+        dbContext.AgentTasks.Add(task);
+        dbContext.AgentTaskItems.Add(new AgentTaskItem
+        {
+            TaskId = task.Id,
+            ProjectId = projectId,
+            ProductionEpisodeId = episodeId,
+            Ordinal = 1,
+            ObjectType = "storyboard-shot",
+            ObjectResourceId = shotResourceId,
+            Action = RunType,
+            Status = "queued",
+            CreatedAtUtc = now
+        });
+        dbContext.AgentTaskEvents.Add(new AgentTaskEvent
+        {
+            TaskId = task.Id,
+            Sequence = 1,
+            EventType = "status",
+            Stage = "queued",
+            Message = "视频生成任务已进入 Hangfire 队列。",
+            CreatedAtUtc = now
+        });
         dbContext.ProductionRuns.Add(run);
         dbContext.ProductionRunItems.Add(new ProductionRunItem
         {
@@ -465,21 +507,36 @@ public sealed class ShotVideoService(
             CreatedAtUtc = now
         });
         await dbContext.SaveChangesAsync(cancellationToken);
+        var jobId = backgroundJobs.Enqueue<ShotVideoJob>(
+            job => job.ExecuteAsync(run.Id, CancellationToken.None));
+        task.PlanJson = JsonSerializer.Serialize(new { hangfireJobId = jobId }, StoryboardDefaults.JsonOptions);
+        await dbContext.SaveChangesAsync(cancellationToken);
         return new(run.Id, run.Status, run.CurrentStage, null, null, null, preview.Prompt, now, null);
     }
 
     public async Task<bool> ProcessNextAsync(CancellationToken cancellationToken)
     {
-        var now = timeProvider.GetUtcNow();
-        var availableRuns = await dbContext.ProductionRuns
+        var runId = await dbContext.ProductionRuns.AsNoTracking()
             .Where(item => item.RunType == RunType
                 && (item.Status == "queued" || item.Status == "running"))
-            .ToListAsync(cancellationToken);
-        var run = availableRuns
-            .Where(item => item.LeaseExpiresAtUtc is null || item.LeaseExpiresAtUtc < now)
             .OrderBy(item => item.CreatedAtUtc)
-            .FirstOrDefault();
+            .Select(item => (Guid?)item.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (runId is null) return false;
+        await ProcessAsync(runId.Value, cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> ProcessAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        var run = await dbContext.ProductionRuns.SingleOrDefaultAsync(
+            item => item.Id == runId
+                && item.RunType == RunType
+                && (item.Status == "queued" || item.Status == "running"),
+            cancellationToken);
         if (run is null) return false;
+        if (run.LeaseExpiresAtUtc is not null && run.LeaseExpiresAtUtc >= now) return true;
         var item = await dbContext.ProductionRunItems.SingleAsync(
             candidate => candidate.RunId == run.Id && candidate.Stage == RunType,
             cancellationToken);
@@ -525,9 +582,43 @@ public sealed class ShotVideoService(
             run.LeaseOwner = null;
             run.LeaseExpiresAtUtc = null;
             run.UpdatedAtUtc = timeProvider.GetUtcNow();
+            if (run.RequestedByTaskId is Guid taskId)
+            {
+                var task = await dbContext.AgentTasks.SingleAsync(candidate => candidate.Id == taskId, CancellationToken.None);
+                var taskItem = await dbContext.AgentTaskItems.SingleAsync(candidate => candidate.TaskId == taskId, CancellationToken.None);
+                task.Status = run.Status;
+                task.CurrentStep = run.CurrentStage;
+                task.StartedAtUtc ??= run.StartedAtUtc;
+                task.CompletedAtUtc = run.CompletedAtUtc;
+                task.LastError = run.LastError;
+                task.ProgressCompleted = run.Status == "completed" ? 1 : 0;
+                task.UpdatedAtUtc = run.UpdatedAtUtc;
+                taskItem.Status = item.Status;
+                taskItem.Attempt = item.Attempt;
+                taskItem.StartedAtUtc = item.StartedAtUtc;
+                taskItem.CompletedAtUtc = item.CompletedAtUtc;
+                taskItem.ErrorCode = item.ErrorCode;
+                taskItem.ErrorDetail = item.ErrorDetail;
+                if (item.OutputAssetId is Guid outputAssetId)
+                {
+                    taskItem.OutputAssetIdsJson = JsonSerializer.Serialize(new[] { outputAssetId }, StoryboardDefaults.JsonOptions);
+                    if (!await dbContext.AgentTaskOutputs.AnyAsync(
+                        output => output.TaskId == taskId && output.AssetId == outputAssetId,
+                        CancellationToken.None))
+                    {
+                        dbContext.AgentTaskOutputs.Add(new AgentTaskOutput
+                        {
+                            TaskId = taskId,
+                            TaskItemId = taskItem.Id,
+                            AssetId = outputAssetId,
+                            Role = "generated-video"
+                        });
+                    }
+                }
+            }
             await dbContext.SaveChangesAsync(CancellationToken.None);
         }
-        return true;
+        return run.Status is "queued" or "running";
     }
 
     private async Task SubmitAsync(
@@ -653,6 +744,7 @@ public sealed class ShotVideoService(
             FileName = $"{shotAsset.Name}-视频-v{version}.mp4",
             ContentType = "video/mp4",
             SizeBytes = bytes.LongLength,
+            CreatedByTaskId = run.RequestedByTaskId,
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
                 operation = "generate-storyboard-shot-video",
@@ -1019,30 +1111,19 @@ internal static class ShotVideoQueries
     }
 }
 
-public sealed class ShotVideoWorker(
-    IServiceScopeFactory scopeFactory,
-    ILogger<ShotVideoWorker> logger) : BackgroundService
+public sealed class ShotVideoJob(
+    IShotVideoService service,
+    IBackgroundJobClient backgroundJobs)
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    [AutomaticRetry(Attempts = 3, OnAttemptsExceeded = AttemptsExceededAction.Fail)]
+    public async Task ExecuteAsync(Guid runId, CancellationToken cancellationToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        var pending = await service.ProcessAsync(runId, cancellationToken);
+        if (pending)
         {
-            try
-            {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                var service = scope.ServiceProvider.GetRequiredService<IShotVideoService>();
-                var processed = await service.ProcessNextAsync(stoppingToken);
-                await Task.Delay(processed ? TimeSpan.FromSeconds(2) : TimeSpan.FromSeconds(1), stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception error)
-            {
-                logger.LogError(error, "Shot video worker iteration failed.");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-            }
+            backgroundJobs.Schedule<ShotVideoJob>(
+                job => job.ExecuteAsync(runId, CancellationToken.None),
+                TimeSpan.FromSeconds(2));
         }
     }
 }
@@ -1057,19 +1138,12 @@ public static class ShotVideoEndpoints
             Guid productionEpisodeId,
             Guid shotResourceId,
             string? instruction,
-            IShotVideoService service,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                var preview = await service.PreviewAsync(projectId, productionEpisodeId, shotResourceId, instruction, cancellationToken);
-                return preview is null ? Results.NotFound() : Results.Ok(preview);
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.ShotVideoPreview,
+                "生成视频提示词预览",
+                new(projectId, productionEpisodeId, shotResourceId, instruction),
+                cancellationToken)));
         app.MapPost($"{route}/start", async (
             Guid projectId,
             Guid productionEpisodeId,

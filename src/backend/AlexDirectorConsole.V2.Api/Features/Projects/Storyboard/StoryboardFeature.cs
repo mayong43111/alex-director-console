@@ -4,6 +4,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
@@ -1244,28 +1245,12 @@ public static class StoryboardEndpoints
             Guid productionEpisodeId,
             Guid shotResourceId,
             string? instruction,
-            IShotFrameService frameService,
-            CancellationToken cancellationToken) =>
-        {
-            try
-            {
-                var preview = await frameService.PreviewFirstFrameAsync(
-                    projectId,
-                    productionEpisodeId,
-                    shotResourceId,
-                    instruction,
-                    cancellationToken);
-                return preview is null ? Results.NotFound() : Results.Ok(preview);
-            }
-            catch (ProjectGenerationConfigurationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.BadRequest(new { error = error.Message });
-            }
-        });
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardImagePreview,
+                "生成镜头图片提示词预览",
+                new(projectId, productionEpisodeId, shotResourceId, instruction),
+                cancellationToken)));
         return app;
     }
 }

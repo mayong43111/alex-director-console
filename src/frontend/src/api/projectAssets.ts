@@ -1,3 +1,5 @@
+import { waitForGenerationResult, type GenerationTask } from './generationTasks'
+
 export type VisualAssetKind = 'character' | 'scene' | 'prop'
 
 export interface VisualReferenceImage {
@@ -188,7 +190,7 @@ export async function generateVisualReferencePrompt(
     },
   )
   if (!response.ok) throw await readError(response, '提示词生成失败。')
-  return response.json() as Promise<VisualReferencePrompt>
+  return waitForGenerationResult<VisualReferencePrompt>(await response.json() as GenerationTask)
 }
 
 export async function generateVisualReferenceImage(
@@ -200,7 +202,7 @@ export async function generateVisualReferenceImage(
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '参考图生成失败。')
-  return response.json() as Promise<VisualReferenceImage>
+  return waitForGenerationResult<VisualReferenceImage>(await response.json() as GenerationTask)
 }
 
 export async function generateMissingVisualReferencePrompts(
@@ -231,7 +233,7 @@ async function generateMissingVisualReferences(
     },
   )
   if (!response.ok) throw await readError(response, `批量生成${target === 'prompts' ? '提示词' : '图片'}失败。`)
-  return response.json() as Promise<BatchVisualReferenceResult>
+  return waitForGenerationResult<BatchVisualReferenceResult>(await response.json() as GenerationTask)
 }
 
 export async function uploadVisualReference(
@@ -289,7 +291,7 @@ export async function generateVoiceReference(
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '参考音生成失败。')
-  return response.json() as Promise<VoiceProfile>
+  return waitForGenerationResult<VoiceProfile>(await response.json() as GenerationTask)
 }
 
 export async function listAudioMaterials(

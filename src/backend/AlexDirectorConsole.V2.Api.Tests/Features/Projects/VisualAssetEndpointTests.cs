@@ -82,7 +82,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile/generate",
             null);
         generateResponse.EnsureSuccessStatusCode();
-        var generated = await generateResponse.Content.ReadFromJsonAsync<VoiceProfileView>();
+        var generated = await factory.CompleteGenerationTaskAsync<VoiceProfileView>(generateResponse);
         Assert.NotNull(generated?.Reference);
         Assert.Equal("qwen3-tts-1.7b-voice-design-test", generated.Reference.Model);
         Assert.Equal("cpu", generated.Reference.Device);
@@ -322,13 +322,16 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         var imageWithoutPromptResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
             null);
-        Assert.Equal(HttpStatusCode.BadRequest, imageWithoutPromptResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, imageWithoutPromptResponse.StatusCode);
+        var failedImageTask = await factory.FailGenerationTaskAsync(imageWithoutPromptResponse);
+        Assert.Equal("failed", failedImageTask.Status);
+        Assert.Contains("提示词", failedImageTask.LastError);
 
         var promptResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/prompt/generate",
             null);
         promptResponse.EnsureSuccessStatusCode();
-        var referencePrompt = await promptResponse.Content.ReadFromJsonAsync<VisualReferencePromptView>();
+        var referencePrompt = await factory.CompleteGenerationTaskAsync<VisualReferencePromptView>(promptResponse);
         Assert.NotNull(referencePrompt);
         Assert.Contains("left 55%", referencePrompt.Prompt);
         Assert.Contains("pure solid white", referencePrompt.Prompt);
@@ -344,7 +347,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             null);
 
         generateResponse.EnsureSuccessStatusCode();
-        var reference = await generateResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        var reference = await factory.CompleteGenerationTaskAsync<VisualReferenceImageView>(generateResponse);
         Assert.NotNull(reference);
         Assert.Equal(character.ResourceId, reference.SubjectResourceId);
         Assert.Equal("character", reference.SubjectType);
@@ -385,7 +388,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/prompt/generate",
             new { instruction = revisionInstruction, useCurrentReference = true });
         retryPromptResponse.EnsureSuccessStatusCode();
-        var retriedPrompt = await retryPromptResponse.Content.ReadFromJsonAsync<VisualReferencePromptView>();
+        var retriedPrompt = await factory.CompleteGenerationTaskAsync<VisualReferencePromptView>(retryPromptResponse);
         Assert.NotNull(retriedPrompt);
         Assert.Equal(referencePrompt.Version + 1, retriedPrompt.Version);
         Assert.Contains($"Revision instruction: {revisionInstruction}", retriedPrompt.Prompt);
@@ -393,7 +396,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
             null);
         retryResponse.EnsureSuccessStatusCode();
-        var retried = await retryResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        var retried = await factory.CompleteGenerationTaskAsync<VisualReferenceImageView>(retryResponse);
         Assert.NotNull(retried);
         Assert.Equal(reference.Version + 1, retried.Version);
         Assert.Contains($"Revision instruction: {revisionInstruction}", retried.Prompt);
@@ -447,7 +450,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/reference/prompts/generate-missing",
             new { kind = "character" });
         batchPromptResponse.EnsureSuccessStatusCode();
-        var batchPrompts = await batchPromptResponse.Content.ReadFromJsonAsync<BatchVisualReferenceResult>();
+        var batchPrompts = await factory.CompleteGenerationTaskAsync<BatchVisualReferenceResult>(batchPromptResponse);
         Assert.Equal(1, batchPrompts?.Generated);
         Assert.Equal(1, batchPrompts?.Skipped);
         Assert.Equal(0, batchPrompts?.Failed);
@@ -456,7 +459,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/reference/prompts/generate-missing",
             new { kind = "character" });
         repeatedPromptResponse.EnsureSuccessStatusCode();
-        var repeatedPrompts = await repeatedPromptResponse.Content.ReadFromJsonAsync<BatchVisualReferenceResult>();
+        var repeatedPrompts = await factory.CompleteGenerationTaskAsync<BatchVisualReferenceResult>(repeatedPromptResponse);
         Assert.Equal(0, repeatedPrompts?.Generated);
         Assert.Equal(2, repeatedPrompts?.Skipped);
 
@@ -464,7 +467,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/reference/images/generate-missing",
             new { kind = "character" });
         batchImageResponse.EnsureSuccessStatusCode();
-        var batchImages = await batchImageResponse.Content.ReadFromJsonAsync<BatchVisualReferenceResult>();
+        var batchImages = await factory.CompleteGenerationTaskAsync<BatchVisualReferenceResult>(batchImageResponse);
         Assert.Equal(1, batchImages?.Generated);
         Assert.Equal(1, batchImages?.Skipped);
         Assert.Equal(0, batchImages?.Failed);
@@ -473,7 +476,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/reference/images/generate-missing",
             new { kind = "character" });
         repeatedImageResponse.EnsureSuccessStatusCode();
-        var repeatedImages = await repeatedImageResponse.Content.ReadFromJsonAsync<BatchVisualReferenceResult>();
+        var repeatedImages = await factory.CompleteGenerationTaskAsync<BatchVisualReferenceResult>(repeatedImageResponse);
         Assert.Equal(0, repeatedImages?.Generated);
         Assert.Equal(2, repeatedImages?.Skipped);
     }
@@ -529,7 +532,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/visual-assets/{asset.ResourceId}/reference/prompt/generate",
             null);
         promptResponse.EnsureSuccessStatusCode();
-        var prompt = await promptResponse.Content.ReadFromJsonAsync<VisualReferencePromptView>();
+        var prompt = await factory.CompleteGenerationTaskAsync<VisualReferencePromptView>(promptResponse);
         Assert.NotNull(prompt);
         Assert.Contains("1024x1024", prompt.Prompt);
         Assert.Contains("pure solid white", prompt.Prompt);
@@ -540,7 +543,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             null);
 
         generateResponse.EnsureSuccessStatusCode();
-        var reference = await generateResponse.Content.ReadFromJsonAsync<VisualReferenceImageView>();
+        var reference = await factory.CompleteGenerationTaskAsync<VisualReferenceImageView>(generateResponse);
         Assert.NotNull(reference);
         Assert.Equal(kind, reference.SubjectType);
         Assert.Equal(prompt.Prompt, reference.Prompt);

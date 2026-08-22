@@ -1,6 +1,7 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Copilot;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
@@ -19,6 +20,8 @@ using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using Azure.Core;
 using Azure.Identity;
+using Hangfire;
+using Hangfire.InMemory;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 
@@ -70,6 +73,22 @@ builder.Services.AddDbContext<V2DbContext>(options =>
 
     options.UseSqlite(connectionString);
 });
+builder.Services.AddHangfire(configuration =>
+{
+    configuration.UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings();
+    if (useSqlServer)
+    {
+        configuration.UseSqlServerStorage(connectionString);
+        return;
+    }
+
+    configuration.UseInMemoryStorage();
+});
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHangfireServer();
+}
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IFoundryConnectionTester, AzureFoundryConnectionTester>();
 builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromSeconds(30));
@@ -93,14 +112,17 @@ builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddScoped<IStoryboardMediaPromptService, StoryboardMediaPromptService>();
 builder.Services.AddScoped<IStoryboardMediaBatchService, StoryboardMediaBatchService>();
 builder.Services.AddScoped<IStoryboardDialogueAudioService, StoryboardDialogueAudioService>();
-builder.Services.AddHostedService<ShotVideoWorker>();
+builder.Services.AddTransient<ShotVideoJob>();
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
 builder.Services.AddSingleton<IAgentCatalog, AgentCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();
 builder.Services.AddScoped<ISessionAgent, MafSessionAgent>();
 builder.Services.AddSingleton<SessionAgentTaskCancellation>();
 builder.Services.AddSingleton<SessionAgentExecutionContext>();
-builder.Services.AddHostedService<SessionAgentTaskWorker>();
+builder.Services.AddTransient<SessionAgentTaskJob>();
+builder.Services.AddScoped<IGenerationTaskScheduler, GenerationTaskScheduler>();
+builder.Services.AddTransient<GenerationTaskJob>();
+builder.Services.AddTransient<GenerationTaskRecoveryJob>();
 builder.Services.AddHttpClient<IProjectCoverGenerator, AzureFoundryProjectCoverGenerator>(client =>
     client.Timeout = TimeSpan.FromMinutes(5));
 builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerator>(client =>
@@ -250,6 +272,15 @@ app.MapFoundryConfiguration();
 app.MapComfyUiConfiguration();
 app.MapSkills();
 app.MapAgents();
+app.MapGenerationTasks();
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    var recurringJobs = app.Services.GetRequiredService<IRecurringJobManager>();
+    recurringJobs.AddOrUpdate<GenerationTaskRecoveryJob>(
+        "recover-generation-tasks",
+        job => job.ExecuteAsync(CancellationToken.None),
+        Cron.Minutely);
+}
 app.MapSessions();
 app.MapCopilot();
 app.MapFallbackToFile("index.html");

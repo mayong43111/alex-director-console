@@ -1,3 +1,5 @@
+import { waitForGenerationResult, type GenerationTask } from './generationTasks'
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -106,7 +108,7 @@ export async function assistProjectDescription(
   if (!response.ok) {
     throw new Error(await readProjectError(response, '项目描述优化失败，请稍后重试。'))
   }
-  return response.json() as Promise<ProjectDescriptionAssistResult>
+  return waitForGenerationResult<ProjectDescriptionAssistResult>(await response.json() as GenerationTask)
 }
 
 async function readProjectError(response: Response, fallback: string): Promise<string> {

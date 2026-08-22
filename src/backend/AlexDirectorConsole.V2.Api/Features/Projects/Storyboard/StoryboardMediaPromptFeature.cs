@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -544,80 +545,62 @@ public static class StoryboardMediaEndpoints
             Guid productionEpisodeId,
             Guid shotResourceId,
             GenerateStoryboardMediaPromptRequest request,
-            IStoryboardMediaPromptService service,
-            CancellationToken cancellationToken) => await ExecuteAsync(async () =>
-                Results.Ok(await service.GenerateImagePromptAsync(
-                    projectId,
-                    productionEpisodeId,
-                    shotResourceId,
-                    request.Instruction,
-                    cancellationToken))));
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardImagePrompt,
+                "生成分镜图片提示词",
+                new(projectId, productionEpisodeId, shotResourceId, request.Instruction),
+                cancellationToken)));
         app.MapPost($"{route}/shots/{{shotResourceId:guid}}/image/generate", async (
             Guid projectId,
             Guid productionEpisodeId,
             Guid shotResourceId,
-            IStoryboardMediaPromptService promptService,
-            ICommandDispatcher dispatcher,
-            CancellationToken cancellationToken) => await ExecuteAsync(async () =>
-        {
-            var prompt = await promptService.GetCurrentAsync(projectId, shotResourceId, StoryboardMediaPromptService.ImageKind, cancellationToken)
-                ?? throw new InvalidOperationException("请先生成图片提示词。");
-            var production = await dispatcher.SendAsync(
-                new StartShotProductionCommand(projectId, productionEpisodeId, shotResourceId, prompt.Prompt, prompt.Instruction),
-                cancellationToken);
-            return production is null ? Results.NotFound() : Results.Ok(production);
-        }));
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardImage,
+                "生成分镜图片",
+                new(projectId, productionEpisodeId, shotResourceId),
+                cancellationToken)));
         app.MapPost($"{route}/shots/{{shotResourceId:guid}}/video/prompt", async (
             Guid projectId,
             Guid productionEpisodeId,
             Guid shotResourceId,
             GenerateStoryboardMediaPromptRequest request,
-            IStoryboardMediaPromptService service,
-            CancellationToken cancellationToken) => await ExecuteAsync(async () =>
-                Results.Ok(await service.GenerateVideoPromptAsync(
-                    projectId,
-                    productionEpisodeId,
-                    shotResourceId,
-                    request.Instruction,
-                    cancellationToken))));
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardVideoPrompt,
+                "生成分镜视频提示词",
+                new(projectId, productionEpisodeId, shotResourceId, request.Instruction),
+                cancellationToken)));
         app.MapPost($"{route}/shots/{{shotResourceId:guid}}/video/generate", async (
             Guid projectId,
             Guid productionEpisodeId,
             Guid shotResourceId,
-            IStoryboardMediaPromptService promptService,
-            IShotVideoService videoService,
-            CancellationToken cancellationToken) => await ExecuteAsync(async () =>
-        {
-            var prompt = await promptService.GetCurrentAsync(projectId, shotResourceId, StoryboardMediaPromptService.VideoKind, cancellationToken)
-                ?? throw new InvalidOperationException("请先生成视频提示词。");
-            var production = await videoService.StartAsync(
-                projectId,
-                productionEpisodeId,
-                shotResourceId,
-                prompt.Prompt,
-                prompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
-                prompt.Instruction,
-                cancellationToken);
-            return production is null ? Results.NotFound() : Results.Accepted(value: production);
-        }));
-        MapBatch(app, $"{route}/batch/image-prompts", (service, projectId, episodeId, token) =>
-            service.GenerateMissingImagePromptsAsync(projectId, episodeId, token));
-        MapBatch(app, $"{route}/batch/images", (service, projectId, episodeId, token) =>
-            service.GenerateMissingImagesAsync(projectId, episodeId, token));
-        MapBatch(app, $"{route}/batch/video-prompts", (service, projectId, episodeId, token) =>
-            service.GenerateMissingVideoPromptsAsync(projectId, episodeId, token));
-        MapBatch(app, $"{route}/batch/videos", (service, projectId, episodeId, token) =>
-            service.GenerateMissingVideosAsync(projectId, episodeId, token));
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) => Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardVideo,
+                "创建分镜视频生成任务",
+                new(projectId, productionEpisodeId, shotResourceId),
+                cancellationToken)));
+        MapBatch(app, $"{route}/batch/image-prompts", GenerationTaskTypes.StoryboardImagePromptBatch, "批量生成分镜图片提示词");
+        MapBatch(app, $"{route}/batch/images", GenerationTaskTypes.StoryboardImageBatch, "批量生成分镜图片");
+        MapBatch(app, $"{route}/batch/video-prompts", GenerationTaskTypes.StoryboardVideoPromptBatch, "批量生成分镜视频提示词");
+        MapBatch(app, $"{route}/batch/videos", GenerationTaskTypes.StoryboardVideoBatch, "批量生成分镜视频");
         return app;
     }
 
     private static void MapBatch(
         IEndpointRouteBuilder app,
         string route,
-        Func<IStoryboardMediaBatchService, Guid, Guid, CancellationToken, Task<BatchStoryboardMediaResult>> operation) => app.MapPost(
+        string taskType,
+        string intent) => app.MapPost(
         route,
-        async (Guid projectId, Guid productionEpisodeId, IStoryboardMediaBatchService service, CancellationToken cancellationToken) =>
-            Results.Ok(await operation(service, projectId, productionEpisodeId, cancellationToken)));
+        async (Guid projectId, Guid productionEpisodeId, IGenerationTaskScheduler scheduler, CancellationToken cancellationToken) =>
+            Results.Accepted(value: await scheduler.EnqueueAsync(
+                taskType,
+                intent,
+                new(projectId, productionEpisodeId),
+                cancellationToken)));
 
     private static async Task<IResult> ExecuteAsync(Func<Task<IResult>> operation)
     {

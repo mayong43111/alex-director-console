@@ -178,12 +178,12 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
     public async Task Worker_completes_persistent_message_task_and_writes_session()
     {
         using var client = factory.CreateClient();
-        var worker = new SessionAgentTaskWorker(
+        var job = new SessionAgentTaskJob(
             factory.Services.GetRequiredService<IServiceScopeFactory>(),
             factory.Services.GetRequiredService<SessionAgentTaskCancellation>(),
             factory.Services.GetRequiredService<SessionAgentExecutionContext>(),
             TimeProvider.System,
-            factory.Services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<SessionAgentTaskWorker>>());
+            factory.Services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<SessionAgentTaskJob>>());
         var enqueue = await client.PostAsJsonAsync(
                 "/api/v2/sessions/messages/async",
                 new
@@ -196,7 +196,7 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
         var task = await enqueue.Content.ReadFromJsonAsync<AgentTaskResponse>();
         Assert.NotNull(task);
 
-        Assert.True(await worker.ProcessNextAsync(CancellationToken.None));
+        Assert.True(await job.ExecuteAsync(task.Id, CancellationToken.None));
         var completed = await client.GetFromJsonAsync<AgentTaskResponse>(
             $"/api/v2/sessions/agent-tasks/{task.Id}");
         Assert.NotNull(completed);
@@ -206,10 +206,9 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
             $"/api/v2/sessions/{completed.SessionId}");
         Assert.NotNull(session);
         Assert.Equal(2, session.Messages.Length);
-        worker.Dispose();
     }
 
-    private static async Task<SessionResponse> SendAsync(
+    private async Task<SessionResponse> SendAsync(
         HttpClient client,
         string scopeKey,
         Guid? projectId,
@@ -225,8 +224,16 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
                 content,
                 page = "项目中心"
             });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var session = await response.Content.ReadFromJsonAsync<SessionResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var task = await response.Content.ReadFromJsonAsync<AgentTaskResponse>();
+        Assert.NotNull(task);
+        var job = factory.Services.GetRequiredService<SessionAgentTaskJob>();
+        Assert.True(await job.ExecuteAsync(task.Id, CancellationToken.None));
+        var completed = await client.GetFromJsonAsync<AgentTaskResponse>(
+            $"/api/v2/sessions/agent-tasks/{task.Id}");
+        Assert.NotNull(completed?.SessionId);
+        var session = await client.GetFromJsonAsync<SessionResponse>(
+            $"/api/v2/sessions/{completed.SessionId}");
         Assert.NotNull(session);
         return session;
     }

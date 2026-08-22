@@ -1,4 +1,5 @@
 import type { ImageGenerationPreview } from './generation'
+import { waitForGenerationResult, type GenerationTask } from './generationTasks'
 
 export interface ProjectSettings {
   projectId: string
@@ -98,7 +99,7 @@ export async function generateProjectCover(
     body: JSON.stringify({ instruction, confirmedPrompt }),
   })
   if (!response.ok) throw await readError(response, '概念封面生成失败。')
-  return response.json() as Promise<ProjectCover>
+  return waitForGenerationResult<ProjectCover>(await response.json() as GenerationTask)
 }
 
 export async function assistProjectSettingsField(
@@ -114,7 +115,7 @@ export async function assistProjectSettingsField(
     body: JSON.stringify({ field, currentValue, instruction, context }),
   })
   if (!response.ok) throw await readError(response, 'AI 帮写失败。')
-  return response.json() as Promise<ProjectSettingsAssistResult>
+  return waitForGenerationResult<ProjectSettingsAssistResult>(await response.json() as GenerationTask)
 }
 
 export async function previewProjectCover(
@@ -127,5 +128,5 @@ export async function previewProjectCover(
     body: JSON.stringify({ instruction }),
   })
   if (!response.ok) throw await readError(response, '概念封面生成规格加载失败。')
-  return response.json() as Promise<ImageGenerationPreview>
+  return waitForGenerationResult<ImageGenerationPreview>(await response.json() as GenerationTask)
 }

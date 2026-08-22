@@ -103,8 +103,8 @@ public sealed class CreateProjectEndpointTests(V2ApiFactory factory)
             "/api/v2/projects/assist-description",
             new { name = "天桥食堂", description = "都市悬疑短片" });
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var result = await response.Content.ReadFromJsonAsync<AssistDescriptionResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var result = await factory.CompleteGenerationTaskAsync<AssistDescriptionResponse>(response);
         Assert.NotNull(result);
         Assert.Equal("description", result.Field);
         Assert.Equal("AI 优化：都市悬疑短片", result.Value);

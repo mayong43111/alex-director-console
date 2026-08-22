@@ -1,4 +1,5 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Database.Data;
@@ -39,7 +40,7 @@ public static class CreateProjectEndpoint
                 "/api/v2/projects/assist-description",
                 async (
                     AssistProjectDescriptionRequest request,
-                    IProjectSettingsAssistant assistant,
+                    IGenerationTaskScheduler scheduler,
                     V2DbContext dbContext,
                     CancellationToken cancellationToken) =>
                 {
@@ -50,43 +51,27 @@ public static class CreateProjectEndpoint
                         return Results.BadRequest(new { error = "请先填写项目名称和描述。" });
                     }
 
-                    try
-                    {
-                        var descriptionAgent = await dbContext.AgentDefinitions
-                            .AsNoTracking()
-                            .SingleOrDefaultAsync(
-                                agent => agent.Id == BuiltInAgents.ProjectDescriptionWriterId,
-                                cancellationToken);
-                        if (descriptionAgent is null)
-                        {
-                            return Results.Conflict(new { error = "项目介绍助手未配置，请先在 Agent 管理中创建或恢复该 Agent。" });
-                        }
-                        var context = JsonSerializer.SerializeToElement(new { projectName = name });
-                        var result = await assistant.WriteAsync(
-                            new ProjectSettingsAssistRequest(
-                                "description",
-                                description,
-                                null,
-                                context,
-                                descriptionAgent.SystemPrompt),
+                    var descriptionAgent = await dbContext.AgentDefinitions
+                        .AsNoTracking()
+                        .SingleOrDefaultAsync(
+                            agent => agent.Id == BuiltInAgents.ProjectDescriptionWriterId,
                             cancellationToken);
-                        return Results.Ok(result);
-                    }
-                    catch (ArgumentException error)
+                    if (descriptionAgent is null)
                     {
-                        return Results.BadRequest(new { error = error.Message });
+                        return Results.Conflict(new { error = "项目介绍助手未配置，请先在 Agent 管理中创建或恢复该 Agent。" });
                     }
-                    catch (ProjectGenerationConfigurationException error)
-                    {
-                        return Results.Conflict(new { error = error.Message });
-                    }
-                    catch (Exception error) when (error is not OperationCanceledException)
-                    {
-                        return Results.Problem(
-                            title: "项目描述优化失败",
-                            detail: error.Message,
-                            statusCode: StatusCodes.Status502BadGateway);
-                    }
+                    var context = JsonSerializer.SerializeToElement(new { projectName = name });
+                    var assistRequest = new ProjectSettingsAssistRequest(
+                        "description",
+                        description,
+                        null,
+                        context,
+                        descriptionAgent.SystemPrompt);
+                    return Results.Accepted(value: await scheduler.EnqueueAsync(
+                        GenerationTaskTypes.ProjectDescriptionAssist,
+                        "优化项目描述",
+                        new(Guid.Empty, RequestJson: JsonSerializer.Serialize(assistRequest)),
+                        cancellationToken));
                 })
             .WithName("AssistV2ProjectDescription")
             .Produces<ProjectSettingsAssistView>()

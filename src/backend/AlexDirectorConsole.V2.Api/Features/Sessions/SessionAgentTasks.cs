@@ -3,6 +3,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
 
 namespace AlexDirectorConsole.V2.Api.Features.Sessions;
@@ -80,7 +81,7 @@ public sealed class SessionAgentExecutionContext(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-            await SessionAgentTaskWorker.AppendEventAsync(
+            await SessionAgentTaskJob.AppendEventAsync(
                 dbContext,
                 taskId,
                 "tool",
@@ -102,45 +103,26 @@ public sealed class SessionAgentExecutionContext(
     }
 }
 
-public sealed class SessionAgentTaskWorker(
+public sealed class SessionAgentTaskJob(
     IServiceScopeFactory scopeFactory,
     SessionAgentTaskCancellation cancellation,
     SessionAgentExecutionContext executionContext,
     TimeProvider timeProvider,
-    ILogger<SessionAgentTaskWorker> logger) : BackgroundService
+    ILogger<SessionAgentTaskJob> logger)
 {
     private readonly string workerId = $"{Environment.MachineName}:{Guid.NewGuid():N}";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                var processed = await ProcessNextAsync(stoppingToken);
-                if (!processed) await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception error)
-            {
-                logger.LogError(error, "Persistent Session Agent worker loop failed.");
-                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
-            }
-        }
-    }
-
-    internal async Task<bool> ProcessNextAsync(CancellationToken stoppingToken)
+    [AutomaticRetry(Attempts = 3, OnAttemptsExceeded = AttemptsExceededAction.Fail)]
+    public async Task<bool> ExecuteAsync(Guid taskId, CancellationToken stoppingToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
         var now = timeProvider.GetUtcNow();
-        var candidates = await dbContext.AgentTasks
+        var candidate = await dbContext.AgentTasks
             .AsNoTracking()
-            .Where(task => task.TaskType == "session-message"
+            .Where(task => task.Id == taskId
+                && task.TaskType == "session-message"
                 && (task.Status == "queued" || task.Status == "running"))
             .Select(task => new
             {
@@ -150,14 +132,13 @@ public sealed class SessionAgentTaskWorker(
                 task.LeaseExpiresAtUtc,
                 task.CreatedAtUtc
             })
-            .Take(20)
-            .ToArrayAsync(stoppingToken);
-        var candidate = candidates
-            .Where(task => task.Status == "queued"
-                || task.LeaseExpiresAtUtc is null
-                || task.LeaseExpiresAtUtc < now)
-            .OrderBy(task => task.CreatedAtUtc)
-            .FirstOrDefault();
+            .SingleOrDefaultAsync(stoppingToken);
+        if (candidate is not null
+            && candidate.Status == "running"
+            && candidate.LeaseExpiresAtUtc >= now)
+        {
+            return false;
+        }
         if (candidate is null) return false;
 
         var claimed = await dbContext.AgentTasks

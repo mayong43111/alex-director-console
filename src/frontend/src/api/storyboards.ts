@@ -1,3 +1,5 @@
+import { waitForGenerationResult, type GenerationTask } from './generationTasks'
+
 import type { ImageGenerationPreview } from './generation'
 
 export interface StoryboardShot {
@@ -249,7 +251,7 @@ export async function previewShotProduction(
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '首帧生成规格加载失败。')
-  return response.json() as Promise<ImageGenerationPreview>
+  return waitForGenerationResult<ImageGenerationPreview>(await response.json() as GenerationTask)
 }
 
 function shotVideoRoute(projectId: string, productionEpisodeId: string, shotResourceId: string) {
@@ -279,7 +281,7 @@ export async function previewShotVideo(
     method: 'POST',
   })
   if (!response.ok) throw await readError(response, '视频生成规格加载失败。')
-  return response.json() as Promise<ShotVideoPreview>
+  return waitForGenerationResult<ShotVideoPreview>(await response.json() as GenerationTask)
 }
 
 export async function startShotVideo(
@@ -296,7 +298,7 @@ export async function startShotVideo(
     body: JSON.stringify({ confirmedPrompt, previewHash, instruction }),
   })
   if (!response.ok) throw await readError(response, '镜头视频任务创建失败。')
-  return response.json() as Promise<ShotVideoProduction>
+  return waitForGenerationResult<ShotVideoProduction>(await response.json() as GenerationTask)
 }
 
 export interface StoryboardHook {
@@ -338,7 +340,7 @@ export async function generateStoryboardImagePrompt(
     body: JSON.stringify({ instruction }),
   })
   if (!response.ok) throw await readError(response, '图片提示词生成失败。')
-  return response.json() as Promise<StoryboardMediaPrompt>
+  return waitForGenerationResult<StoryboardMediaPrompt>(await response.json() as GenerationTask)
 }
 
 export async function generateStoryboardImage(
@@ -350,7 +352,7 @@ export async function generateStoryboardImage(
     method: 'POST',
   })
   if (!response.ok) throw await readError(response, '镜头图片生成失败。')
-  return response.json() as Promise<ShotProduction>
+  return waitForGenerationResult<ShotProduction>(await response.json() as GenerationTask)
 }
 
 export async function generateStoryboardVideoPrompt(
@@ -365,7 +367,7 @@ export async function generateStoryboardVideoPrompt(
     body: JSON.stringify({ instruction }),
   })
   if (!response.ok) throw await readError(response, '视频提示词生成失败。')
-  return response.json() as Promise<StoryboardMediaPrompt>
+  return waitForGenerationResult<StoryboardMediaPrompt>(await response.json() as GenerationTask)
 }
 
 export async function generateStoryboardVideo(
@@ -390,7 +392,7 @@ async function runStoryboardBatch(
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '分镜批量操作失败。')
-  return response.json() as Promise<BatchStoryboardMediaResult>
+  return waitForGenerationResult<BatchStoryboardMediaResult>(await response.json() as GenerationTask)
 }
 
 export const generateMissingStoryboardImagePrompts = (projectId: string, productionEpisodeId: string) =>

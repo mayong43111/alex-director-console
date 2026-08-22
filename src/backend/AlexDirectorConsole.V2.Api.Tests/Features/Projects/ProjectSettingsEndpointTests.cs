@@ -259,7 +259,7 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/settings/cover/preview",
             new { instruction = (string?)null });
         firstPreviewResponse.EnsureSuccessStatusCode();
-        var firstPreview = await firstPreviewResponse.Content.ReadFromJsonAsync<ImageGenerationPreviewView>();
+        var firstPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(firstPreviewResponse);
         Assert.NotNull(firstPreview);
         Assert.Contains("single continuous scene", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Never use a collage", firstPreview.Prompt, StringComparison.OrdinalIgnoreCase);
@@ -274,16 +274,16 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/settings/cover/preview",
             new { instruction = revision });
         secondPreviewResponse.EnsureSuccessStatusCode();
-        var secondPreview = await secondPreviewResponse.Content.ReadFromJsonAsync<ImageGenerationPreviewView>();
+        var secondPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(secondPreviewResponse);
         Assert.NotNull(secondPreview);
         var secondResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/settings/cover",
             new { instruction = revision, confirmedPrompt = secondPreview.Prompt });
 
-        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
-        var first = await firstResponse.Content.ReadFromJsonAsync<ProjectCoverResponse>();
-        var second = await secondResponse.Content.ReadFromJsonAsync<ProjectCoverResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, firstResponse.StatusCode);
+        var first = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(firstResponse);
+        Assert.Equal(HttpStatusCode.Accepted, secondResponse.StatusCode);
+        var second = await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(secondResponse);
         Assert.NotNull(first);
         Assert.NotNull(second);
         Assert.Equal(1, first.Version);
@@ -349,8 +349,8 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
                 context = ValidSettings("法式彩色冒险漫画")
             });
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var result = await response.Content.ReadFromJsonAsync<ProjectSettingsAssistResponse>();
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var result = await factory.CompleteGenerationTaskAsync<ProjectSettingsAssistResponse>(response);
         Assert.NotNull(result);
         Assert.Equal("artDirection", result.Field);
         Assert.Equal("AI 优化：清晰墨线", result.Value);
