@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Agents;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
@@ -2258,6 +2259,23 @@ public static class AdaptationScriptEndpoints
                     detail: error.Message,
                     statusCode: StatusCodes.Status502BadGateway);
             }
+        });
+        app.MapPost($"{route}/episodes/{{episodeNumber:int}}/production-script/tasks", async (
+            Guid projectId,
+            Guid sourceResourceId,
+            int episodeNumber,
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) =>
+        {
+            var task = await scheduler.EnqueueAsync(
+                GenerationTaskTypes.ProductionScript,
+                $"生成第 {episodeNumber} 集正式剧本",
+                new GenerationTaskPayload(
+                    projectId,
+                    SourceResourceId: sourceResourceId,
+                    EpisodeNumber: episodeNumber),
+                cancellationToken);
+            return Results.Accepted($"/api/v2/tasks/{task.Id}", task);
         });
         app.MapPut($"{route}/episodes/{{episodeNumber:int}}", async (
             Guid projectId,

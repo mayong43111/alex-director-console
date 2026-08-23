@@ -43,4 +43,7 @@ public static class BuiltInAgents
 
     public static readonly Guid VideoPromptDirectorId =
         Guid.Parse("8d586999-9a23-4811-8762-fbcb72b52551");
+
+    public static readonly Guid ImagePromptDirectorId =
+        Guid.Parse("28b06410-4243-4ec4-b28c-06e805c147e7");
 }

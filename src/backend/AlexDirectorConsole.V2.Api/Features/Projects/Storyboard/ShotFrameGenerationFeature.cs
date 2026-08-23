@@ -229,6 +229,7 @@ public interface IShotFrameService
 public sealed class ShotFrameService(
     V2DbContext dbContext,
     IShotFrameGenerator generator,
+    IShotImagePromptAgent promptAgent,
     TimeProvider timeProvider) : IShotFrameService
 {
     public const string AssetType = "storyboard-first-frame";
@@ -337,17 +338,22 @@ public sealed class ShotFrameService(
         var firstFrame = mode == ShotProductionModes.FirstLastContinuous
             ? await ResolveCurrentFrameAsync(projectId, definition.ShotResourceId, "frame-for-shot", cancellationToken)
             : null;
-        var prompt = AppendInstruction(
-            firstFrame is null
-                ? BuildPrompt(settings, shot, references, props)
-                : BuildLastFramePrompt(settings, shot, references, props),
-            instruction);
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
+        var prompt = (await promptAgent.GenerateAsync(
+            BuildPromptAgentInput(
+                configuration,
+                settings,
+                shot,
+                references,
+                props,
+                firstFrame is null ? "first-frame" : "last-frame",
+                instruction),
+            cancellationToken)).Prompt;
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
             settings.OutputWidth,
             settings.OutputHeight,
             settings.AspectRatio);
-        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
-            .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
         return new(
             firstFrame is null ? "generate-storyboard-first-frame" : "generate-storyboard-last-frame",
             prompt,
@@ -517,8 +523,19 @@ public sealed class ShotFrameService(
                         firstFrame.Version)
                 ];
             }
+            var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
             var prompt = stage == "last-frame"
-                ? AppendInstruction(BuildLastFramePrompt(settings, shot, references, props), ReadInstruction(run.SpecJson))
+                ? (await promptAgent.GenerateAsync(
+                    BuildPromptAgentInput(
+                        configuration,
+                        settings,
+                        shot,
+                        references,
+                        props,
+                        "last-frame",
+                        ReadInstruction(run.SpecJson)),
+                    cancellationToken)).Prompt
                 : confirmedPrompt ?? throw new InvalidOperationException("首帧缺少已确认提示词。");
             var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
                 settings.OutputWidth,
@@ -760,69 +777,45 @@ public sealed class ShotFrameService(
             CreatedAtUtc = now
         });
 
-    private static string BuildPrompt(
+    private static ShotImagePromptAgentInput BuildPromptAgentInput(
+        FoundryConfiguration? configuration,
         ProjectSettingsDocument settings,
         StoryboardShotDocument shot,
         IReadOnlyList<ShotFrameReference> references,
-        IReadOnlyList<Asset> propAssets)
+        IReadOnlyList<Asset> propAssets,
+        string frameStage,
+        string? instruction)
     {
         var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
-        return $$"""
-            Create the exact first frame of one cinematic storyboard shot using every supplied character and scene image as a strict visual reference.
-            Project: {{settings.ProjectName}}
-            Visual style: {{settings.VisualStyle}}
-            Art direction: {{settings.ArtDirection}}
-            Character consistency rules: {{settings.CharacterDesign}}
-            Color strategy: {{settings.ColorPalette}}
-            Camera language: {{settings.CameraLanguage}}
-            Project image constraints: {{settings.ImagePromptPrefix}}
-            Shot: scene {{shot.SceneNumber}}, shot {{shot.ShotNumber}}, {{shot.DurationSeconds}} seconds
-            Shot size: {{shot.ShotSize}}
-            Camera angle: {{shot.CameraAngle}}
-            Camera movement intent: {{shot.CameraMovement}}
-            Composition: {{shot.Composition}}
-            First-frame visual: {{(string.IsNullOrWhiteSpace(shot.FirstFrameDescription) ? shot.VisualDescription : shot.FirstFrameDescription)}}
-            Action starting pose: {{shot.Action}}
-            Narrative hooks realized by this shot: {{string.Join("; ", (shot.Hooks ?? []).Select(item => $"{item.Type}: {item.Description}"))}}
-            Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
-            Required scene references: {{string.Join("; ", references.Where(item => item.SubjectType == "scene").Select(item => item.SubjectName))}}
-            Important recurring complex props only: {{string.Join("; ", props.Select(item => $"{item.Name}: {item.VisualDescription}"))}}
-            Match each referenced character's identity, species, face, body, costume, and colors. Match the referenced scene's architecture, layout, materials, lighting logic, and scale.
-            Do not add ordinary handheld objects, furniture, set dressing, or any prop not listed as an important recurring complex prop.
-            Render one coherent frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
-            """;
-    }
-
-    private static string BuildLastFramePrompt(
-        ProjectSettingsDocument settings,
-        StoryboardShotDocument shot,
-        IReadOnlyList<ShotFrameReference> references,
-        IReadOnlyList<Asset> propAssets)
-    {
-        var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
-        return $$"""
-            Create the exact final frame of one cinematic storyboard shot. The supplied first-frame image is mandatory and is the highest-priority visual reference for the final frame; the supplied character and scene sheets are additional strict identity and environment references.
-            Treat the scene shown in the first-frame image as locked. Preserve its architecture, spatial layout, camera position and axis, perspective, lighting direction and intensity, materials, colors, set dressing, background objects, and weather exactly. Do not redesign, replace, relocate, add, or remove any scene element unless the required final-frame state explicitly demands that visible change.
-            Project: {{settings.ProjectName}}
-            Visual style: {{settings.VisualStyle}}
-            Art direction: {{settings.ArtDirection}}
-            Character consistency rules: {{settings.CharacterDesign}}
-            Color strategy: {{settings.ColorPalette}}
-            Camera language: {{settings.CameraLanguage}}
-            Project image constraints: {{settings.ImagePromptPrefix}}
-            Shot: scene {{shot.SceneNumber}}, shot {{shot.ShotNumber}}, {{shot.DurationSeconds}} seconds
-            Shot size: {{shot.ShotSize}}
-            Camera angle: {{shot.CameraAngle}}
-            Camera movement intent: {{shot.CameraMovement}}
-            First-frame continuity anchor: {{shot.FirstFrameDescription}}
-            Required final-frame state: {{shot.LastFrameDescription}}
-            Full cut execution: {{shot.CutDescription}}
-            Required character references: {{string.Join("; ", references.Where(item => item.SubjectType == "character").Select(item => item.SubjectName))}}
-            Required scene references: {{string.Join("; ", references.Where(item => item.SubjectType == "scene").Select(item => item.SubjectName))}}
-            Important recurring complex props only: {{string.Join("; ", props.Select(item => $"{item.Name}: {item.VisualDescription}"))}}
-            Preserve every identity, costume, material, color, light direction, camera axis, and environment detail from the supplied first frame. Change only the positions, poses, expressions, occlusions, prop states, framing, and focus explicitly required by the final-frame state and cut execution. When any instruction conflicts with scene continuity, follow the first-frame image for the scene and alter only the explicitly required action state.
-            Render one coherent final frame, not a collage or model sheet. Do not render titles, captions, speech bubbles, logos, watermarks, UI, borders, or readable text.
-            """;
+        return new(
+            FoundryConfigurationView.NormalizeImageProvider(configuration?.ImageProvider),
+            FoundryConfigurationView.ImageEditModel(configuration),
+            frameStage,
+            settings.ProjectName,
+            settings.VisualStyle,
+            settings.ArtDirection,
+            settings.CharacterDesign,
+            settings.ColorPalette,
+            settings.CameraLanguage,
+            settings.ImagePromptPrefix,
+            settings.OutputWidth,
+            settings.OutputHeight,
+            shot.SceneNumber,
+            shot.ShotNumber,
+            shot.DurationSeconds,
+            shot.ShotSize,
+            shot.CameraAngle,
+            shot.CameraMovement,
+            shot.Composition,
+            shot.VisualDescription,
+            shot.Action,
+            string.IsNullOrWhiteSpace(shot.FirstFrameDescription) ? shot.VisualDescription : shot.FirstFrameDescription,
+            shot.LastFrameDescription,
+            shot.CutDescription,
+            (shot.Hooks ?? []).Select(item => $"{item.Type}: {item.Description}").ToArray(),
+            references.Select(item => new ShotImagePromptReferenceContext(item.SubjectType, item.SubjectName)).ToArray(),
+            props.Select(item => $"{item.Name}: {item.VisualDescription}").ToArray(),
+            string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim());
     }
 }
 

@@ -166,6 +166,13 @@ public sealed class SessionEndpointTests(V2ApiFactory factory)
         Assert.NotNull(stopped);
         Assert.Equal("cancelled", stopped.Status);
 
+        var eventStream = await client.GetStringAsync(
+            $"/api/v2/sessions/agent-tasks/{queued.Id}/events?after=0");
+        Assert.Contains("\"sequence\":1", eventStream, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"queued\"", eventStream, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"cancelled\"", eventStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Sequence\"", eventStream, StringComparison.Ordinal);
+
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<AlexDirectorConsole.V2.Database.Data.V2DbContext>();
         var events = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToArrayAsync(

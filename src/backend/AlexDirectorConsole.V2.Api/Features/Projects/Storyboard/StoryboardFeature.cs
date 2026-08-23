@@ -474,8 +474,6 @@ public sealed class GenerateStoryboardCommandHandler(
         if (!proposedKeys.SetEquals(plannedShots.Keys))
             throw new InvalidOperationException("分镜镜号必须与正式剧本中的镜头计划完全一致。");
 
-        ValidateScriptCoverage(proposed, scriptPackage);
-
         return proposed
             .OrderBy(item => item.SceneNumber)
             .ThenBy(item => item.ShotNumber)
@@ -492,26 +490,6 @@ public sealed class GenerateStoryboardCommandHandler(
                 };
             })
             .ToArray();
-    }
-
-    private static void ValidateScriptCoverage(
-        IReadOnlyList<StoryboardShotDraft> shots,
-        ProductionScriptPackageView scriptPackage)
-    {
-        foreach (var scene in scriptPackage.Episode.Scenes)
-        {
-            var sceneShots = shots.Where(shot => shot.SceneNumber == scene.SceneNumber).ToArray();
-            if (sceneShots.All(shot => string.IsNullOrWhiteSpace(shot.Action)))
-                throw new InvalidOperationException($"分镜未呈现正式剧本第 {scene.SceneNumber} 场的动作。");
-
-            var storyboardDialogue = string.Join("\n", sceneShots.Select(shot => shot.Dialogue));
-            var missingLine = (scene.Dialogues ?? [])
-                .SelectMany(dialogue => dialogue.Lines ?? [])
-                .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line)
-                    && !storyboardDialogue.Contains(line.Trim(), StringComparison.Ordinal));
-            if (missingLine is not null)
-                throw new InvalidOperationException($"分镜遗漏正式剧本第 {scene.SceneNumber} 场对白：{missingLine}");
-        }
     }
 
     private static string[] NormalizeNames(IReadOnlyList<string> values) => values
@@ -1093,20 +1071,14 @@ public static class StoryboardEndpoints
         app.MapPost($"{route}/generate", async (
             Guid projectId,
             Guid productionEpisodeId,
-            ICommandDispatcher dispatcher,
+            IGenerationTaskScheduler scheduler,
             CancellationToken cancellationToken) =>
         {
-            try
-            {
-                var storyboard = await dispatcher.SendAsync(
-                    new GenerateStoryboardCommand(projectId, productionEpisodeId),
-                    cancellationToken);
-                return storyboard is null ? Results.NotFound() : Results.Ok(storyboard);
-            }
-            catch (InvalidOperationException error)
-            {
-                return Results.Conflict(new { error = error.Message });
-            }
+            return Results.Accepted(value: await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryboardDesign,
+                "生成分镜草稿",
+                new(projectId, ProductionEpisodeId: productionEpisodeId),
+                cancellationToken));
         });
         app.MapPut($"{route}/shots/{{shotResourceId:guid}}/assets", async (
             Guid projectId,
@@ -1594,20 +1566,34 @@ public sealed class StartShotProductionCommandHandler(
             throw new InvalidOperationException(preflight.FailureMessage);
         }
 
-        var preview = await frameService.PreviewFirstFrameAsync(
+        var currentPrompts = await StoryboardMediaPromptQueries.GetCurrentByShotAsync(
+            dbContext,
             command.ProjectId,
-            command.ProductionEpisodeId,
-            command.ShotResourceId,
-            creativeSettingsAssetId,
-            preflight.Inputs.ReferenceImageAssetIds,
-            preflight.Inputs.PropAssetIds,
-            command.Instruction,
-            cancellationToken)
-            ?? throw new InvalidOperationException("镜头不存在。");
-        if (!string.Equals(command.ConfirmedPrompt, preview.Prompt, StringComparison.Ordinal))
+            new Dictionary<Guid, Guid> { [shotAsset.Id] = command.ShotResourceId },
+            StoryboardMediaPromptService.ImageKind,
+            cancellationToken);
+        if (!currentPrompts.TryGetValue(command.ShotResourceId, out var currentPrompt)
+            || !string.Equals(command.ConfirmedPrompt, currentPrompt.Prompt, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("镜头、项目设定或参考资产已变化，请重新预览并确认提示词。");
+            throw new InvalidOperationException("图片提示词已变化，请重新生成并确认当前版本。");
         }
+        var promptAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+            item => item.Id == currentPrompt.AssetId,
+            cancellationToken);
+        var promptDocument = JsonSerializer.Deserialize<StoryboardMediaPromptDocument>(
+            promptAsset.DocumentJson ?? "{}",
+            StoryboardDefaults.JsonOptions)
+            ?? throw new InvalidOperationException("当前图片提示词无法读取。");
+        if (promptDocument.ShotAssetId != shotAsset.Id
+            || promptDocument.SettingsAssetId != creativeSettingsAssetId
+            || promptDocument.ReferenceImageAssetIds is null
+            || promptDocument.PropAssetIds is null
+            || !promptDocument.ReferenceImageAssetIds.ToHashSet().SetEquals(preflight.Inputs.ReferenceImageAssetIds)
+            || !promptDocument.PropAssetIds.ToHashSet().SetEquals(preflight.Inputs.PropAssetIds))
+        {
+            throw new InvalidOperationException("项目设定或镜头参考资产已变化，请重新生成图片提示词。");
+        }
+
         var validationRun = CreateValidationRun(
             command,
             shotAsset.Id,

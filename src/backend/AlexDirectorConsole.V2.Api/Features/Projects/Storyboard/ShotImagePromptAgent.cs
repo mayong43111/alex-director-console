@@ -12,28 +12,23 @@ using Microsoft.Extensions.AI;
 
 namespace AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 
-public sealed record ShotVideoPromptCharacterContext(
-    Guid AssetId,
-    Guid ResourceId,
-    string Name,
-    string Summary,
-    string VisualDescription,
-    IReadOnlyList<string> MustKeep,
-    IReadOnlyList<string> Avoid,
-    Guid? VoiceProfileAssetId,
-    string? VoiceName,
-    string? VoiceDesignPrompt,
-    string? VoiceLanguage,
-    int? VoiceSeed,
-    string SpeakerId);
+public sealed record ShotImagePromptReferenceContext(string Kind, string Name);
 
-public sealed record ShotVideoPromptAgentInput(
+public sealed record ShotImagePromptAgentInput(
+    string ImageProvider,
+    string ImageModel,
+    string FrameStage,
     string ProjectName,
-    string? VideoPromptModel,
     string VisualStyle,
     string ArtDirection,
+    string CharacterDesign,
+    string ColorPalette,
     string CameraLanguage,
-    string SoundStrategy,
+    string ImageConstraints,
+    int OutputWidth,
+    int OutputHeight,
+    int SceneNumber,
+    int ShotNumber,
     double DurationSeconds,
     string ShotSize,
     string CameraAngle,
@@ -41,35 +36,31 @@ public sealed record ShotVideoPromptAgentInput(
     string Composition,
     string VisualDescription,
     string Action,
-    string Dialogue,
-    string Sound,
     string FirstFrameDescription,
     string LastFrameDescription,
     string CutDescription,
-    IReadOnlyList<ShotVideoPromptCharacterContext> Characters,
+    IReadOnlyList<string> NarrativeHooks,
+    IReadOnlyList<ShotImagePromptReferenceContext> References,
+    IReadOnlyList<string> ImportantProps,
     string? Instruction);
 
-public sealed record ShotVideoPromptDraft(
-    string VisualMotionPrompt,
-    string VoicePerformancePrompt,
-    string SoundPrompt,
-    string ContinuityNotes);
+public sealed record ShotImagePromptDraft(string Prompt);
 
-public interface IShotVideoPromptAgent
+public interface IShotImagePromptAgent
 {
-    Task<ShotVideoPromptDraft> GenerateAsync(
-        ShotVideoPromptAgentInput input,
+    Task<ShotImagePromptDraft> GenerateAsync(
+        ShotImagePromptAgentInput input,
         CancellationToken cancellationToken);
 }
 
 #pragma warning disable MAAI001
-public sealed class MafShotVideoPromptAgent(
+public sealed class MafShotImagePromptAgent(
     V2DbContext dbContext,
     IDataProtectionProvider dataProtectionProvider,
-    ILoggerFactory loggerFactory) : IShotVideoPromptAgent
+    ILoggerFactory loggerFactory) : IShotImagePromptAgent
 {
-    public async Task<ShotVideoPromptDraft> GenerateAsync(
-        ShotVideoPromptAgentInput input,
+    public async Task<ShotImagePromptDraft> GenerateAsync(
+        ShotImagePromptAgentInput input,
         CancellationToken cancellationToken)
     {
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
@@ -78,14 +69,14 @@ public sealed class MafShotVideoPromptAgent(
             throw new ProjectGenerationConfigurationException("请先在系统设置中配置语言模型。");
         var instructions = await BuiltInAgentPromptLoader.LoadAsync(
             dbContext,
-            BuiltInAgents.VideoPromptDirectorId,
+            BuiltInAgents.ImagePromptDirectorId,
             cancellationToken);
 
         var agent = LlmChatClientFactory.Create(configuration!, dataProtectionProvider)
             .AsIChatClient()
             .AsHarnessAgent(new HarnessAgentOptions
             {
-                Name = "AlexMiniMaxH3PromptDirector",
+                Name = "AlexImagePromptDirector",
                 MaxContextWindowTokens = 1_050_000,
                 MaxOutputTokens = 4_096,
                 MaximumIterationsPerRequest = 2,
@@ -101,37 +92,20 @@ public sealed class MafShotVideoPromptAgent(
                 }
             }, loggerFactory);
         var response = await agent.RunAsync(
-            $"为这个镜头生成 MiniMax H3 提示词草案：\n{JsonSerializer.Serialize(input, StoryboardDefaults.JsonOptions)}",
+            $"为目标图片模型生成这个分镜帧的提示词：\n{JsonSerializer.Serialize(input, StoryboardDefaults.JsonOptions)}",
             cancellationToken: cancellationToken);
         var text = response.Text?.Trim() ?? string.Empty;
         var start = text.IndexOf('{');
         var end = text.LastIndexOf('}');
         if (start < 0 || end <= start)
-            throw new InvalidOperationException("GPT-5.4 未返回 JSON 视频提示词。");
-        var draft = JsonSerializer.Deserialize<ShotVideoPromptDraft>(
+            throw new InvalidOperationException("图片提示词 Agent 未返回 JSON。");
+        var draft = JsonSerializer.Deserialize<ShotImagePromptDraft>(
             text[start..(end + 1)],
             StoryboardDefaults.JsonOptions)
-            ?? throw new InvalidOperationException("GPT-5.4 未返回有效视频提示词。");
-        if (string.IsNullOrWhiteSpace(draft.VisualMotionPrompt)
-            || string.IsNullOrWhiteSpace(draft.VoicePerformancePrompt)
-            || string.IsNullOrWhiteSpace(draft.SoundPrompt)
-            || string.IsNullOrWhiteSpace(draft.ContinuityNotes))
-            throw new InvalidOperationException("Agent 返回的视频提示词缺少必填内容。");
-        return draft;
+            ?? throw new InvalidOperationException("图片提示词 Agent 未返回有效提示词。");
+        if (string.IsNullOrWhiteSpace(draft.Prompt))
+            throw new InvalidOperationException("图片提示词 Agent 返回的提示词为空。");
+        return draft with { Prompt = draft.Prompt.Trim() };
     }
 }
 #pragma warning restore MAAI001
-
-public static class ShotVideoPromptInstructions
-{
-    internal const string DefaultModel = "minimax-h3-fl2va";
-    internal const string MiniMaxH3Model = "minimax-h3";
-
-    public static bool UsesMiniMaxH3Format(string? model) => Normalize(model) == MiniMaxH3Model;
-
-    private static string Normalize(string? model) => model?.Trim().ToLowerInvariant() switch
-    {
-        "minimax-h3" or "minimax h3" or "hailuo-h3" or "hailuo h3" => MiniMaxH3Model,
-        _ => DefaultModel
-    };
-}

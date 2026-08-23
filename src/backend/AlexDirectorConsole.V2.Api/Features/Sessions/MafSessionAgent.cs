@@ -456,6 +456,7 @@ public sealed class MafSessionAgent(
                 var result = await storyboardMediaBatchService.GenerateMissingImagePromptsAsync(
                     resolvedProject.Value,
                     resolvedEpisode,
+                    null,
                     toolCancellationToken);
                 return Serialize(new { status = result.Failed == 0 ? "completed" : "partial", result });
             }),

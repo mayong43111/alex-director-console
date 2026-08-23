@@ -56,12 +56,12 @@ function getWorkflow(
       .split("/")
       .filter(Boolean);
     const next = sourceId && view === "source"
-      ? { label: "分析素材图谱", to: `${projectBase}/story/${sourceId}/material` }
+      ? { label: "分析原文结构", to: `${projectBase}/story/${sourceId}/material` }
       : sourceId && view === "material"
         ? { label: "建立改编方案", to: `${projectBase}/script/${sourceId}/adaptation` }
         : undefined;
     return {
-      label: view === "material" ? "素材图谱" : view === "source" ? "原文资料" : "故事",
+      label: view === "material" ? "原文分析" : view === "source" ? "原文资料" : "故事",
       tabs: [],
       next,
     };

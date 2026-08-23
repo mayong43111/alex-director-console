@@ -4,6 +4,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.EntityFrameworkCore;
@@ -39,6 +40,12 @@ public sealed record BatchVisualReferenceResult(
     int Skipped,
     int Failed,
     IReadOnlyList<string> Errors);
+
+public sealed record BatchVisualReferenceProgress(
+    int Completed,
+    int Total,
+    string SubjectName,
+    string Outcome);
 
 public sealed record GenerateVisualReferenceRequest(
     string? Instruction,
@@ -146,12 +153,14 @@ public interface IVisualReferenceService
     Task<BatchVisualReferenceResult> GenerateMissingPromptsAsync(
         Guid projectId,
         string kind,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Func<BatchVisualReferenceProgress, Task>? reportProgress = null);
 
     Task<BatchVisualReferenceResult> GenerateMissingImagesAsync(
         Guid projectId,
         string kind,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Func<BatchVisualReferenceProgress, Task>? reportProgress = null);
 
     Task<VisualReferenceImageView> UploadAsync(
         Guid projectId,
@@ -166,6 +175,7 @@ public sealed class VisualReferenceService(
     V2DbContext dbContext,
     IProjectCoverGenerator generator,
     IShotFrameGenerator referenceEditor,
+    IVisualReferencePromptWriter promptWriter,
     TimeProvider timeProvider) : IVisualReferenceService
 {
     public const string AssetType = "visual-reference-image";
@@ -212,7 +222,6 @@ public sealed class VisualReferenceService(
             ProjectSettingsDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
 
-        var prompt = BuildPrompt(settings, document, instruction);
         var currentReference = useCurrentReference
             ? (await GetCurrentReferenceAssetAsync(
                 projectId,
@@ -228,6 +237,44 @@ public sealed class VisualReferenceService(
             PromptAssetType,
             PromptPurpose,
             cancellationToken);
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var targetImageModel = useCurrentReference
+            ? FoundryConfigurationView.ImageEditModel(configuration)
+            : FoundryConfigurationView.TextToImageModel(configuration);
+        var promptResult = await promptWriter.WriteAsync(
+            new(
+                JsonSerializer.SerializeToElement(new
+                {
+                    project = new
+                    {
+                        settings.ProjectName,
+                        settings.VisualStyle,
+                        settings.ArtDirection,
+                        settings.CharacterDesign,
+                        settings.ColorPalette,
+                        settings.ImagePromptPrefix
+                    },
+                    subject = new
+                    {
+                        document.Kind,
+                        document.Name,
+                        document.Summary,
+                        document.VisualDescription,
+                        document.MustKeep,
+                        document.Avoid
+                    },
+                    requiredLayout = LayoutFor(document.Kind),
+                    outputRules = "1024x1024 square production design sheet; pure solid white #FFFFFF outer canvas and gutters; no text, labels, marks, borders, logos, watermarks, or UI"
+                }, VisualAssetDefaults.JsonOptions),
+                document.Kind,
+                targetImageModel,
+                "1024x1024",
+                useCurrentReference,
+                previous is null ? null : ReadPromptDocument(previous).Prompt,
+                instruction),
+            cancellationToken);
+        var prompt = promptResult.Prompt;
         var resourceId = previous?.ResourceId ?? Guid.NewGuid();
         var version = (previous?.Version ?? 0) + 1;
         var number = previous?.Number
@@ -258,6 +305,7 @@ public sealed class VisualReferenceService(
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
                 operation = "generate-visual-reference-prompt",
+                source = "model-aware-prompt-agent",
                 subjectAssetId = subject.Id,
                 subjectResourceId,
                 subjectType = document.Kind,
@@ -265,6 +313,9 @@ public sealed class VisualReferenceService(
                 prompt,
                 instruction,
                 useCurrentReference,
+                targetImageModel,
+                promptWriterModel = promptResult.Model,
+                promptWriterRuntime = promptResult.Runtime,
                 basedOnReferenceAssetId = currentReference?.Id,
                 references = new[]
                     {
@@ -309,7 +360,7 @@ public sealed class VisualReferenceService(
             SubjectResourceId = subjectResourceId,
             SubjectType = document.Kind,
             Purpose = PromptPurpose,
-            Source = "prompt-builder",
+            Source = "model-aware-prompt-agent",
             ReviewStatus = "active",
             InheritsFromAssetId = previous?.Id,
             CreatedAtUtc = now
@@ -515,21 +566,24 @@ public sealed class VisualReferenceService(
     public Task<BatchVisualReferenceResult> GenerateMissingPromptsAsync(
         Guid projectId,
         string kind,
-        CancellationToken cancellationToken) => RunBatchAsync(
+        CancellationToken cancellationToken,
+        Func<BatchVisualReferenceProgress, Task>? reportProgress = null) => RunBatchAsync(
             projectId,
             kind,
             async subjectResourceId =>
             {
-                if (await HasPromptAsync(projectId, subjectResourceId, cancellationToken)) return false;
+                if (await HasCurrentModelPromptAsync(projectId, subjectResourceId, cancellationToken)) return false;
                 await GeneratePromptAsync(projectId, subjectResourceId, null, false, cancellationToken);
                 return true;
             },
-            cancellationToken);
+            cancellationToken,
+            reportProgress);
 
     public Task<BatchVisualReferenceResult> GenerateMissingImagesAsync(
         Guid projectId,
         string kind,
-        CancellationToken cancellationToken) => RunBatchAsync(
+        CancellationToken cancellationToken,
+        Func<BatchVisualReferenceProgress, Task>? reportProgress = null) => RunBatchAsync(
             projectId,
             kind,
             async subjectResourceId =>
@@ -540,7 +594,8 @@ public sealed class VisualReferenceService(
                 await GenerateImageAsync(projectId, subjectResourceId, cancellationToken);
                 return true;
             },
-            cancellationToken);
+            cancellationToken,
+            reportProgress);
 
     public async Task<VisualReferenceImageView> UploadAsync(
         Guid projectId,
@@ -706,32 +761,45 @@ public sealed class VisualReferenceService(
             select asset)
             .FirstOrDefaultAsync(cancellationToken);
 
-    private async Task<bool> HasPromptAsync(
+    private async Task<bool> HasCurrentModelPromptAsync(
         Guid projectId,
         Guid subjectResourceId,
         CancellationToken cancellationToken)
     {
-        if (await GetCurrentReferenceAssetAsync(
+        var prompt = await GetCurrentReferenceAssetAsync(
             projectId,
             subjectResourceId,
             PromptAssetType,
             PromptPurpose,
-            cancellationToken) is not null)
-            return true;
-        var image = await GetCurrentReferenceAssetAsync(
-            projectId,
-            subjectResourceId,
-            AssetType,
-            Purpose,
             cancellationToken);
-        return image is not null && !string.IsNullOrWhiteSpace(ReadPrompts(image.GenerationMetadataJson).Prompt);
+        if (prompt is null || string.IsNullOrWhiteSpace(prompt.GenerationMetadataJson)) return false;
+        try
+        {
+            using var metadata = JsonDocument.Parse(prompt.GenerationMetadataJson);
+            var root = metadata.RootElement;
+            if (!root.TryGetProperty("source", out var source)
+                || source.GetString() != "model-aware-prompt-agent"
+                || !root.TryGetProperty("targetImageModel", out var targetModel))
+                return false;
+            var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            return string.Equals(
+                targetModel.GetString(),
+                FoundryConfigurationView.TextToImageModel(configuration),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private async Task<BatchVisualReferenceResult> RunBatchAsync(
         Guid projectId,
         string kind,
         Func<Guid, Task<bool>> operation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<BatchVisualReferenceProgress, Task>? reportProgress)
     {
         kind = kind.Trim().ToLowerInvariant();
         if (kind is not ("character" or "scene" or "prop"))
@@ -753,21 +821,31 @@ public sealed class VisualReferenceService(
         var generated = 0;
         var skipped = 0;
         var errors = new List<string>();
-        foreach (var subject in subjects)
+        for (var index = 0; index < subjects.Length; index++)
         {
+            var subject = subjects[index];
+            var outcome = "已生成";
             try
             {
                 if (await operation(subject.Asset.ResourceId)) generated++;
-                else skipped++;
+                else
+                {
+                    skipped++;
+                    outcome = "已跳过";
+                }
             }
             catch (Exception error) when (error is InvalidOperationException or HttpRequestException)
             {
                 errors.Add($"{subject.Document.Name}: {error.Message}");
+                outcome = "失败";
             }
             catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
             {
                 errors.Add($"{subject.Document.Name}: 图片生成请求超时。{error.Message}");
+                outcome = "超时";
             }
+            if (reportProgress is not null)
+                await reportProgress(new(index + 1, subjects.Length, subject.Document.Name, outcome));
         }
         return new(generated, skipped, errors.Count, errors);
     }
@@ -838,32 +916,12 @@ public sealed class VisualReferenceService(
         }
     }
 
-    private static string BuildPrompt(
-        ProjectSettingsDocument settings,
-        VisualAssetDocument document,
-        string? instruction) => $$"""
-        Create one production reference image for the {{document.Kind}} "{{document.Name}}".
-        Project: {{settings.ProjectName}}
-        Visual style: {{settings.VisualStyle}}
-        Art direction: {{settings.ArtDirection}}
-        Character design rules: {{settings.CharacterDesign}}
-        Color strategy: {{settings.ColorPalette}}
-        Project image constraints: {{settings.ImagePromptPrefix}}
-        Narrative definition: {{document.Summary}}
-        Visual definition: {{document.VisualDescription}}
-        Mandatory details: {{string.Join("; ", document.MustKeep)}}
-        Forbidden details: {{string.Join("; ", document.Avoid)}}
-        Output a single square 1024x1024 production design sheet. The outer canvas and all gutters must be pure solid white (#FFFFFF), without texture, gradient, floor, horizon, scenery, or cast shadow outside the requested views.
-        {{document.Kind switch
+    private static string LayoutFor(string kind) => kind switch
         {
             "character" => "Use a precise character turnaround layout: the left 55% is one large front-facing full-body view from head to toe; the upper-right contains two smaller full-body views, one back view and one side profile; the lower-right is one large head-and-shoulders close-up. All four views depict exactly the same character, identity, proportions, costume, colors, and accessories. Keep each view completely visible and separated by clean white space.",
             "scene" => "Use a precise environment design layout: the upper 58% is one large front eye-level view of the complete location; the lower-left is the exact reverse view; the lower-right is a clear top-down overhead plan view. Preserve identical architecture, geography, materials, objects, scale, and lighting logic across all three views. Separate views with clean white gutters and include no foreground character or story action.",
             _ => "Show exactly one prop only, centered as one large front-facing orthographic product view. No back view, side view, close-up, inset, duplicate, hand, holder, character, environment, pedestal, or extra object. Leave generous pure white margin around the complete prop."
-        }}}
-        Keep identity, costume, architecture, materials, scale, and colors explicit and reusable across shots.
-        Do not render titles, labels, captions, arrows, dimension marks, logos, watermarks, UI, panel borders, or readable text.
-        {{(string.IsNullOrWhiteSpace(instruction) ? string.Empty : $"Revision instruction: {instruction}")}}
-        """;
+        };
 }
 
 public static class VisualReferenceEndpoints

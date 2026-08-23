@@ -1,3 +1,5 @@
+import type { GenerationTask } from './generationTasks'
+
 export interface SourceChapter {
   id: string
   number: number
@@ -409,13 +411,13 @@ export async function generateProductionScriptForEpisode(
   projectId: string,
   sourceId: string,
   episodeNumber: number,
-): Promise<AdaptationScript> {
+): Promise<GenerationTask> {
   const response = await fetch(
-    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}/production-script`,
+    `/api/v2/projects/${projectId}/sources/${sourceId}/script-draft/episodes/${episodeNumber}/production-script/tasks`,
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '单集正式剧本生成失败。')
-  return response.json() as Promise<AdaptationScript>
+  return response.json() as Promise<GenerationTask>
 }
 
 export async function getProductionScriptPackage(

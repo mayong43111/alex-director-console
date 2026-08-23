@@ -47,6 +47,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<ISessionAgent>();
             services.RemoveAll<IProjectCoverGenerator>();
             services.RemoveAll<IProjectCoverPromptWriter>();
+            services.RemoveAll<IVisualReferencePromptWriter>();
             services.RemoveAll<IShotFrameGenerator>();
             services.RemoveAll<ILocalVoiceDesigner>();
             services.RemoveAll<IProjectSettingsAssistant>();
@@ -55,6 +56,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IAdaptationScriptWriter>();
             services.RemoveAll<IStoryboardDesigner>();
             services.RemoveAll<IStoryboardShotTextRewriter>();
+            services.RemoveAll<IShotImagePromptAgent>();
             services.RemoveAll<IShotVideoPromptAgent>();
             services.AddDbContext<V2DbContext>(options =>
                 options.UseSqlite($"Data Source={databasePath};Pooling=False"));
@@ -70,6 +72,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestProjectCoverPromptWriter>();
             services.AddSingleton<IProjectCoverPromptWriter>(provider =>
                 provider.GetRequiredService<TestProjectCoverPromptWriter>());
+            services.AddSingleton<TestVisualReferencePromptWriter>();
+            services.AddSingleton<IVisualReferencePromptWriter>(provider =>
+                provider.GetRequiredService<TestVisualReferencePromptWriter>());
             services.AddSingleton<TestShotFrameGenerator>();
             services.AddSingleton<IShotFrameGenerator>(provider =>
                 provider.GetRequiredService<TestShotFrameGenerator>());
@@ -84,6 +89,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IAdaptationScriptWriter, TestAdaptationScriptWriter>();
             services.AddSingleton<IStoryboardDesigner, TestStoryboardDesigner>();
             services.AddSingleton<IStoryboardShotTextRewriter, TestStoryboardShotTextRewriter>();
+            services.AddSingleton<TestShotImagePromptAgent>();
+            services.AddSingleton<IShotImagePromptAgent>(provider =>
+                provider.GetRequiredService<TestShotImagePromptAgent>());
             services.AddSingleton<TestShotVideoPromptAgent>();
             services.AddSingleton<IShotVideoPromptAgent>(provider =>
                 provider.GetRequiredService<TestShotVideoPromptAgent>());
@@ -100,7 +108,9 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         Services.GetRequiredService<TestShotFrameGenerator>().Reset();
         Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
         Services.GetRequiredService<TestProjectCoverPromptWriter>().Reset();
+        Services.GetRequiredService<TestVisualReferencePromptWriter>().Reset();
         Services.GetRequiredService<TestAgentTextInvoker>().Reset();
+        Services.GetRequiredService<TestShotImagePromptAgent>().Reset();
         Services.GetRequiredService<TestShotVideoPromptAgent>().Reset();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
         await skillSynchronizer.SynchronizeAsync();
@@ -114,7 +124,25 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         }
         using var taskDocument = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         var taskId = taskDocument.RootElement.GetProperty("id").GetGuid();
-        await Services.GetRequiredService<GenerationTaskJob>().ExecuteAsync(taskId, CancellationToken.None);
+        await using (var taskScope = Services.CreateAsyncScope())
+        {
+            var taskType = await taskScope.ServiceProvider.GetRequiredService<V2DbContext>().AgentTasks
+                .Where(item => item.Id == taskId)
+                .Select(item => item.TaskType)
+                .SingleAsync();
+            var execution = Services.GetRequiredService<GenerationTaskJob>().ExecuteAsync(taskId, CancellationToken.None);
+            if (taskType is GenerationTaskTypes.StoryboardVideo or GenerationTaskTypes.StoryboardVideoBatch)
+            {
+                while (!execution.IsCompleted)
+                {
+                    await using var workerScope = Services.CreateAsyncScope();
+                    await workerScope.ServiceProvider.GetRequiredService<IShotVideoService>()
+                        .ProcessNextAsync(CancellationToken.None);
+                    await Task.Delay(10);
+                }
+            }
+            await execution;
+        }
 
         await using var scope = Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
@@ -230,6 +258,33 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             calls.Enqueue(request with { ProjectContext = request.ProjectContext.Clone() });
             return Task.FromResult(new ProjectCoverPromptWriterResult(
                 $"Agent-authored cinematic cover prompt v{calls.Count}",
+                "gpt-5.4",
+                "test"));
+        }
+
+        public void Reset()
+        {
+            while (calls.TryDequeue(out _)) { }
+        }
+    }
+
+    public IReadOnlyList<VisualReferencePromptWriterRequest> VisualReferencePromptWriterCalls =>
+        Services.GetRequiredService<TestVisualReferencePromptWriter>().Calls;
+
+    private sealed class TestVisualReferencePromptWriter : IVisualReferencePromptWriter
+    {
+        private readonly ConcurrentQueue<VisualReferencePromptWriterRequest> calls = new();
+
+        public IReadOnlyList<VisualReferencePromptWriterRequest> Calls => calls.ToArray();
+
+        public Task<VisualReferencePromptWriterResult> WriteAsync(
+            VisualReferencePromptWriterRequest request,
+            CancellationToken cancellationToken)
+        {
+            calls.Enqueue(request with { ProjectContext = request.ProjectContext.Clone() });
+            var layout = request.ProjectContext.GetProperty("requiredLayout").GetString();
+            return Task.FromResult(new VisualReferencePromptWriterResult(
+                $"Agent-authored {request.TargetImageModel} {request.SubjectKind} prompt for {request.ModelSize}. {layout} Use pure solid white gutters.",
                 "gpt-5.4",
                 "test"));
         }
@@ -526,6 +581,30 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                 "Test Harness"));
     }
 
+    private sealed class TestShotImagePromptAgent : IShotImagePromptAgent
+    {
+        public ShotImagePromptAgentInput? LastInput { get; private set; }
+        public int CallCount { get; private set; }
+
+        public void Reset()
+        {
+            LastInput = null;
+            CallCount = 0;
+        }
+
+        public Task<ShotImagePromptDraft> GenerateAsync(
+            ShotImagePromptAgentInput input,
+            CancellationToken cancellationToken)
+        {
+            LastInput = input;
+            CallCount++;
+            return Task.FromResult(new ShotImagePromptDraft(
+                $"Model-aware {input.ImageModel} {input.FrameStage} prompt for scene {input.SceneNumber}, shot {input.ShotNumber}. "
+                + $"Hooks: {string.Join("; ", input.NarrativeHooks)}. "
+                + (input.Instruction ?? string.Empty)));
+        }
+    }
+
     private sealed class TestShotVideoPromptAgent : IShotVideoPromptAgent
     {
         public ShotVideoPromptAgentInput? LastInput { get; private set; }
@@ -597,6 +676,12 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
     public ShotVideoPromptAgentInput? LastShotVideoPromptAgentInput =>
         Services.GetRequiredService<TestShotVideoPromptAgent>().LastInput;
 
+    public ShotImagePromptAgentInput? LastShotImagePromptAgentInput =>
+        Services.GetRequiredService<TestShotImagePromptAgent>().LastInput;
+
+    public int ShotImagePromptAgentCallCount =>
+        Services.GetRequiredService<TestShotImagePromptAgent>().CallCount;
+
     public int ShotVideoPromptAgentCallCount =>
         Services.GetRequiredService<TestShotVideoPromptAgent>().CallCount;
 }
@@ -606,14 +691,20 @@ public sealed class TestComfyUiVideoClient : IComfyUiVideoClient
     private readonly byte[] mp4 = CreateMp4();
 
     public ComfyUiVideoSubmission? LastSubmission { get; private set; }
+    public int SubmissionCount { get; private set; }
 
-    public void Reset() => LastSubmission = null;
+    public void Reset()
+    {
+        LastSubmission = null;
+        SubmissionCount = 0;
+    }
 
     public Task<string> SubmitAsync(
         ComfyUiVideoSubmission submission,
         CancellationToken cancellationToken)
     {
         LastSubmission = submission;
+        SubmissionCount++;
         return Task.FromResult($"test-prompt-{Guid.NewGuid():N}");
     }
 

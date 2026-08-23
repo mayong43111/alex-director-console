@@ -74,8 +74,49 @@ switch (command.ToLowerInvariant())
 			Console.WriteLine($"Foreign key violations: {await foreignKeyCommand.ExecuteScalarAsync()}");
 		}
 		break;
+	case "cancel-active":
+		var cancelledAt = DateTimeOffset.UtcNow;
+		var activeTasks = await dbContext.AgentTasks
+			.Where(item => item.Status == "queued" || item.Status == "running")
+			.ToListAsync();
+		foreach (var task in activeTasks)
+		{
+			task.Status = "cancelled";
+			task.CurrentStep = "已由管理员停止";
+			task.CancellationRequestedAtUtc = cancelledAt;
+			task.CompletedAtUtc = cancelledAt;
+			task.UpdatedAtUtc = cancelledAt;
+		}
+		var activeRuns = await dbContext.ProductionRuns
+			.Where(item => item.RunType == "shot-video" && (item.Status == "queued" || item.Status == "running"))
+			.ToListAsync();
+		foreach (var run in activeRuns)
+		{
+			run.Status = "cancelled";
+			run.CurrentStage = "cancelled";
+			run.LastError = "已由管理员停止";
+			run.CompletedAtUtc = cancelledAt;
+			run.UpdatedAtUtc = cancelledAt;
+			run.LeaseOwner = null;
+			run.LeaseExpiresAtUtc = null;
+		}
+		var activeItems = await dbContext.ProductionRunItems
+			.Where(item => activeRuns.Select(run => run.Id).Contains(item.RunId)
+				&& (item.Status == "queued" || item.Status == "running"))
+			.ToListAsync();
+		foreach (var item in activeItems)
+		{
+			item.Status = "cancelled";
+			item.ErrorCode = "Cancelled";
+			item.ErrorDetail = "已由管理员停止";
+			item.CompletedAtUtc = cancelledAt;
+		}
+		await dbContext.SaveChangesAsync();
+		Console.WriteLine($"Cancelled tasks: {activeTasks.Count}");
+		Console.WriteLine($"Cancelled shot-video runs: {activeRuns.Count}");
+		break;
 	default:
-		Console.Error.WriteLine("Usage: dotnet run -- [init|migrate|status] [--connection <connection-string>]");
+		Console.Error.WriteLine("Usage: dotnet run -- [init|migrate|status|cancel-active] [--connection <connection-string>]");
 		return 2;
 }
 

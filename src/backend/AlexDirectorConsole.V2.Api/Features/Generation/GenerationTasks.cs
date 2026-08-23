@@ -2,6 +2,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Features.Sessions;
@@ -33,6 +34,9 @@ public static class GenerationTaskTypes
     public const string StoryboardVideoPromptBatch = "storyboard-video-prompt-batch";
     public const string StoryboardVideoBatch = "storyboard-video-batch";
     public const string VoiceProfile = "voice-profile";
+    public const string ProductionScript = "production-script";
+    public const string StoryMaterialAssets = "story-material-assets";
+    public const string StoryboardDesign = "storyboard-design";
 
     public static bool IsSupported(string taskType) => taskType is
         ProjectCover or ProjectCoverPreview or ProjectSettingsAssist or ProjectDescriptionAssist or
@@ -40,7 +44,7 @@ public static class GenerationTaskTypes
         VisualReferencePromptBatch or VisualReferenceImageBatch or
         StoryboardImagePrompt or StoryboardImagePreview or StoryboardImage or StoryboardVideoPrompt or StoryboardVideo or ShotVideoPreview or
         StoryboardImagePromptBatch or StoryboardImageBatch or
-        StoryboardVideoPromptBatch or StoryboardVideoBatch or VoiceProfile;
+        StoryboardVideoPromptBatch or StoryboardVideoBatch or VoiceProfile or ProductionScript or StoryMaterialAssets or StoryboardDesign;
 }
 
 public sealed record GenerationTaskPayload(
@@ -52,7 +56,10 @@ public sealed record GenerationTaskPayload(
     string? PreviewHash = null,
     bool UseCurrentReference = false,
     string? Kind = null,
-    string? RequestJson = null);
+    string? RequestJson = null,
+    Guid? SourceResourceId = null,
+    int? EpisodeNumber = null,
+    IReadOnlyList<Guid>? ResourceIds = null);
 
 public sealed record GenerationTaskView(
     Guid Id,
@@ -165,22 +172,46 @@ public sealed class GenerationTaskJob(
             return;
         }
         task.Status = "running";
-        task.CurrentStep = "正在生成";
+        task.CurrentStep = task.TaskType switch
+        {
+            GenerationTaskTypes.ProductionScript => "正在生成正式剧本",
+            GenerationTaskTypes.StoryMaterialAssets => "正在分析剧本中的人物、场景与道具",
+            GenerationTaskTypes.StoryboardDesign => "正在调用分镜设计模型",
+            GenerationTaskTypes.VisualReferencePrompt => "正在调用提示词模型",
+            GenerationTaskTypes.VisualReferenceImage => "正在调用图片模型",
+            GenerationTaskTypes.VisualReferencePromptBatch => "正在准备批量生成提示词",
+            GenerationTaskTypes.VisualReferenceImageBatch => "正在准备批量生成图片",
+            _ => "正在生成"
+        };
         task.LeaseOwner = workerId;
         task.LeaseExpiresAtUtc = now.AddMinutes(30);
         task.StartedAtUtc ??= now;
+        task.LastError = null;
+        task.CompletedAtUtc = null;
         task.UpdatedAtUtc = now;
         await dbContext.SaveChangesAsync(cancellationToken);
+        await SessionAgentTaskJob.AppendEventAsync(
+            dbContext,
+            task.Id,
+            "status",
+            "running",
+            task.CurrentStep,
+            null,
+            now,
+            cancellationToken);
         try
         {
             var payload = JsonSerializer.Deserialize<GenerationTaskPayload>(task.ContextSnapshotJson, JsonOptions)
                 ?? throw new InvalidOperationException("生成任务上下文无效。");
-            var result = await ExecuteCoreAsync(scope.ServiceProvider, task.TaskType, payload, cancellationToken);
+            var result = await ExecuteCoreAsync(scope.ServiceProvider, dbContext, task, payload, cancellationToken);
+            await dbContext.Entry(task).ReloadAsync(cancellationToken);
+            if (task.Status == "cancelled") return;
             var completedAt = timeProvider.GetUtcNow();
             task.Status = "completed";
             task.CurrentStep = "已完成";
-            task.ProgressCompleted = 1;
+            task.ProgressCompleted = task.ProgressTotal ?? 1;
             task.CompletedAtUtc = completedAt;
+            task.LastError = null;
             task.UpdatedAtUtc = completedAt;
             task.LeaseOwner = null;
             task.LeaseExpiresAtUtc = null;
@@ -197,6 +228,8 @@ public sealed class GenerationTaskJob(
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
+            await dbContext.Entry(task).ReloadAsync(CancellationToken.None);
+            if (task.Status == "cancelled") return;
             var failedAt = timeProvider.GetUtcNow();
             logger.LogError(error, "Generation task {TaskId} failed.", task.Id);
             task.Status = "failed";
@@ -215,11 +248,12 @@ public sealed class GenerationTaskJob(
 
     private static async Task<object?> ExecuteCoreAsync(
         IServiceProvider services,
-        string taskType,
+        V2DbContext dbContext,
+        AgentTask task,
         GenerationTaskPayload payload,
         CancellationToken cancellationToken)
     {
-        switch (taskType)
+        switch (task.TaskType)
         {
             case GenerationTaskTypes.ProjectCover:
                 return await services.GetRequiredService<IProjectCoverService>().GenerateConfirmedAsync(
@@ -249,10 +283,22 @@ public sealed class GenerationTaskJob(
                     payload.ProjectId, RequiredResourceId(payload), cancellationToken);
             case GenerationTaskTypes.VisualReferencePromptBatch:
                 return await services.GetRequiredService<IVisualReferenceService>().GenerateMissingPromptsAsync(
-                    payload.ProjectId, payload.Kind ?? string.Empty, cancellationToken);
+                    payload.ProjectId,
+                    payload.Kind ?? string.Empty,
+                    cancellationToken,
+                    progress => ReportBatchProgressAsync(dbContext, task, progress, "提示词", cancellationToken));
             case GenerationTaskTypes.VisualReferenceImageBatch:
                 return await services.GetRequiredService<IVisualReferenceService>().GenerateMissingImagesAsync(
-                    payload.ProjectId, payload.Kind ?? string.Empty, cancellationToken);
+                    payload.ProjectId,
+                    payload.Kind ?? string.Empty,
+                    cancellationToken,
+                    progress => ReportBatchProgressAsync(dbContext, task, progress, "图片", cancellationToken));
+            case GenerationTaskTypes.StoryboardDesign:
+                return await services.GetRequiredService<ICommandDispatcher>().SendAsync(
+                    new GenerateStoryboardCommand(
+                        payload.ProjectId,
+                        payload.ProductionEpisodeId ?? throw new InvalidOperationException("缺少生产集标识。")),
+                    cancellationToken);
             case GenerationTaskTypes.StoryboardImagePrompt:
                 return await services.GetRequiredService<IStoryboardMediaPromptService>().GenerateImagePromptAsync(
                     payload.ProjectId, RequiredEpisodeId(payload), RequiredResourceId(payload), payload.Instruction, cancellationToken);
@@ -267,13 +313,22 @@ public sealed class GenerationTaskJob(
                 var videoPrompt = await videoPromptService.GetCurrentAsync(
                     payload.ProjectId, RequiredResourceId(payload), StoryboardMediaPromptService.VideoKind, cancellationToken)
                     ?? throw new InvalidOperationException("请先生成视频提示词。");
-                return await services.GetRequiredService<IShotVideoService>().StartAsync(
+                var startedVideo = await services.GetRequiredService<IShotVideoService>().StartAsync(
                     payload.ProjectId,
                     RequiredEpisodeId(payload),
                     RequiredResourceId(payload),
                     videoPrompt.Prompt,
                     videoPrompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
                     videoPrompt.Instruction,
+                    cancellationToken,
+                    enqueueBackgroundJob: false)
+                    ?? throw new InvalidOperationException("镜头不存在。");
+                return await services.GetRequiredService<IShotVideoService>().WaitForCompletionAsync(
+                    payload.ProjectId,
+                    RequiredEpisodeId(payload),
+                    RequiredResourceId(payload),
+                    startedVideo.RunId,
+                    progress => ReportShotVideoProgressAsync(dbContext, task, progress, cancellationToken),
                     cancellationToken);
             case GenerationTaskTypes.ShotVideoPreview:
                 return await services.GetRequiredService<IShotVideoService>().PreviewAsync(
@@ -293,22 +348,119 @@ public sealed class GenerationTaskJob(
                     cancellationToken);
             case GenerationTaskTypes.StoryboardImagePromptBatch:
                 return await services.GetRequiredService<IStoryboardMediaBatchService>().GenerateMissingImagePromptsAsync(
-                    payload.ProjectId, RequiredEpisodeId(payload), cancellationToken);
+                    payload.ProjectId, RequiredEpisodeId(payload), payload.ResourceIds, cancellationToken,
+                    progress => ReportStoryboardBatchProgressAsync(dbContext, task, progress, cancellationToken));
             case GenerationTaskTypes.StoryboardImageBatch:
                 return await services.GetRequiredService<IStoryboardMediaBatchService>().GenerateMissingImagesAsync(
-                    payload.ProjectId, RequiredEpisodeId(payload), cancellationToken);
+                    payload.ProjectId, RequiredEpisodeId(payload), payload.ResourceIds, cancellationToken,
+                    progress => ReportStoryboardBatchProgressAsync(dbContext, task, progress, cancellationToken));
             case GenerationTaskTypes.StoryboardVideoPromptBatch:
                 return await services.GetRequiredService<IStoryboardMediaBatchService>().GenerateMissingVideoPromptsAsync(
-                    payload.ProjectId, RequiredEpisodeId(payload), cancellationToken);
+                    payload.ProjectId, RequiredEpisodeId(payload), payload.ResourceIds, cancellationToken,
+                    progress => ReportStoryboardBatchProgressAsync(dbContext, task, progress, cancellationToken));
             case GenerationTaskTypes.StoryboardVideoBatch:
                 return await services.GetRequiredService<IStoryboardMediaBatchService>().GenerateMissingVideosAsync(
-                    payload.ProjectId, RequiredEpisodeId(payload), cancellationToken);
+                    payload.ProjectId, RequiredEpisodeId(payload), payload.ResourceIds, cancellationToken,
+                    progress => ReportStoryboardBatchProgressAsync(dbContext, task, progress, cancellationToken));
             case GenerationTaskTypes.VoiceProfile:
                 return await services.GetRequiredService<IVoiceProfileService>().GenerateAsync(
                     payload.ProjectId, RequiredResourceId(payload), cancellationToken);
+            case GenerationTaskTypes.ProductionScript:
+                return await services.GetRequiredService<ICommandDispatcher>().SendAsync(
+                    new ConfirmAdaptationScriptCommand(
+                        payload.ProjectId,
+                        payload.SourceResourceId ?? throw new InvalidOperationException("生成任务缺少原文资料 ID。"),
+                        payload.EpisodeNumber ?? throw new InvalidOperationException("生成任务缺少集号。")),
+                    cancellationToken);
+            case GenerationTaskTypes.StoryMaterialAssets:
+                return await services.GetRequiredService<ICommandDispatcher>().SendAsync(
+                    new ImportStoryMaterialAssetsCommand(payload.ProjectId),
+                    cancellationToken);
             default:
-                throw new InvalidOperationException($"不支持的生成任务类型：{taskType}");
+                throw new InvalidOperationException($"不支持的生成任务类型：{task.TaskType}");
         }
+    }
+
+    private static async Task ReportBatchProgressAsync(
+        V2DbContext dbContext,
+        AgentTask task,
+        BatchVisualReferenceProgress progress,
+        string target,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        task.ProgressCompleted = progress.Completed;
+        task.ProgressTotal = progress.Total;
+        task.CurrentStep = $"{progress.SubjectName}：{target}{progress.Outcome}";
+        task.UpdatedAtUtc = now;
+        await SessionAgentTaskJob.AppendEventAsync(
+            dbContext,
+            task.Id,
+            "progress",
+            "running",
+            $"[{progress.Completed}/{progress.Total}] {task.CurrentStep}",
+            JsonSerializer.Serialize(progress, JsonOptions),
+            now,
+            cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task ReportStoryboardBatchProgressAsync(
+        V2DbContext dbContext,
+        AgentTask task,
+        StoryboardMediaBatchProgress progress,
+        CancellationToken cancellationToken)
+    {
+        await dbContext.Entry(task).ReloadAsync(cancellationToken);
+        if (task.Status == "cancelled") throw new OperationCanceledException("批量任务已停止。", cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        task.ProgressCompleted = progress.ProgressCompleted ?? progress.Completed;
+        task.ProgressTotal = progress.Total;
+        task.CurrentStep = $"{progress.ShotCode}：{progress.Outcome}";
+        task.UpdatedAtUtc = now;
+        await SessionAgentTaskJob.AppendEventAsync(
+            dbContext,
+            task.Id,
+            "progress",
+            "running",
+            progress.Phase == "submitting"
+                ? $"[提交 {progress.Completed}/{progress.Total}] {task.CurrentStep}"
+                : $"[{progress.Completed}/{progress.Total}] {task.CurrentStep}",
+            JsonSerializer.Serialize(progress, JsonOptions),
+            now,
+            cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task ReportShotVideoProgressAsync(
+        V2DbContext dbContext,
+        AgentTask task,
+        ShotVideoProductionView progress,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        task.CurrentStep = progress.CurrentStage switch
+        {
+            "queued" => "已加入 Hangfire 队列",
+            "validating-capabilities" => "正在检查 ComfyUI 节点与模型",
+            "uploading-inputs" => "正在上传首尾帧",
+            "polling" => "ComfyUI 正在生成视频",
+            "downloading" => "正在下载生成视频",
+            "persisting" => "正在保存视频资产",
+            "completed" => "视频已生成",
+            _ => progress.CurrentStage
+        };
+        task.UpdatedAtUtc = now;
+        await SessionAgentTaskJob.AppendEventAsync(
+            dbContext,
+            task.Id,
+            "progress",
+            "running",
+            task.CurrentStep,
+            JsonSerializer.Serialize(new { progress.RunId, progress.Status, progress.CurrentStage }, JsonOptions),
+            now,
+            cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private static Guid RequiredResourceId(GenerationTaskPayload payload) =>
@@ -348,6 +500,8 @@ public sealed class GenerationTaskRecoveryJob(
                     || task.TaskType == GenerationTaskTypes.StoryboardVideoPromptBatch
                     || task.TaskType == GenerationTaskTypes.StoryboardVideoBatch
                     || task.TaskType == GenerationTaskTypes.VoiceProfile
+                    || task.TaskType == GenerationTaskTypes.ProductionScript
+                    || task.TaskType == GenerationTaskTypes.StoryMaterialAssets
                     || task.TaskType == "session-message"
                     || task.TaskType == ShotVideoService.RunType))
             .Select(task => new { task.Id, task.TaskType, task.ContextSnapshotJson, task.Status, task.LeaseExpiresAtUtc })
@@ -380,6 +534,8 @@ public sealed class GenerationTaskRecoveryJob(
 
 public static class GenerationTaskEndpoints
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public static IEndpointRouteBuilder MapGenerationTasks(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/v2/tasks");
@@ -395,6 +551,127 @@ public static class GenerationTaskEndpoints
                 .FirstOrDefaultAsync(cancellationToken);
             return Results.Ok(GenerationTaskScheduler.ToView(task, resultJson));
         });
+        group.MapPost("/{taskId:guid}/cancel", async (
+            Guid taskId,
+            V2DbContext dbContext,
+            IHttpClientFactory httpClientFactory,
+            TimeProvider timeProvider,
+            CancellationToken cancellationToken) =>
+        {
+            var task = await dbContext.AgentTasks.SingleOrDefaultAsync(item => item.Id == taskId, cancellationToken);
+            if (task is null) return Results.NotFound();
+            if (task.Status is "completed" or "failed" or "cancelled")
+                return Results.Ok(GenerationTaskScheduler.ToView(task));
+
+            var cancelledAt = timeProvider.GetUtcNow();
+            CancelTask(task, cancelledAt);
+            var relatedTasks = await dbContext.AgentTasks
+                .Where(item => item.ProjectId == task.ProjectId
+                    && item.ProductionEpisodeId == task.ProductionEpisodeId
+                    && item.TaskType == "shot-video"
+                    && (item.Status == "queued" || item.Status == "running"))
+                .ToListAsync(cancellationToken);
+            foreach (var relatedTask in relatedTasks) CancelTask(relatedTask, cancelledAt);
+
+            var activeRuns = await dbContext.ProductionRuns
+                .Where(item => item.ProjectId == task.ProjectId
+                    && item.ProductionEpisodeId == task.ProductionEpisodeId
+                    && item.RunType == ShotVideoService.RunType
+                    && (item.Status == "queued" || item.Status == "running"))
+                .ToListAsync(cancellationToken);
+            foreach (var run in activeRuns)
+            {
+                run.Status = "cancelled";
+                run.CurrentStage = "cancelled";
+                run.LastError = "用户已停止生成";
+                run.CompletedAtUtc = cancelledAt;
+                run.UpdatedAtUtc = cancelledAt;
+                run.LeaseOwner = null;
+                run.LeaseExpiresAtUtc = null;
+            }
+            await SessionAgentTaskJob.AppendEventAsync(
+                dbContext, task.Id, "status", "cancelled", "用户已停止生成任务。", null, cancelledAt, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            if (configuration is not null && configuration.IsEnabled)
+            {
+                var client = httpClientFactory.CreateClient("ComfyUiVideo");
+                try
+                {
+                    await client.PostAsync($"{configuration.BaseUrl.TrimEnd('/')}/interrupt", null, cancellationToken);
+                    await client.PostAsJsonAsync(
+                        $"{configuration.BaseUrl.TrimEnd('/')}/queue",
+                        new { clear = true },
+                        cancellationToken);
+                }
+                catch (HttpRequestException)
+                {
+                }
+            }
+            return Results.Ok(GenerationTaskScheduler.ToView(task));
+        });
+        group.MapGet("/{taskId:guid}/events", async (
+            Guid taskId,
+            long? after,
+            HttpContext context,
+            V2DbContext dbContext,
+            CancellationToken cancellationToken) =>
+        {
+            if (!await dbContext.AgentTasks.AsNoTracking()
+                .AnyAsync(item => item.Id == taskId, cancellationToken))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
+            context.Response.Headers.CacheControl = "no-cache";
+            context.Response.Headers.Connection = "keep-alive";
+            context.Response.ContentType = "text/event-stream";
+            var sequence = after ?? 0;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var events = await dbContext.AgentTaskEvents.AsNoTracking()
+                    .Where(item => item.TaskId == taskId && item.Sequence > sequence)
+                    .OrderBy(item => item.Sequence)
+                    .ToArrayAsync(cancellationToken);
+                foreach (var item in events)
+                {
+                    var payload = JsonSerializer.Serialize(new SessionAgentTaskEventView(
+                        item.Sequence,
+                        item.EventType,
+                        item.Stage,
+                        item.Message,
+                        item.DataJson,
+                        item.CreatedAtUtc), JsonOptions);
+                    await context.Response.WriteAsync(
+                        $"id: {item.Sequence}\nevent: {item.EventType}\ndata: {payload}\n\n",
+                        cancellationToken);
+                    await context.Response.Body.FlushAsync(cancellationToken);
+                    sequence = item.Sequence;
+                }
+
+                var status = await dbContext.AgentTasks.AsNoTracking()
+                    .Where(item => item.Id == taskId)
+                    .Select(item => item.Status)
+                    .SingleAsync(cancellationToken);
+                if (status is "completed" or "failed" or "cancelled") break;
+                await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+            }
+        });
         return app;
+    }
+
+    private static void CancelTask(AgentTask task, DateTimeOffset cancelledAt)
+    {
+        task.Status = "cancelled";
+        task.CurrentStep = "已停止";
+        task.LastError = "用户已停止生成";
+        task.CancellationRequestedAtUtc = cancelledAt;
+        task.CompletedAtUtc = cancelledAt;
+        task.UpdatedAtUtc = cancelledAt;
+        task.LeaseOwner = null;
+        task.LeaseExpiresAtUtc = null;
     }
 }

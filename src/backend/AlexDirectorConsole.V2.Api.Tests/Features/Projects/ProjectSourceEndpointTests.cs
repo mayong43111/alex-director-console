@@ -286,6 +286,56 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Analysis_status_preserves_unchanged_chapters_and_invalidates_edited_chapters()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var createResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources",
+            new
+            {
+                title = "三个火枪手原著",
+                content = "# 第一章\n达达尼昂离开故乡。\n\n# 第二章\n达达尼昂抵达巴黎。"
+            });
+        createResponse.EnsureSuccessStatusCode();
+        var source = Assert.IsType<ProjectSourceView>(
+            await createResponse.Content.ReadFromJsonAsync<ProjectSourceView>());
+
+        var firstAnalysis = await AnalyzeChapterAsync(client, projectId, source, source.Chapters[0].Id);
+        Assert.Equal([source.Chapters[0].Id], firstAnalysis.AnalyzedChapterIds);
+
+        var appendResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/chapters",
+            new { content = "# 第三章\n达达尼昂得到接见。" });
+        appendResponse.EnsureSuccessStatusCode();
+        var appended = Assert.IsType<ProjectSourceView>(
+            await appendResponse.Content.ReadFromJsonAsync<ProjectSourceView>());
+        var afterAppend = await client.GetFromJsonAsync<StoryMaterialAnalysisView>(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis");
+        Assert.NotNull(afterAppend);
+        Assert.Equal([source.Chapters[0].Id], afterAppend.AnalyzedChapterIds);
+
+        var pendingAnalysisResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis",
+            null);
+        pendingAnalysisResponse.EnsureSuccessStatusCode();
+        var afterPendingAnalysis = Assert.IsType<StoryMaterialAnalysisView>(
+            await pendingAnalysisResponse.Content.ReadFromJsonAsync<StoryMaterialAnalysisView>());
+        Assert.Equal(appended.Chapters.Select(item => item.Id), afterPendingAnalysis.AnalyzedChapterIds);
+
+        var editedChapter = appended.Chapters[0];
+        var updateResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/chapters/{editedChapter.Id}",
+            new { title = editedChapter.Title, content = $"{editedChapter.Content}\n补充内容。" });
+        updateResponse.EnsureSuccessStatusCode();
+        var afterEdit = await client.GetFromJsonAsync<StoryMaterialAnalysisView>(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis");
+        Assert.NotNull(afterEdit);
+        Assert.DoesNotContain(editedChapter.Id, afterEdit.AnalyzedChapterIds);
+        Assert.Equal(appended.Chapters.Skip(1).Select(item => item.Id), afterEdit.AnalyzedChapterIds);
+    }
+
+    [Fact]
     public async Task Script_draft_creates_episodes_only_after_confirmation_and_ignores_later_source_updates()
     {
         using var client = factory.CreateClient();
@@ -579,11 +629,15 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
         var draft = Assert.IsType<AdaptationScriptView>(
             await generateResponse.Content.ReadFromJsonAsync<AdaptationScriptView>());
         var formalResponse = await client.PostAsync(
-            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/2/production-script",
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/2/production-script/tasks",
             null);
-        formalResponse.EnsureSuccessStatusCode();
-        var withFormalScript = Assert.IsType<AdaptationScriptView>(
-            await formalResponse.Content.ReadFromJsonAsync<AdaptationScriptView>());
+        var taskJson = await formalResponse.Content.ReadAsStringAsync();
+        var taskId = JsonDocument.Parse(taskJson).RootElement.GetProperty("id").GetGuid();
+        var withFormalScript = await factory.CompleteGenerationTaskAsync<AdaptationScriptView>(formalResponse);
+        var taskEvents = await client.GetStringAsync($"/api/v2/tasks/{taskId}/events?after=0");
+        Assert.Contains("\"stage\":\"queued\"", taskEvents, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"running\"", taskEvents, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"completed\"", taskEvents, StringComparison.Ordinal);
         var productionEpisodeMap = Assert.IsAssignableFrom<IReadOnlyDictionary<int, Guid>>(
             withFormalScript.ProductionEpisodeMap);
         Assert.Equal(2, Assert.Single(productionEpisodeMap).Key);

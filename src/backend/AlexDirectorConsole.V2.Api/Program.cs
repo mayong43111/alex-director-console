@@ -107,6 +107,7 @@ builder.Services.AddSingleton<IComfyUiDialogueClient, ComfyUiDialogueClient>();
 builder.Services.AddSingleton<IComfyUiWorkflowProvider, PackagedComfyUiWorkflowProvider>();
 builder.Services.AddSingleton<IComfyUiImageClient, ComfyUiImageClient>();
 builder.Services.AddSingleton<IComfyUiImageWorkflowProvider, PackagedComfyUiImageWorkflowProvider>();
+builder.Services.AddScoped<IShotImagePromptAgent, MafShotImagePromptAgent>();
 builder.Services.AddScoped<IShotVideoPromptAgent, MafShotVideoPromptAgent>();
 builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddScoped<IStoryboardMediaPromptService, StoryboardMediaPromptService>();
@@ -129,6 +130,7 @@ builder.Services.AddHttpClient<IShotFrameGenerator, AzureFoundryShotFrameGenerat
     client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddScoped<IProjectCoverService, ProjectCoverService>();
 builder.Services.AddScoped<IProjectCoverPromptWriter, MafProjectCoverPromptWriter>();
+builder.Services.AddScoped<IVisualReferencePromptWriter, MafVisualReferencePromptWriter>();
 builder.Services.AddScoped<IVisualReferenceService, VisualReferenceService>();
 builder.Services.AddScoped<IVoiceProfileService, VoiceProfileService>();
 builder.Services.AddScoped<IShotFrameService, ShotFrameService>();

@@ -53,6 +53,15 @@ export interface VisualAsset {
   referencePrompt: VisualReferencePrompt | null
 }
 
+export interface ScriptMaterialAnalysisStatus {
+  sourceAssetId: string
+  episodeNumber: number
+  title: string
+  scriptType: string
+  version: number
+  isAnalyzed: boolean
+}
+
 export interface SaveVisualAssetInput {
   kind: VisualAssetKind
   name: string
@@ -164,12 +173,21 @@ export async function updateVisualAsset(
   return response.json() as Promise<VisualAsset>
 }
 
-export async function importStoryMaterialAssets(projectId: string): Promise<VisualAsset[]> {
-  const response = await fetch(`/api/v2/projects/${projectId}/visual-assets/import-story-materials`, {
+export async function importScriptMaterialAssets(projectId: string): Promise<GenerationTask> {
+  const response = await fetch(`/api/v2/projects/${projectId}/visual-assets/import-script-materials/tasks`, {
     method: 'POST',
   })
-  if (!response.ok) throw await readError(response, '从素材图谱建立资产失败。')
-  return response.json() as Promise<VisualAsset[]>
+  if (!response.ok) throw await readError(response, '从剧本建立资产失败。')
+  return response.json() as Promise<GenerationTask>
+}
+
+export async function listScriptMaterialAnalysisStatuses(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ScriptMaterialAnalysisStatus[]> {
+  const response = await fetch(`/api/v2/projects/${projectId}/visual-assets/script-material-analysis-status`, { signal })
+  if (!response.ok) throw await readError(response, '剧本素材分析状态加载失败。')
+  return response.json() as Promise<ScriptMaterialAnalysisStatus[]>
 }
 
 export async function generateVisualReferencePrompt(
@@ -177,7 +195,7 @@ export async function generateVisualReferencePrompt(
   resourceId: string,
   instruction?: string,
   useCurrentReference = false,
-): Promise<VisualReferencePrompt> {
+): Promise<GenerationTask> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/prompt/generate`,
     {
@@ -190,32 +208,32 @@ export async function generateVisualReferencePrompt(
     },
   )
   if (!response.ok) throw await readError(response, '提示词生成失败。')
-  return waitForGenerationResult<VisualReferencePrompt>(await response.json() as GenerationTask)
+  return response.json() as Promise<GenerationTask>
 }
 
 export async function generateVisualReferenceImage(
   projectId: string,
   resourceId: string,
-): Promise<VisualReferenceImage> {
+): Promise<GenerationTask> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/visual-assets/${resourceId}/reference/generate`,
     { method: 'POST' },
   )
   if (!response.ok) throw await readError(response, '参考图生成失败。')
-  return waitForGenerationResult<VisualReferenceImage>(await response.json() as GenerationTask)
+  return response.json() as Promise<GenerationTask>
 }
 
 export async function generateMissingVisualReferencePrompts(
   projectId: string,
   kind: VisualAssetKind,
-): Promise<BatchVisualReferenceResult> {
+): Promise<GenerationTask> {
   return generateMissingVisualReferences(projectId, kind, 'prompts')
 }
 
 export async function generateMissingVisualReferenceImages(
   projectId: string,
   kind: VisualAssetKind,
-): Promise<BatchVisualReferenceResult> {
+): Promise<GenerationTask> {
   return generateMissingVisualReferences(projectId, kind, 'images')
 }
 
@@ -223,7 +241,7 @@ async function generateMissingVisualReferences(
   projectId: string,
   kind: VisualAssetKind,
   target: 'prompts' | 'images',
-): Promise<BatchVisualReferenceResult> {
+): Promise<GenerationTask> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/visual-assets/reference/${target}/generate-missing`,
     {
@@ -233,7 +251,7 @@ async function generateMissingVisualReferences(
     },
   )
   if (!response.ok) throw await readError(response, `批量生成${target === 'prompts' ? '提示词' : '图片'}失败。`)
-  return waitForGenerationResult<BatchVisualReferenceResult>(await response.json() as GenerationTask)
+  return response.json() as Promise<GenerationTask>
 }
 
 export async function uploadVisualReference(

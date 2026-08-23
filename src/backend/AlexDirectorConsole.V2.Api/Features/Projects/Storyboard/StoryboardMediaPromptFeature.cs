@@ -21,11 +21,21 @@ public sealed record StoryboardMediaPromptView(
 
 public sealed record GenerateStoryboardMediaPromptRequest(string? Instruction);
 
+public sealed record GenerateStoryboardMediaBatchRequest(IReadOnlyList<Guid>? ShotResourceIds);
+
 public sealed record BatchStoryboardMediaResult(
     int Generated,
     int Skipped,
     int Failed,
     IReadOnlyList<string> Errors);
+
+public sealed record StoryboardMediaBatchProgress(
+    int Completed,
+    int Total,
+    string ShotCode,
+    string Outcome,
+    string Phase = "processing",
+    int? ProgressCompleted = null);
 
 internal sealed record StoryboardMediaPromptDocument(
     string Kind,
@@ -35,7 +45,9 @@ internal sealed record StoryboardMediaPromptDocument(
     Guid ShotAssetId,
     Guid SettingsAssetId,
     Guid? FirstFrameAssetId,
-    Guid? LastFrameAssetId);
+    Guid? LastFrameAssetId,
+    IReadOnlyList<Guid>? ReferenceImageAssetIds,
+    IReadOnlyList<Guid>? PropAssetIds);
 
 public interface IStoryboardMediaPromptService
 {
@@ -65,22 +77,30 @@ public interface IStoryboardMediaBatchService
     Task<BatchStoryboardMediaResult> GenerateMissingImagePromptsAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken);
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null);
 
     Task<BatchStoryboardMediaResult> GenerateMissingImagesAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken);
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null);
 
     Task<BatchStoryboardMediaResult> GenerateMissingVideoPromptsAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken);
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null);
 
     Task<BatchStoryboardMediaResult> GenerateMissingVideosAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken);
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null);
 }
 
 internal static class StoryboardMediaPromptQueries
@@ -232,7 +252,9 @@ public sealed class StoryboardMediaPromptService(
             inputs.ShotAsset.Id,
             inputs.SettingsAssetId,
             firstFrameAssetId,
-            lastFrameAssetId);
+            lastFrameAssetId,
+            inputs.ReferenceImageAssetIds,
+            inputs.PropAssetIds);
         var documentJson = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
         var now = timeProvider.GetUtcNow();
         var asset = new Asset
@@ -329,7 +351,14 @@ public sealed class StoryboardMediaPromptService(
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
             item => item.Id == definition.ShotAssetId,
             cancellationToken);
-        return new(projectId, productionEpisodeId, shotAsset, settingsAssetId);
+        var preflight = await ShotProductionPreflight.EvaluateAsync(dbContext, definition, cancellationToken);
+        return new(
+            projectId,
+            productionEpisodeId,
+            shotAsset,
+            settingsAssetId,
+            preflight.Inputs.ReferenceImageAssetIds,
+            preflight.Inputs.PropAssetIds);
     }
 
     private static string? NormalizeInstruction(string? instruction)
@@ -368,7 +397,9 @@ public sealed class StoryboardMediaPromptService(
         Guid ProjectId,
         Guid ProductionEpisodeId,
         Asset ShotAsset,
-        Guid SettingsAssetId);
+        Guid SettingsAssetId,
+        IReadOnlyList<Guid> ReferenceImageAssetIds,
+        IReadOnlyList<Guid> PropAssetIds);
 }
 
 public sealed class StoryboardMediaBatchService(
@@ -380,27 +411,33 @@ public sealed class StoryboardMediaBatchService(
     public Task<BatchStoryboardMediaResult> GenerateMissingImagePromptsAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken) => RunAsync(
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null) => RunAsync(
         projectId,
         productionEpisodeId,
         async (shot, token) =>
         {
-            if (await promptService.GetCurrentAsync(projectId, shot.ShotResourceId, StoryboardMediaPromptService.ImageKind, token) is not null)
+            if (shotResourceIds is null && await promptService.GetCurrentAsync(projectId, shot.ShotResourceId, StoryboardMediaPromptService.ImageKind, token) is not null)
                 return false;
             await promptService.GenerateImagePromptAsync(projectId, productionEpisodeId, shot.ShotResourceId, null, token);
             return true;
         },
-        cancellationToken);
+        shotResourceIds,
+        cancellationToken,
+        reportProgress);
 
     public Task<BatchStoryboardMediaResult> GenerateMissingImagesAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken) => RunAsync(
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null) => RunAsync(
         projectId,
         productionEpisodeId,
         async (shot, token) =>
         {
-            if (await HasRequiredFramesAsync(projectId, shot, token)) return false;
+            if (shotResourceIds is null && await HasRequiredFramesAsync(projectId, shot, token)) return false;
             var prompt = await promptService.GetCurrentAsync(
                 projectId,
                 shot.ShotResourceId,
@@ -417,64 +454,150 @@ public sealed class StoryboardMediaBatchService(
                 token);
             return true;
         },
-        cancellationToken);
+        shotResourceIds,
+        cancellationToken,
+        reportProgress);
 
     public Task<BatchStoryboardMediaResult> GenerateMissingVideoPromptsAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken) => RunAsync(
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null) => RunAsync(
         projectId,
         productionEpisodeId,
         async (shot, token) =>
         {
-            if (await promptService.GetCurrentAsync(projectId, shot.ShotResourceId, StoryboardMediaPromptService.VideoKind, token) is not null)
+            if (shotResourceIds is null && await promptService.GetCurrentAsync(projectId, shot.ShotResourceId, StoryboardMediaPromptService.VideoKind, token) is not null)
                 return false;
             await promptService.GenerateVideoPromptAsync(projectId, productionEpisodeId, shot.ShotResourceId, null, token);
             return true;
         },
-        cancellationToken);
+        shotResourceIds,
+        cancellationToken,
+        reportProgress);
 
-    public Task<BatchStoryboardMediaResult> GenerateMissingVideosAsync(
+    public async Task<BatchStoryboardMediaResult> GenerateMissingVideosAsync(
         Guid projectId,
         Guid productionEpisodeId,
-        CancellationToken cancellationToken) => RunAsync(
-        projectId,
-        productionEpisodeId,
-        async (shot, token) =>
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress = null)
+    {
+        var query = dbContext.ShotDefinitions.AsNoTracking()
+            .Where(item => item.ProjectId == projectId && item.ProductionEpisodeId == productionEpisodeId);
+        if (shotResourceIds is not null)
+            query = query.Where(item => shotResourceIds.Contains(item.ShotResourceId));
+        var shots = await query
+            .OrderBy(item => item.SceneNumber)
+            .ThenBy(item => item.ShotNumber)
+            .ToListAsync(cancellationToken);
+        var generated = 0;
+        var skipped = 0;
+        var failed = 0;
+        var resolved = 0;
+        var errors = new List<string>();
+        var pending = new List<(ShotDefinition Shot, Guid RunId)>();
+
+        for (var index = 0; index < shots.Count; index++)
         {
+            var shot = shots[index];
+            var shotCode = $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2}";
             var existing = await ShotVideoQueries.GetAsync(
                 dbContext,
                 projectId,
                 productionEpisodeId,
                 shot.ShotResourceId,
-                token);
-            if (existing?.Status is "queued" or "running" or "completed") return false;
-            var prompt = await promptService.GetCurrentAsync(
-                projectId,
-                shot.ShotResourceId,
-                StoryboardMediaPromptService.VideoKind,
-                token)
-                ?? throw new InvalidOperationException("请先生成视频提示词。");
-            await videoService.StartAsync(
-                projectId,
-                productionEpisodeId,
-                shot.ShotResourceId,
-                prompt.Prompt,
-                prompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
-                prompt.Instruction,
-                token);
-            return true;
-        },
-        cancellationToken);
+                cancellationToken);
+            if (shotResourceIds is null && existing?.Status is "queued" or "running" or "completed")
+            {
+                skipped++;
+                resolved++;
+                if (reportProgress is not null)
+                    await reportProgress(new(index + 1, shots.Count, shotCode, "已跳过", "submitting", resolved));
+                continue;
+            }
+
+            try
+            {
+                var prompt = await promptService.GetCurrentAsync(
+                    projectId,
+                    shot.ShotResourceId,
+                    StoryboardMediaPromptService.VideoKind,
+                    cancellationToken)
+                    ?? throw new InvalidOperationException("请先生成视频提示词。");
+                var started = await videoService.StartAsync(
+                    projectId,
+                    productionEpisodeId,
+                    shot.ShotResourceId,
+                    prompt.Prompt,
+                    prompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
+                    prompt.Instruction,
+                    cancellationToken,
+                    enqueueBackgroundJob: false)
+                    ?? throw new InvalidOperationException("镜头不存在。");
+                await videoService.ProcessAsync(started.RunId, cancellationToken);
+                var submitted = await ShotVideoQueries.GetAsync(
+                    dbContext, projectId, productionEpisodeId, shot.ShotResourceId, cancellationToken);
+                if (submitted?.Status == "failed")
+                    throw new InvalidOperationException(submitted.Error ?? "ComfyUI 提交失败。");
+                pending.Add((shot, started.RunId));
+                if (reportProgress is not null)
+                    await reportProgress(new(index + 1, shots.Count, shotCode, "已提交 ComfyUI", "submitting", resolved));
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                failed++;
+                resolved++;
+                errors.Add($"{shotCode}: {error.Message}");
+                if (reportProgress is not null)
+                    await reportProgress(new(index + 1, shots.Count, shotCode, "提交失败", "submitting", resolved));
+            }
+        }
+
+        while (pending.Count > 0)
+        {
+            foreach (var entry in pending.ToArray())
+            {
+                await videoService.ProcessAsync(entry.RunId, cancellationToken);
+                var current = await ShotVideoQueries.GetAsync(
+                    dbContext, projectId, productionEpisodeId, entry.Shot.ShotResourceId, cancellationToken);
+                if (current?.Status is not ("completed" or "failed" or "cancelled")) continue;
+
+                pending.Remove(entry);
+                resolved++;
+                var shotCode = $"S{entry.Shot.SceneNumber:D2}-{entry.Shot.ShotNumber:D2}";
+                var outcome = current.Status == "completed" ? "已生成" : current.Status == "cancelled" ? "已取消" : "失败";
+                if (current.Status == "completed") generated++;
+                else if (current.Status == "failed")
+                {
+                    failed++;
+                    errors.Add($"{shotCode}: {current.Error ?? "视频生成失败。"}");
+                }
+                if (reportProgress is not null)
+                    await reportProgress(new(resolved, shots.Count, shotCode, outcome, "checking", resolved));
+            }
+            if (pending.Count > 0)
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+
+        return new(generated, skipped, failed, errors);
+    }
 
     private async Task<BatchStoryboardMediaResult> RunAsync(
         Guid projectId,
         Guid productionEpisodeId,
         Func<ShotDefinition, CancellationToken, Task<bool>> operation,
-        CancellationToken cancellationToken)
+        IReadOnlyList<Guid>? shotResourceIds,
+        CancellationToken cancellationToken,
+        Func<StoryboardMediaBatchProgress, Task>? reportProgress)
     {
-        var shots = await dbContext.ShotDefinitions.AsNoTracking()
+        var query = dbContext.ShotDefinitions.AsNoTracking()
             .Where(item => item.ProjectId == projectId && item.ProductionEpisodeId == productionEpisodeId)
+            .AsQueryable();
+        if (shotResourceIds is not null)
+            query = query.Where(item => shotResourceIds.Contains(item.ShotResourceId));
+        var shots = await query
             .OrderBy(item => item.SceneNumber)
             .ThenBy(item => item.ShotNumber)
             .ToListAsync(cancellationToken);
@@ -482,17 +605,35 @@ public sealed class StoryboardMediaBatchService(
         var skipped = 0;
         var failed = 0;
         var errors = new List<string>();
-        foreach (var shot in shots)
+        for (var index = 0; index < shots.Count; index++)
         {
+            var shot = shots[index];
+            var outcome = "已跳过";
             try
             {
-                if (await operation(shot, cancellationToken)) generated++;
-                else skipped++;
+                if (await operation(shot, cancellationToken))
+                {
+                    generated++;
+                    outcome = "已生成";
+                }
+                else
+                {
+                    skipped++;
+                }
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
                 failed++;
+                outcome = "失败";
                 errors.Add($"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2}: {error.Message}");
+            }
+            if (reportProgress is not null)
+            {
+                await reportProgress(new(
+                    index + 1,
+                    shots.Count,
+                    $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2}",
+                    outcome));
             }
         }
         return new(generated, skipped, failed, errors);
@@ -595,11 +736,11 @@ public static class StoryboardMediaEndpoints
         string taskType,
         string intent) => app.MapPost(
         route,
-        async (Guid projectId, Guid productionEpisodeId, IGenerationTaskScheduler scheduler, CancellationToken cancellationToken) =>
+        async (Guid projectId, Guid productionEpisodeId, GenerateStoryboardMediaBatchRequest? request, IGenerationTaskScheduler scheduler, CancellationToken cancellationToken) =>
             Results.Accepted(value: await scheduler.EnqueueAsync(
                 taskType,
                 intent,
-                new(projectId, productionEpisodeId),
+            new(projectId, productionEpisodeId, ResourceIds: request?.ShotResourceIds is { Count: > 0 } ? request.ShotResourceIds : null),
                 cancellationToken)));
 
     private static async Task<IResult> ExecuteAsync(Func<Task<IResult>> operation)

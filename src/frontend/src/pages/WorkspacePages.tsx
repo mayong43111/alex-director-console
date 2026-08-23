@@ -7,7 +7,7 @@ import {
   useParams,
 } from "react-router-dom";
 import { ProTable, type ProColumns } from "@ant-design/pro-components";
-import { Image, InputNumber, Popconfirm, Select, Switch, Tabs, Tooltip } from "antd";
+import { Checkbox, Image, InputNumber, Popconfirm, Select, Switch, Tabs, Tooltip } from "antd";
 import {
   Check,
   ChevronDown,
@@ -50,16 +50,19 @@ import {
   generateVisualReferenceImage,
   generateVisualReferencePrompt,
   getVoiceProfile,
-  importStoryMaterialAssets,
+  importScriptMaterialAssets,
   listAudioMaterials,
+  listScriptMaterialAnalysisStatuses,
   listVisualAssets,
   saveVoiceProfile,
   uploadAudioMaterial,
   uploadVisualReference,
   updateVisualAsset,
   type AudioMaterial,
+  type BatchVisualReferenceResult,
   type SaveVoiceProfileInput,
   type SaveVisualAssetInput,
+  type ScriptMaterialAnalysisStatus,
   type VisualAsset,
   type VisualAssetKind,
   type VoiceProfile,
@@ -81,6 +84,8 @@ import {
   getShotVideo,
   getStoryboard,
   type BatchStoryboardMediaResult,
+  type ShotProduction,
+  type StoryboardMediaPrompt,
   type Storyboard,
   type StoryboardShotTextField,
   type ShotVideoProduction,
@@ -90,6 +95,13 @@ import {
   updateStoryboardShotText,
 } from "../api/storyboards";
 import type { ImageGenerationPreview } from "../api/generation";
+import {
+  cancelGenerationTask,
+  getGenerationTask,
+  subscribeGenerationTask,
+  type GenerationTask,
+  type GenerationTaskEvent,
+} from "../api/generationTasks";
 import { builtInAgentIds, builtInAgentLabels } from "../api/agents";
 import {
   getProductionRun,
@@ -963,12 +975,74 @@ export function SourcePage() {
   const [chapterSaving, setChapterSaving] = useState(false);
   const fileModeRef = useRef<"create" | "append">("create");
   const [analysis, setAnalysis] = useState<StoryMaterialAnalysis | null>(null);
+  const [sourceAnalyses, setSourceAnalyses] = useState<Record<string, StoryMaterialAnalysis | null>>({});
   const [analysisSourceId, setAnalysisSourceId] = useState<string>();
   const [analysisErrorSourceId, setAnalysisErrorSourceId] = useState<string>();
   const [script, setScript] = useState<AdaptationScript | null>(null);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings | null>(null);
   const [working, setWorking] = useState<"analysis" | "script" | "append" | "update" | "regenerate" | "delete" | "clear" | "confirm" | null>(null);
+  const [productionTask, setProductionTask] = useState<GenerationTask | null>(null);
+  const [productionTaskEvents, setProductionTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [productionScriptResult, setProductionScriptResult] = useState<AdaptationScript | null>(null);
+  const [productionEpisodeNumber, setProductionEpisodeNumber] = useState<number | null>(null);
+  const [productionStreamRevision, setProductionStreamRevision] = useState(0);
   const analysisControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!productionTask || ['completed', 'failed', 'cancelled'].includes(productionTask.status)) return;
+    const taskId = productionTask.id;
+
+    const completeFromTask = async (eventResultJson?: string | null) => {
+      const current = await getGenerationTask(taskId);
+      setProductionTask(current);
+      if (current.status === 'completed') {
+        const resultJson = eventResultJson ?? current.resultJson;
+        if (!resultJson) throw new Error('正式剧本任务没有返回结果。');
+        const updated = JSON.parse(resultJson) as AdaptationScript;
+        setScript(updated);
+        setProductionScriptResult(updated);
+        window.dispatchEvent(new Event("alex:production-episodes-updated"));
+        setWorking(null);
+      } else if (current.status === 'failed' || current.status === 'cancelled') {
+        setError(current.lastError ?? (current.status === 'cancelled' ? '正式剧本生成已取消。' : '正式剧本生成失败。'));
+        setWorking(null);
+      }
+    };
+
+    const source = subscribeGenerationTask(
+      taskId,
+      productionTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setProductionTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'running') {
+          setProductionTask((current) => current ? { ...current, status: 'running', currentStep: event.message } : current);
+        } else if (event.stage === 'completed') {
+          void completeFromTask(event.dataJson).catch((taskError: unknown) => {
+            setError(taskError instanceof Error ? taskError.message : '正式剧本结果加载失败。');
+            setWorking(null);
+          });
+        } else if (event.stage === 'failed' || event.stage === 'cancelled') {
+          void completeFromTask();
+        }
+      },
+      () => {
+        void completeFromTask().then(() => {
+          setProductionTask((current) => current && !['completed', 'failed', 'cancelled'].includes(current.status)
+            ? { ...current }
+            : current);
+          if (!['completed', 'failed', 'cancelled'].includes(productionTask.status)) {
+            setProductionStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '正式剧本任务状态加载失败。');
+          setWorking(null);
+        });
+      },
+    );
+    return () => source.close();
+  }, [productionTask?.id, productionTask?.status, productionStreamRevision]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1001,6 +1075,22 @@ export function SourcePage() {
     return () => controller.abort();
   }, [location.pathname, navigate, projectId, requestedSourceId, workspaceView]);
 
+  useEffect(() => {
+    if (sources.length === 0) return;
+    const controller = new AbortController();
+    void Promise.all(sources.map(async (source) => [
+      source.id,
+      await getStoryMaterialAnalysis(projectId, source.id, controller.signal),
+    ] as const)).then((entries) => {
+      if (!controller.signal.aborted) setSourceAnalyses(Object.fromEntries(entries));
+    }).catch((loadError: unknown) => {
+      if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+        setError(loadError instanceof Error ? loadError.message : "分析状态加载失败。");
+      }
+    });
+    return () => controller.abort();
+  }, [projectId, sources]);
+
   const activeSource = sources.find((item) => item.id === requestedSourceId) ?? sources[0];
   const selectedChapter = activeSource?.chapters.find((item) => item.id === selectedChapterId)
     ?? activeSource?.chapters[0];
@@ -1027,6 +1117,7 @@ export function SourcePage() {
       getProjectSettings(projectId, controller.signal),
     ]).then(([loadedAnalysis, loadedScript, loadedSettings]) => {
       setAnalysis(loadedAnalysis);
+      setSourceAnalyses((current) => ({ ...current, [activeSourceId]: loadedAnalysis }));
       setAnalysisSourceId(activeSourceId);
       setAnalysisErrorSourceId(undefined);
       setScript(loadedScript);
@@ -1178,6 +1269,7 @@ export function SourcePage() {
         controller.signal,
       );
       setAnalysis(result);
+      setSourceAnalyses((current) => ({ ...current, [activeSource.id]: result }));
     } catch (analysisError) {
       if (analysisError instanceof DOMException && analysisError.name === "AbortError") return;
       setError(analysisError instanceof Error ? analysisError.message : "素材分析失败。");
@@ -1305,23 +1397,28 @@ export function SourcePage() {
     setWorking("confirm");
     setError("");
     try {
-      const updated = await generateProductionScriptForEpisode(
+      const task = await generateProductionScriptForEpisode(
         projectId,
         activeSource.id,
         episodeNumber,
       );
-      setScript(updated);
-      window.dispatchEvent(new Event("alex:production-episodes-updated"));
-      const productionEpisodeId = updated.productionEpisodeMap?.[episodeNumber];
-      if (productionEpisodeId) {
-        navigate(getScriptWorkspacePath(projectId, productionEpisodeId, "production"));
-      }
+      setProductionEpisodeNumber(episodeNumber);
+      setProductionTaskEvents([]);
+      setProductionScriptResult(null);
+      setProductionTask(task);
       return true;
     } catch (confirmError) {
       setError(confirmError instanceof Error ? confirmError.message : "单集正式剧本生成失败。");
-      return false;
-    } finally {
       setWorking(null);
+      return false;
+    }
+  };
+
+  const openGeneratedProductionScript = () => {
+    if (!productionScriptResult || productionEpisodeNumber === null) return;
+    const productionEpisodeId = productionScriptResult.productionEpisodeMap?.[productionEpisodeNumber];
+    if (productionEpisodeId) {
+      navigate(getScriptWorkspacePath(projectId, productionEpisodeId, "production"));
     }
   };
 
@@ -1351,7 +1448,7 @@ export function SourcePage() {
           activeKey={workspaceView}
           items={[
             { key: "source", label: "原文章节" },
-            { key: "analysis", label: "素材图谱" },
+            { key: "analysis", label: "原文分析" },
           ]}
           onChange={(key) => {
             if (activeSource) {
@@ -1408,10 +1505,20 @@ export function SourcePage() {
                   const source = sources.find((item) => item.id === event.target.value);
                   if (source) selectSource(source);
                 }}>
-                  {sources.map((source) => <option value={source.id} key={source.id}>{source.title}</option>)}
+                  {sources.map((source) => {
+                    const analyzedCount = sourceAnalyses[source.id]?.analyzedChapterIds?.length ?? 0;
+                    return <option value={source.id} key={source.id}>{source.title} · 已分析 {analyzedCount}/{source.chapterCount}</option>;
+                  })}
                 </select>
                 <ChevronDown size={13} />
               </label>
+            )}
+            {activeSource && (
+              <div className="source-analysis-summary">
+                <span className={(analysis?.analyzedChapterIds?.length ?? 0) === activeSource.chapterCount ? "complete" : "pending"}>
+                  已分析 {analysis?.analyzedChapterIds?.length ?? 0}/{activeSource.chapterCount} 章
+                </span>
+              </div>
             )}
             <div className="tree-group">
               {filteredChapters.map((chapter) => {
@@ -1465,6 +1572,11 @@ export function SourcePage() {
               <div className="reader-chapter-title">
                 <span>{String(selectedChapter?.number ?? 0).padStart(2, "0")}</span>
                 <h2>{selectedChapter?.title}</h2>
+                {selectedChapter && (
+                  <span className={`chapter-analysis-badge ${analysis?.analyzedChapterIds?.includes(selectedChapter.id) ? "analyzed" : "pending"}`}>
+                    {analysis?.analyzedChapterIds?.includes(selectedChapter.id) ? "已分析" : "未分析"}
+                  </span>
+                )}
               </div>
               <div className="button-group">
                 <button
@@ -1501,8 +1613,8 @@ export function SourcePage() {
                   type="button"
                   disabled={!selectedChapter || (working !== null && working !== "analysis")}
                   onClick={() => void requestAnalysis()}
-                  aria-label={working === "analysis" ? "取消本章分析" : "分析本章"}
-                  title={working === "analysis" ? "取消本章分析" : "分析本章"}
+                  aria-label={working === "analysis" ? "取消本章分析" : analysis?.analyzedChapterIds?.includes(selectedChapter?.id ?? "") ? "重新分析本章" : "分析本章"}
+                  title={working === "analysis" ? "取消本章分析" : analysis?.analyzedChapterIds?.includes(selectedChapter?.id ?? "") ? "重新分析本章" : "分析本章"}
                 >
                   {working === "analysis" ? <span className="spinner" /> : <Sparkles size={14} />}
                 </button>
@@ -1538,6 +1650,47 @@ export function SourcePage() {
           onClear={clearScriptEpisodes}
           onGenerateProductionScript={generateEpisodeProductionScript}
         />
+      )}
+      {productionTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="production-generation-title">
+            <header>
+              <div>
+                <span className="eyebrow">PRODUCTION SCRIPT</span>
+                <h2 id="production-generation-title">生成正式剧本</h2>
+              </div>
+              <span className={`generation-task-state ${productionTask.status}`}>
+                {productionTask.status === 'completed' ? '已完成' : productionTask.status === 'failed' ? '失败' : '生成中'}
+              </span>
+            </header>
+            <div className="generation-stream" role="log" aria-live="polite">
+              {productionTaskEvents.length === 0 && (
+                <div className="generation-stream-entry active">
+                  <span>00</span><p>正在建立生成任务连接...</p>
+                </div>
+              )}
+              {productionTaskEvents.map((event) => (
+                <div className={`generation-stream-entry ${event.stage ?? ''}`} key={event.sequence}>
+                  <span>{String(event.sequence).padStart(2, '0')}</span>
+                  <p>{event.message}</p>
+                  <time>{new Date(event.createdAtUtc).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <span>{productionTask.status === 'completed'
+                ? '正式剧本已保存，可以进入剧本工作台。'
+                : productionTask.status === 'failed'
+                  ? productionTask.lastError ?? '生成失败，请关闭后重试。'
+                  : productionTask.currentStep ?? '任务正在后台执行，可以看到每个实际阶段。'}</span>
+              {productionTask.status === 'completed' ? (
+                <button className="primary-button" type="button" onClick={openGeneratedProductionScript}>打开正式剧本</button>
+              ) : productionTask.status === 'failed' || productionTask.status === 'cancelled' ? (
+                <button className="secondary-button" type="button" onClick={() => setProductionTask(null)}>关闭</button>
+              ) : null}
+            </footer>
+          </section>
+        </div>
       )}
       {importOpen && (
         <div className="modal-backdrop">
@@ -1609,7 +1762,7 @@ function StoryMaterialWorkspace({
   if (!analysis) {
     return (
       <div className="source-empty-state development-empty-state">
-        <span className="eyebrow">编剧素材准备</span>
+        <span className="eyebrow">改编结构准备</span>
         <h2>尚无章节分析</h2>
         <p>{source?.chapterCount ?? 0} 个章节均未生成素材记录。</p>
       </div>
@@ -2762,6 +2915,30 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
   const [working, setWorking] = useState<"import" | "save" | "prompt" | "image" | "batch-prompt" | "batch-image" | "upload-reference" | null>(null);
   const [error, setError] = useState("");
   const [batchMessage, setBatchMessage] = useState("");
+  const [importTask, setImportTask] = useState<GenerationTask | null>(null);
+  const [importTaskEvents, setImportTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [importStreamRevision, setImportStreamRevision] = useState(0);
+  const [batchTask, setBatchTask] = useState<GenerationTask | null>(null);
+  const [batchTaskEvents, setBatchTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [batchTarget, setBatchTarget] = useState<"prompt" | "image">("prompt");
+  const [batchStreamRevision, setBatchStreamRevision] = useState(0);
+  const [referenceTask, setReferenceTask] = useState<GenerationTask | null>(null);
+  const [referenceTaskEvents, setReferenceTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [referenceTaskTarget, setReferenceTaskTarget] = useState<"prompt" | "image">("prompt");
+  const [referenceStreamRevision, setReferenceStreamRevision] = useState(0);
+    const [scriptMaterialStatuses, setScriptMaterialStatuses] = useState<ScriptMaterialAnalysisStatus[]>([]);
+
+    useEffect(() => {
+      const controller = new AbortController();
+      listScriptMaterialAnalysisStatuses(projectId, controller.signal)
+        .then(setScriptMaterialStatuses)
+        .catch((loadError: unknown) => {
+          if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+            setError(loadError instanceof Error ? loadError.message : "剧本素材分析状态加载失败。");
+          }
+        });
+      return () => controller.abort();
+    }, [projectId]);
   const [editorOpen, setEditorOpen] = useState(false);
   const [referenceFeedbackOpen, setReferenceFeedbackOpen] = useState(false);
   const [referenceFeedback, setReferenceFeedback] = useState("");
@@ -2781,6 +2958,8 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     scenes: assets.filter((item) => item.kind === "scene").length,
     props: assets.filter((item) => item.kind === "prop").length,
   };
+  const allScriptsAnalyzed = scriptMaterialStatuses.length > 0
+    && scriptMaterialStatuses.every((status) => status.isAnalyzed);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2796,6 +2975,174 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, [projectId]);
+
+  useEffect(() => {
+    if (!importTask || ['completed', 'failed', 'cancelled'].includes(importTask.status)) return;
+    const taskId = importTask.id;
+    const finish = async (eventResultJson?: string | null) => {
+      const current = await getGenerationTask(taskId);
+      setImportTask(current);
+      if (current.status === 'completed') {
+        const resultJson = eventResultJson ?? current.resultJson;
+        if (!resultJson) throw new Error('资产建立任务没有返回结果。');
+        const imported = JSON.parse(resultJson) as VisualAsset[];
+        setAssets(imported);
+        setScriptMaterialStatuses(await listScriptMaterialAnalysisStatuses(projectId));
+        const first = imported.find((item) => item.kind === kindConfig.kind);
+        if (first) setSelectedId(first.resourceId);
+        setBatchMessage(imported.length === 0
+          ? '剧本中尚未识别到人物、场景或关键道具。'
+          : `已从剧本同步 ${imported.length} 项视觉资产。`);
+        setWorking(null);
+      } else if (current.status === 'failed' || current.status === 'cancelled') {
+        setError(current.lastError ?? '从剧本建立资产失败。');
+        setWorking(null);
+      }
+    };
+    const source = subscribeGenerationTask(
+      taskId,
+      importTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setImportTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'running') {
+          setImportTask((current) => current ? { ...current, status: 'running', currentStep: event.message } : current);
+        } else if (event.stage === 'completed') {
+          void finish(event.dataJson).catch((taskError: unknown) => {
+            setError(taskError instanceof Error ? taskError.message : '资产建立结果加载失败。');
+            setWorking(null);
+          });
+        } else if (event.stage === 'failed' || event.stage === 'cancelled') {
+          void finish();
+        }
+      },
+      () => {
+        void finish().then(() => {
+          if (!['completed', 'failed', 'cancelled'].includes(importTask.status)) {
+            setImportStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '资产建立任务状态加载失败。');
+          setWorking(null);
+        });
+      },
+    );
+    return () => source.close();
+  }, [importTask?.id, importTask?.status, importStreamRevision]);
+
+  useEffect(() => {
+    if (!batchTask || ['completed', 'failed', 'cancelled'].includes(batchTask.status)) return;
+    const taskId = batchTask.id;
+    const finish = async (eventResultJson?: string | null) => {
+      const current = await getGenerationTask(taskId);
+      setBatchTask(current);
+      if (current.status === 'completed') {
+        const resultJson = eventResultJson ?? current.resultJson;
+        if (!resultJson) throw new Error('批量生成任务没有返回结果。');
+        const result = JSON.parse(resultJson) as BatchVisualReferenceResult;
+        setAssets(await listVisualAssets(projectId));
+        setBatchMessage(`${batchTarget === "prompt" ? "提示词" : "图片"}批量完成：生成 ${result.generated}，跳过 ${result.skipped}，失败 ${result.failed}`);
+        if (result.errors.length > 0) setError(result.errors.join("；"));
+        setWorking(null);
+      } else if (current.status === 'failed' || current.status === 'cancelled') {
+        setError(current.lastError ?? '批量生成失败。');
+        setWorking(null);
+      }
+      return current.status;
+    };
+    const source = subscribeGenerationTask(
+      taskId,
+      batchTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setBatchTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'running') {
+          const progress = event.dataJson
+            ? JSON.parse(event.dataJson) as { completed?: number; total?: number }
+            : null;
+          setBatchTask((current) => current ? {
+            ...current,
+            status: 'running',
+            currentStep: event.message,
+            progressCompleted: progress?.completed ?? current.progressCompleted,
+            progressTotal: progress?.total ?? current.progressTotal,
+          } : current);
+        } else if (event.stage === 'completed') {
+          void finish(event.dataJson).catch((taskError: unknown) => {
+            setError(taskError instanceof Error ? taskError.message : '批量生成结果加载失败。');
+            setWorking(null);
+          });
+        } else if (event.stage === 'failed' || event.stage === 'cancelled') {
+          void finish();
+        }
+      },
+      () => {
+        void finish().then((status) => {
+          if (!['completed', 'failed', 'cancelled'].includes(status)) {
+            setBatchStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '批量生成任务状态加载失败。');
+          setWorking(null);
+        });
+      },
+    );
+    return () => source.close();
+  }, [batchTask?.id, batchTask?.status, batchStreamRevision]);
+
+  useEffect(() => {
+    if (!referenceTask || ['completed', 'failed', 'cancelled'].includes(referenceTask.status)) return;
+    const taskId = referenceTask.id;
+    const finish = async () => {
+      const current = await getGenerationTask(taskId);
+      setReferenceTask(current);
+      if (current.status === 'completed') {
+        setAssets(await listVisualAssets(projectId));
+        setPromptCopied(false);
+        setReferenceFeedbackOpen(false);
+        setReferenceFeedback("");
+        setWorking(null);
+      } else if (current.status === 'failed' || current.status === 'cancelled') {
+        setError(current.lastError ?? `${referenceTaskTarget === "prompt" ? "提示词" : "图片"}生成失败。`);
+        setWorking(null);
+      }
+      return current.status;
+    };
+    const source = subscribeGenerationTask(
+      taskId,
+      referenceTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setReferenceTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'running') {
+          setReferenceTask((current) => current ? {
+            ...current,
+            status: 'running',
+            currentStep: event.message,
+          } : current);
+        } else if (event.stage === 'completed' || event.stage === 'failed' || event.stage === 'cancelled') {
+          void finish().catch((taskError: unknown) => {
+            setError(taskError instanceof Error ? taskError.message : '生成任务状态加载失败。');
+            setWorking(null);
+          });
+        }
+      },
+      () => {
+        void finish().then((status) => {
+          if (!['completed', 'failed', 'cancelled'].includes(status)) {
+            setReferenceStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '生成任务状态加载失败。');
+          setWorking(null);
+        });
+      },
+    );
+    return () => source.close();
+  }, [referenceTask?.id, referenceTask?.status, referenceStreamRevision]);
 
   const openCreate = () => {
     setEditingAsset(null);
@@ -2813,13 +3160,11 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     setWorking("import");
     setError("");
     try {
-      const imported = await importStoryMaterialAssets(projectId);
-      setAssets(imported);
-      const first = imported.find((item) => item.kind === kindConfig.kind);
-      if (first) setSelectedId(first.resourceId);
+      const task = await importScriptMaterialAssets(projectId);
+      setImportTaskEvents([]);
+      setImportTask(task);
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "从素材图谱建立资产失败。");
-    } finally {
+      setError(importError instanceof Error ? importError.message : "从剧本建立资产失败。");
       setWorking(null);
     }
   };
@@ -2860,21 +3205,18 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     setError("");
     setBatchMessage("");
     try {
-      const referencePrompt = await generateVisualReferencePrompt(
+      const task = await generateVisualReferencePrompt(
         projectId,
         selected.resourceId,
         instruction,
         basedOnCurrent,
       );
-      setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
-        ? { ...item, referencePrompt }
-        : item));
-      setPromptCopied(false);
+      setReferenceTaskTarget("prompt");
+      setReferenceTaskEvents([]);
+      setReferenceTask(task);
       setReferenceFeedbackOpen(false);
-      setReferenceFeedback("");
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "提示词生成失败。");
-    } finally {
       setWorking(null);
     }
   };
@@ -2885,13 +3227,12 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     setError("");
     setBatchMessage("");
     try {
-      const referenceImage = await generateVisualReferenceImage(projectId, selected.resourceId);
-      setAssets((current) => current.map((item) => item.resourceId === selected.resourceId
-        ? { ...item, referenceImage }
-        : item));
+      const task = await generateVisualReferenceImage(projectId, selected.resourceId);
+      setReferenceTaskTarget("image");
+      setReferenceTaskEvents([]);
+      setReferenceTask(task);
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "参考图生成失败。");
-    } finally {
       setWorking(null);
     }
   };
@@ -2901,16 +3242,14 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
     setError("");
     setBatchMessage("");
     try {
-      const result = target === "prompt"
+      const task = target === "prompt"
         ? await generateMissingVisualReferencePrompts(projectId, kindConfig.kind)
         : await generateMissingVisualReferenceImages(projectId, kindConfig.kind);
-      const loaded = await listVisualAssets(projectId);
-      setAssets(loaded);
-      setBatchMessage(`${target === "prompt" ? "提示词" : "图片"}批量完成：生成 ${result.generated}，跳过 ${result.skipped}，失败 ${result.failed}`);
-      if (result.errors.length > 0) setError(result.errors.join("；"));
+      setBatchTarget(target);
+      setBatchTaskEvents([]);
+      setBatchTask(task);
     } catch (batchError) {
       setError(batchError instanceof Error ? batchError.message : "批量生成失败。");
-    } finally {
       setWorking(null);
     }
   };
@@ -2959,10 +3298,10 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
             <button
               className="secondary-button"
               onClick={importMaterials}
-              disabled={working !== null}
+              disabled={working !== null || allScriptsAnalyzed}
             >
               <WandSparkles size={14} />
-              {working === "import" ? "建立中" : "从故事资料建立"}
+              {working === "import" ? "建立中" : allScriptsAnalyzed ? "剧本已分析" : "从剧本建立"}
             </button>
             <button className="primary-button" onClick={openCreate}>
               <Plus size={14} />新建{kindConfig.singular}
@@ -2971,6 +3310,16 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
         </header>
         {error && <div className="settings-error asset-error">{error}</div>}
         {batchMessage && <div className="asset-batch-message">{batchMessage}</div>}
+        {scriptMaterialStatuses.length > 0 && (
+          <div className="script-material-status" aria-label="剧本素材分析状态">
+            <strong>剧本素材</strong>
+            {scriptMaterialStatuses.map((status) => (
+              <span className={status.isAnalyzed ? "analyzed" : "pending"} key={`${status.sourceAssetId}-${status.episodeNumber}`}>
+                E{String(status.episodeNumber).padStart(2, "0")} · {status.scriptType} · {status.isAnalyzed ? "已分析" : "待分析"}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="asset-workspace">
           <section className="asset-list-panel">
           {visibleAssets.map((asset, index) => (
@@ -2997,7 +3346,7 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
           {!loading && visibleAssets.length === 0 && (
             <div className="asset-list-empty">
               <strong>{search ? "没有匹配资产" : `尚无${kindConfig.label}资产`}</strong>
-              <p>{search ? "调整搜索词后重试。" : "可从故事资料建立，或手动创建。"}</p>
+              <p>{search ? "调整搜索词后重试。" : "可从剧本建立，或手动创建。"}</p>
             </div>
           )}
           {loading && <div className="asset-list-empty">正在读取资产...</div>}
@@ -3160,6 +3509,107 @@ function VisualAssetsPage({ projectId, assetType }: { projectId: string; assetTy
           )}
         </div>
       </div>
+      {importTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-generation-title">
+            <header>
+              <div><span className="eyebrow">SCRIPT ASSET BUILD</span><h2 id="asset-generation-title">从剧本建立资产</h2></div>
+              <span className={`generation-task-state ${importTask.status}`}>
+                {importTask.status === 'completed' ? '已完成' : importTask.status === 'failed' ? '失败' : '建立中'}
+              </span>
+            </header>
+            <div className="generation-stream" role="log" aria-live="polite">
+              {importTaskEvents.length === 0 && <div className="generation-stream-entry active"><span>00</span><p>正在建立任务连接...</p></div>}
+              {importTaskEvents.map((event) => (
+                <div className={`generation-stream-entry ${event.stage ?? ''}`} key={event.sequence}>
+                  <span>{String(event.sequence).padStart(2, '0')}</span><p>{event.message}</p>
+                  <time>{new Date(event.createdAtUtc).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <span>{importTask.status === 'completed'
+                ? assets.length === 0
+                  ? '剧本中尚未识别到人物、场景或关键道具。'
+                  : `资产已建立，当前共有 ${assets.length} 项视觉资产。`
+                : importTask.status === 'failed' ? importTask.lastError ?? '建立失败，请关闭后重试。' : importTask.currentStep}</span>
+              {['completed', 'failed', 'cancelled'].includes(importTask.status) && (
+                <button className={importTask.status === 'completed' ? 'primary-button' : 'secondary-button'} type="button" onClick={() => setImportTask(null)}>完成</button>
+              )}
+            </footer>
+          </section>
+        </div>
+      )}
+      {referenceTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="reference-generation-title">
+            <header>
+              <div><span className="eyebrow">REFERENCE GENERATION</span><h2 id="reference-generation-title">生成{referenceTaskTarget === "prompt" ? "提示词" : "设定图"}</h2></div>
+              <span className={`generation-task-state ${referenceTask.status}`}>
+                {referenceTask.status === 'completed' ? '已完成' : referenceTask.status === 'failed' ? '失败' : referenceTask.status === 'cancelled' ? '已取消' : '生成中'}
+              </span>
+            </header>
+            <div className="batch-generation-progress">
+              <progress max={1} value={referenceTask.status === 'completed' ? 1 : undefined} />
+              <span>{referenceTask.status === 'completed' ? '1 / 1' : '模型处理中'}</span>
+            </div>
+            <div className="generation-stream" role="log" aria-live="polite">
+              {referenceTaskEvents.length === 0 && <div className="generation-stream-entry active"><span>00</span><p>正在建立任务连接...</p></div>}
+              {referenceTaskEvents.map((event) => (
+                <div className={`generation-stream-entry ${event.stage ?? ''}`} key={event.sequence}>
+                  <span>{String(event.sequence).padStart(2, '0')}</span><p>{event.message}</p>
+                  <time>{new Date(event.createdAtUtc).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <span>{referenceTask.status === 'completed'
+                ? `${referenceTaskTarget === "prompt" ? "提示词" : "设定图"}已生成并刷新。`
+                : referenceTask.status === 'failed' || referenceTask.status === 'cancelled'
+                  ? referenceTask.lastError ?? '生成未完成。'
+                  : referenceTask.currentStep}</span>
+              {['completed', 'failed', 'cancelled'].includes(referenceTask.status) && (
+                <button className={referenceTask.status === 'completed' ? 'primary-button' : 'secondary-button'} type="button" onClick={() => setReferenceTask(null)}>完成</button>
+              )}
+            </footer>
+          </section>
+        </div>
+      )}
+      {batchTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-generation-title">
+            <header>
+              <div><span className="eyebrow">BATCH GENERATION</span><h2 id="batch-generation-title">批量生成{batchTarget === "prompt" ? "提示词" : "图片"}</h2></div>
+              <span className={`generation-task-state ${batchTask.status}`}>
+                {batchTask.status === 'completed' ? '已完成' : batchTask.status === 'failed' ? '失败' : '生成中'}
+              </span>
+            </header>
+            <div className="batch-generation-progress">
+              <progress max={batchTask.progressTotal ?? 1} value={batchTask.progressCompleted} />
+              <span>{batchTask.progressTotal
+                ? `${batchTask.progressCompleted} / ${batchTask.progressTotal}`
+                : '准备中'}</span>
+            </div>
+            <div className="generation-stream" role="log" aria-live="polite">
+              {batchTaskEvents.length === 0 && <div className="generation-stream-entry active"><span>00</span><p>正在建立任务连接...</p></div>}
+              {batchTaskEvents.map((event) => (
+                <div className={`generation-stream-entry ${event.stage ?? ''}`} key={event.sequence}>
+                  <span>{String(event.sequence).padStart(2, '0')}</span><p>{event.message}</p>
+                  <time>{new Date(event.createdAtUtc).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <span>{batchTask.status === 'completed'
+                ? batchMessage
+                : batchTask.status === 'failed' ? batchTask.lastError ?? '批量生成失败。' : batchTask.currentStep}</span>
+              {['completed', 'failed', 'cancelled'].includes(batchTask.status) && (
+                <button className={batchTask.status === 'completed' ? 'primary-button' : 'secondary-button'} type="button" onClick={() => setBatchTask(null)}>完成</button>
+              )}
+            </footer>
+          </section>
+        </div>
+      )}
       {referenceFeedbackOpen && selected && (
         <div className="modal-backdrop" onMouseDown={() => working !== "prompt" && setReferenceFeedbackOpen(false)}>
           <form
@@ -3845,8 +4295,13 @@ export function StoryboardPage() {
   const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
   const [loadedEpisodeId, setLoadedEpisodeId] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [storyboardTask, setStoryboardTask] = useState<GenerationTask | null>(null);
+  const [storyboardTaskEvents, setStoryboardTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [storyboardStreamRevision, setStoryboardStreamRevision] = useState(0);
   const [batchAction, setBatchAction] = useState("");
+  const [batchLabel, setBatchLabel] = useState("");
   const [batchFeedback, setBatchFeedback] = useState<{ label: string; result: BatchStoryboardMediaResult } | null>(null);
+  const [selectedShotIds, setSelectedShotIds] = useState<string[]>([]);
   const [framePreviewIndex, setFramePreviewIndex] = useState(0);
   const [framePreviewOpen, setFramePreviewOpen] = useState(false);
   const [error, setError] = useState("");
@@ -3864,6 +4319,7 @@ export function StoryboardPage() {
 
   useEffect(() => {
     if (!productionEpisodeId) return;
+    setSelectedShotIds([]);
     const controller = new AbortController();
     getStoryboard(projectId, productionEpisodeId, controller.signal)
       .then((loaded) => {
@@ -3879,12 +4335,102 @@ export function StoryboardPage() {
     return () => controller.abort();
   }, [productionEpisodeId, projectId]);
 
+  useEffect(() => {
+    if (!storyboardTask || ['completed', 'cancelled'].includes(storyboardTask.status)) return;
+    const taskId = storyboardTask.id;
+    const finish = async () => {
+      const current = await getGenerationTask(taskId);
+      setStoryboardTask(current);
+      if (current.status === 'completed') {
+        if (current.taskType !== 'storyboard-design' && current.resultJson) {
+          setBatchFeedback({
+            label: batchLabel,
+            result: JSON.parse(current.resultJson) as BatchStoryboardMediaResult,
+          });
+        }
+        setStoryboard(await getStoryboard(projectId, productionEpisodeId));
+        setLoadedEpisodeId(productionEpisodeId);
+        setError('');
+        setGenerating(false);
+        setBatchAction('');
+      } else if (current.status === 'failed' || current.status === 'cancelled') {
+        setError(current.lastError ?? '分镜生成失败。');
+        setGenerating(false);
+        setBatchAction('');
+      }
+      return current.status;
+    };
+    if (storyboardTask.status === 'failed') {
+      const latestFailure = storyboardTaskEvents.findLast((event) => event.eventType === 'failure');
+      const mayRetry = latestFailure
+        ? Date.now() - new Date(latestFailure.createdAtUtc).getTime() < 90_000
+        : true;
+      const timer = window.setTimeout(() => {
+        void finish().then((status) => {
+          if (status === 'failed' && mayRetry) {
+            setStoryboardStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '分镜任务状态加载失败。');
+          setGenerating(false);
+        });
+      }, mayRetry ? 1500 : 0);
+      return () => window.clearTimeout(timer);
+    }
+    const source = subscribeGenerationTask(
+      taskId,
+      storyboardTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setStoryboardTaskEvents((current) => current.some((item) => item.sequence === event.sequence)
+          ? current
+          : [...current, event]);
+        if (event.stage === 'running') {
+          setError('');
+          const progress = event.dataJson
+            ? JSON.parse(event.dataJson) as { completed?: number; total?: number }
+            : null;
+          setStoryboardTask((current) => current ? {
+            ...current,
+            status: 'running',
+            currentStep: event.message,
+            progressCompleted: progress?.completed ?? current.progressCompleted,
+            progressTotal: progress?.total ?? current.progressTotal,
+          } : current);
+        } else if (event.stage === 'completed' || event.stage === 'failed' || event.stage === 'cancelled') {
+          void finish().catch((taskError: unknown) => {
+            setError(taskError instanceof Error ? taskError.message : '分镜任务状态加载失败。');
+            setGenerating(false);
+          });
+        }
+      },
+      () => {
+        void finish().then((status) => {
+          if (!['completed', 'failed', 'cancelled'].includes(status)) {
+            setStoryboardStreamRevision((current) => current + 1);
+          }
+        }).catch((taskError: unknown) => {
+          setError(taskError instanceof Error ? taskError.message : '分镜任务状态加载失败。');
+          setGenerating(false);
+        });
+      },
+    );
+    return () => source.close();
+  }, [storyboardTask?.id, storyboardTask?.status, storyboardStreamRevision, batchLabel]);
+
   if (!productionEpisodeId && productionEpisodes.length > 0) {
     return <Navigate to={`episodes/${productionEpisodes[0].id}`} replace />;
   }
 
   const loading = productionEpisodeId !== "" && loadedEpisodeId !== productionEpisodeId;
   const currentStoryboard = storyboard?.productionEpisodeId === productionEpisodeId ? storyboard : null;
+  const allShotIds = currentStoryboard?.shots.map((shot) => shot.resourceId) ?? [];
+  const selectedBatchShotIds = selectedShotIds.length > 0 ? selectedShotIds : undefined;
+  const allShotsSelected = allShotIds.length > 0 && selectedShotIds.length === allShotIds.length;
+  const toggleShotSelection = (shotResourceId: string) => {
+    setSelectedShotIds((current) => current.includes(shotResourceId)
+      ? current.filter((id) => id !== shotResourceId)
+      : [...current, shotResourceId]);
+  };
   const framePreviews = (currentStoryboard?.shots ?? [])
     .flatMap((shot) => {
       const shotCode = `S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")}`;
@@ -3904,30 +4450,29 @@ export function StoryboardPage() {
     setGenerating(true);
     setError("");
     try {
-      const generated = await generateStoryboard(projectId, productionEpisodeId);
-      setStoryboard(generated);
-      setLoadedEpisodeId(productionEpisodeId);
+      const task = await generateStoryboard(projectId, productionEpisodeId);
+      setStoryboardTaskEvents([]);
+      setStoryboardTask(task);
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "分镜生成失败。");
-    } finally {
       setGenerating(false);
     }
   };
   const runBatch = async (
     action: string,
     label: string,
-    operation: () => Promise<BatchStoryboardMediaResult>,
+    operation: () => Promise<GenerationTask>,
   ) => {
     setBatchAction(action);
+    setBatchLabel(label);
     setBatchFeedback(null);
     setError("");
     try {
-      const result = await operation();
-      setBatchFeedback({ label, result });
-      setStoryboard(await getStoryboard(projectId, productionEpisodeId));
+      const task = await operation();
+      setStoryboardTaskEvents([]);
+      setStoryboardTask(task);
     } catch (batchError) {
       setError(batchError instanceof Error ? batchError.message : `${label}失败。`);
-    } finally {
       setBatchAction("");
     }
   };
@@ -3950,23 +4495,24 @@ export function StoryboardPage() {
               {generating ? "正在设计分镜" : currentStoryboard ? "重新生成草稿" : "生成分镜草稿"}
             </button>
             <div className="storyboard-batch-actions" aria-label="分镜批量生成">
-              <Tooltip title={batchAction === "image-prompts" ? "正在批量生成图片提示词" : "批量生成图片提示词"}>
-                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("image-prompts", "批量图片提示词", () => generateMissingStoryboardImagePrompts(projectId, productionEpisodeId))}>
+              {selectedShotIds.length > 0 && <span className="storyboard-selection-count">已选 {selectedShotIds.length} 个镜头 · 将重新生成</span>}
+              <Tooltip title={batchAction === "image-prompts" ? "正在批量生成图片提示词" : selectedBatchShotIds ? "重新生成选中镜头的图片提示词" : "补齐缺失的图片提示词"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("image-prompts", "批量图片提示词", () => generateMissingStoryboardImagePrompts(projectId, productionEpisodeId, selectedBatchShotIds))}>
                   <WandSparkles size={14} />
                 </button>
               </Tooltip>
-              <Tooltip title={batchAction === "images" ? "正在批量生成图片" : "批量生成图片"}>
-                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("images", "批量图片", () => generateMissingStoryboardImages(projectId, productionEpisodeId))}>
+              <Tooltip title={batchAction === "images" ? "正在批量生成图片" : selectedBatchShotIds ? "重新生成选中镜头的图片" : "补齐缺失的图片"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("images", "批量图片", () => generateMissingStoryboardImages(projectId, productionEpisodeId, selectedBatchShotIds))}>
                   <ImagePlus size={14} />
                 </button>
               </Tooltip>
-              <Tooltip title={batchAction === "video-prompts" ? "正在批量生成视频提示词" : "批量生成视频提示词"}>
-                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("video-prompts", "批量视频提示词", () => generateMissingStoryboardVideoPrompts(projectId, productionEpisodeId))}>
+              <Tooltip title={batchAction === "video-prompts" ? "正在批量生成视频提示词" : selectedBatchShotIds ? "重新生成选中镜头的视频提示词" : "补齐缺失的视频提示词"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("video-prompts", "批量视频提示词", () => generateMissingStoryboardVideoPrompts(projectId, productionEpisodeId, selectedBatchShotIds))}>
                   <Sparkles size={14} />
                 </button>
               </Tooltip>
-              <Tooltip title={batchAction === "videos" ? "正在批量生成视频" : "批量生成视频"}>
-                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("videos", "批量视频", () => generateMissingStoryboardVideos(projectId, productionEpisodeId))}>
+              <Tooltip title={batchAction === "videos" ? "正在批量生成视频" : selectedBatchShotIds ? "重新生成选中镜头的视频" : "补齐缺失的视频"}>
+                <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("videos", "批量视频", () => generateMissingStoryboardVideos(projectId, productionEpisodeId, selectedBatchShotIds))}>
                   <Play size={14} />
                 </button>
               </Tooltip>
@@ -3980,7 +4526,13 @@ export function StoryboardPage() {
           {batchFeedback.result.errors.length > 0 && <small>{batchFeedback.result.errors.join("；")}</small>}
         </div>
       )}
-      {error && <div className="source-empty-state development-empty-state"><strong>{error}</strong></div>}
+      {error && (
+        <div className="storyboard-inline-error" role="alert">
+          <CircleAlert size={15} />
+          <strong>{error}</strong>
+          <button type="button" aria-label="关闭错误提示" onClick={() => setError("")}><X size={14} /></button>
+        </div>
+      )}
       {!error && (loading || !currentStoryboard) && (
         <div className="source-empty-state development-empty-state">
           <span className="eyebrow">{loading ? "正在读取" : "尚无分镜"}</span>
@@ -4013,6 +4565,12 @@ export function StoryboardPage() {
             }}
           />
           <div className="table-row table-head">
+            <Checkbox
+              aria-label="选择全部镜头"
+              checked={allShotsSelected}
+              indeterminate={selectedShotIds.length > 0 && !allShotsSelected}
+              onChange={(event) => setSelectedShotIds(event.target.checked ? allShotIds : [])}
+            />
             <span>镜号</span>
             <span>爆点</span>
             <span>帧策略</span>
@@ -4023,12 +4581,23 @@ export function StoryboardPage() {
             <span>状态</span>
           </div>
           {currentStoryboard.shots.map((shot) => (
-            <button
-              className="table-row"
+            <div
+              className={`table-row storyboard-shot-row${selectedShotIds.includes(shot.resourceId) ? " selected" : ""}`}
               key={shot.resourceId}
-              onClick={() => navigate(`shots/${shot.resourceId}`)}
             >
-              <strong>S{String(shot.sceneNumber).padStart(2, "0")}-{String(shot.shotNumber).padStart(2, "0")}</strong>
+              <Checkbox
+                aria-label={`选择镜头 S${String(shot.sceneNumber).padStart(2, "0")}-${String(shot.shotNumber).padStart(2, "0")}`}
+                checked={selectedShotIds.includes(shot.resourceId)}
+                onClick={(event) => event.stopPropagation()}
+                onChange={() => toggleShotSelection(shot.resourceId)}
+              />
+              <button
+                type="button"
+                className="storyboard-shot-link"
+                onClick={() => navigate(`shots/${shot.resourceId}`)}
+              >
+                S{String(shot.sceneNumber).padStart(2, "0")}-{String(shot.shotNumber).padStart(2, "0")}
+              </button>
               <span className="shot-hook-badges">
                 {(shot.hooks ?? []).map((hook, index) => (
                   <b className={hook.type} title={hook.description} key={`${hook.type}-${index}`}>
@@ -4072,8 +4641,54 @@ export function StoryboardPage() {
                 <small className={shot.videoPrompt ? "ready" : ""}>视词</small>
                 <small className={shot.videoProduction?.status === "completed" ? "ready" : shot.videoProduction?.status ?? ""}>视频</small>
               </span>
-            </button>
+            </div>
           ))}
+        </div>
+      )}
+      {storyboardTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="storyboard-generation-title">
+            <header>
+              <div><span className="eyebrow">STORYBOARD TASK</span><h2 id="storyboard-generation-title">{storyboardTask.taskType === 'storyboard-design' ? '生成分镜草稿' : batchLabel}</h2></div>
+              <span className={`generation-task-state ${storyboardTask.status}`}>
+                {storyboardTask.status === 'completed' ? '已完成' : storyboardTask.status === 'failed' ? '失败' : storyboardTask.status === 'cancelled' ? '已取消' : '处理中'}
+              </span>
+            </header>
+            <div className="batch-generation-progress">
+              <progress max={storyboardTask.progressTotal ?? 1} value={storyboardTask.status === 'completed' ? storyboardTask.progressTotal ?? 1 : storyboardTask.progressCompleted} />
+              <span>{storyboardTask.progressTotal ? `${storyboardTask.progressCompleted} / ${storyboardTask.progressTotal}` : '模型处理中'}</span>
+            </div>
+            {storyboardTask.status === 'failed' && (
+              <div className="generation-failure-reason" role="alert">
+                <strong>失败原因</strong>
+                <p>{storyboardTaskEvents.findLast((event) => event.eventType === 'failure')?.message
+                  ?? storyboardTask.lastError
+                  ?? '分镜生成失败，后端未返回具体原因。'}</p>
+              </div>
+            )}
+            <div className="generation-stream" role="log" aria-live="polite">
+              {storyboardTaskEvents.length === 0 && <div className="generation-stream-entry active"><span>00</span><p>正在建立任务连接...</p></div>}
+              {storyboardTaskEvents.map((event) => (
+                <div className={`generation-stream-entry ${event.stage ?? ''}`} key={event.sequence}>
+                  <span>{String(event.sequence).padStart(2, '0')}</span><p>{event.message}</p>
+                  <time>{new Date(event.createdAtUtc).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+                </div>
+              ))}
+            </div>
+            <footer>
+              <span>{storyboardTask.status === 'completed'
+                ? storyboardTask.taskType === 'storyboard-design' ? '分镜草稿已生成并刷新。' : `${batchLabel}已完成并刷新。`
+                : storyboardTask.status === 'failed' || storyboardTask.status === 'cancelled'
+                  ? storyboardTask.lastError ?? '分镜生成未完成。'
+                  : storyboardTask.currentStep}</span>
+              {!['completed', 'failed', 'cancelled'].includes(storyboardTask.status) && (
+                <button className="secondary-button" type="button" onClick={() => void cancelGenerationTask(storyboardTask.id).then(setStoryboardTask).catch((cancelError: unknown) => setError(cancelError instanceof Error ? cancelError.message : '停止生成任务失败。'))}>停止</button>
+              )}
+              {['completed', 'failed', 'cancelled'].includes(storyboardTask.status) && (
+                <button className={storyboardTask.status === 'completed' ? 'primary-button' : 'secondary-button'} type="button" onClick={() => setStoryboardTask(null)}>{storyboardTask.status === 'completed' ? '完成' : '关闭'}</button>
+              )}
+            </footer>
+          </section>
         </div>
       )}
       </div>
@@ -4182,6 +4797,10 @@ export function StoryboardShotPage() {
   const [textRewriteInstruction, setTextRewriteInstruction] = useState("");
   const [rewritingText, setRewritingText] = useState(false);
   const [framePreview, setFramePreview] = useState<{ url: string; label: string } | null>(null);
+  const [mediaTask, setMediaTask] = useState<GenerationTask | null>(null);
+  const [mediaTaskEvents, setMediaTaskEvents] = useState<GenerationTaskEvent[]>([]);
+  const [mediaTaskLabel, setMediaTaskLabel] = useState("");
+  const [mediaStreamRevision, setMediaStreamRevision] = useState(0);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -4232,6 +4851,56 @@ export function StoryboardShotPage() {
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [framePreview]);
+
+  useEffect(() => {
+    if (!mediaTask || ["completed", "failed", "cancelled"].includes(mediaTask.status)) return;
+    const taskId = mediaTask.id;
+    const finish = async () => {
+      const current = await getGenerationTask(taskId);
+      setMediaTask(current);
+      if (current.status === "completed" && current.resultJson) {
+        if (current.taskType === "storyboard-image-prompt") {
+          const imagePrompt = JSON.parse(current.resultJson) as StoryboardMediaPrompt;
+          setStoryboard((value) => value ? { ...value, shots: value.shots.map((item) => item.resourceId === shotResourceId ? { ...item, imagePrompt } : item) } : value);
+        } else if (current.taskType === "storyboard-image") {
+          const production = JSON.parse(current.resultJson) as ShotProduction;
+          setStoryboard((value) => value ? { ...value, shots: value.shots.map((item) => item.resourceId === shotResourceId ? { ...item, production } : item) } : value);
+        } else if (current.taskType === "storyboard-video-prompt") {
+          const videoPrompt = JSON.parse(current.resultJson) as StoryboardMediaPrompt;
+          setStoryboard((value) => value ? { ...value, shots: value.shots.map((item) => item.resourceId === shotResourceId ? { ...item, videoPrompt } : item) } : value);
+        } else if (current.taskType === "storyboard-video") {
+          setVideo(JSON.parse(current.resultJson) as ShotVideoProduction);
+        }
+        setError("");
+      } else if (current.status === "failed" || current.status === "cancelled") {
+        setError(current.lastError ?? `${mediaTaskLabel}失败。`);
+      }
+      if (["completed", "failed", "cancelled"].includes(current.status)) {
+        setStartingProduction(false);
+        setStartingVideo(false);
+      }
+      return current.status;
+    };
+    const source = subscribeGenerationTask(
+      taskId,
+      mediaTaskEvents.at(-1)?.sequence ?? 0,
+      (event) => {
+        setMediaTaskEvents((current) => current.some((item) => item.sequence === event.sequence) ? current : [...current, event]);
+        if (event.stage === "running") {
+          const progress = event.dataJson ? JSON.parse(event.dataJson) as { completed?: number; total?: number } : null;
+          setMediaTask((current) => current ? { ...current, status: "running", currentStep: event.message, progressCompleted: progress?.completed ?? current.progressCompleted, progressTotal: progress?.total ?? current.progressTotal } : current);
+        } else if (["completed", "failed", "cancelled"].includes(event.stage ?? "")) {
+          void finish().catch((taskError: unknown) => setError(taskError instanceof Error ? taskError.message : "任务状态加载失败。"));
+        }
+      },
+      () => {
+        void finish().then((status) => {
+          if (!["completed", "failed", "cancelled"].includes(status)) setMediaStreamRevision((current) => current + 1);
+        }).catch((taskError: unknown) => setError(taskError instanceof Error ? taskError.message : "任务状态加载失败。"));
+      },
+    );
+    return () => source.close();
+  }, [mediaTask?.id, mediaTask?.status, mediaStreamRevision, mediaTaskLabel, shotResourceId]);
 
   const shot = storyboard?.shots.find((item) => item.resourceId === shotResourceId);
   const savedAssociations = shot?.linkedAssets.map((item) => item.resourceId) ?? [];
@@ -4338,92 +5007,81 @@ export function StoryboardShotPage() {
     setTextRewriteOpen(true);
   };
   const createProductionPrompt = async () => {
-    if (!shot) return;
+    if (!shot || startingProduction || startingVideo) return;
     setStartingProduction(true);
     setError("");
     try {
-      const imagePrompt = await generateStoryboardImagePrompt(
+      const task = await generateStoryboardImagePrompt(
         projectId,
         productionEpisodeId,
         shot.resourceId,
         productionInstruction,
       );
-      setStoryboard((current) => current ? {
-        ...current,
-        shots: current.shots.map((item) => item.resourceId === shot.resourceId
-          ? { ...item, imagePrompt }
-          : item),
-      } : current);
+      setMediaTaskEvents([]);
+      setMediaTaskLabel("生成图片提示词");
+      setMediaTask(task);
       setProductionConfirmation(false);
       setProductionInstruction("");
     } catch (promptError) {
-      setError(promptError instanceof Error ? promptError.message : "图片提示词生成失败。");
-    } finally {
       setStartingProduction(false);
+      setError(promptError instanceof Error ? promptError.message : "图片提示词生成失败。");
     }
   };
   const startProduction = async () => {
-    if (!shot || !shot.imagePrompt) return;
+    if (!shot || !shot.imagePrompt || startingProduction || startingVideo) return;
     setStartingProduction(true);
     setError("");
     try {
-      const production = await generateStoryboardImage(
+      const task = await generateStoryboardImage(
         projectId,
         productionEpisodeId,
         shot.resourceId,
       );
-      setStoryboard((current) => current ? {
-        ...current,
-        shots: current.shots.map((item) => item.resourceId === shot.resourceId
-          ? { ...item, production }
-          : item),
-      } : current);
+      setMediaTaskEvents([]);
+      setMediaTaskLabel("生成镜头图片");
+      setMediaTask(task);
     } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "镜头图片生成失败。");
-    } finally {
       setStartingProduction(false);
+      setError(startError instanceof Error ? startError.message : "镜头图片生成失败。");
     }
   };
   const createVideoPrompt = async () => {
-    if (!shot) return;
+    if (!shot || startingProduction || startingVideo) return;
     setStartingVideo(true);
     setError("");
     try {
-      const videoPrompt = await generateStoryboardVideoPrompt(
+      const task = await generateStoryboardVideoPrompt(
         projectId,
         productionEpisodeId,
         shot.resourceId,
         videoInstruction,
       );
-      setStoryboard((current) => current ? {
-        ...current,
-        shots: current.shots.map((item) => item.resourceId === shot.resourceId
-          ? { ...item, videoPrompt }
-          : item),
-      } : current);
+      setMediaTaskEvents([]);
+      setMediaTaskLabel("生成视频提示词");
+      setMediaTask(task);
       setVideoConfirmation(false);
       setVideoInstruction("");
     } catch (promptError) {
-      setError(promptError instanceof Error ? promptError.message : "视频提示词生成失败。");
-    } finally {
       setStartingVideo(false);
+      setError(promptError instanceof Error ? promptError.message : "视频提示词生成失败。");
     }
   };
   const createVideo = async () => {
-    if (!shot || !shot.videoPrompt) return;
+    if (!shot || !shot.videoPrompt || startingProduction || startingVideo) return;
     setStartingVideo(true);
     setError("");
     try {
-      const started = await generateStoryboardVideo(
+      const task = await generateStoryboardVideo(
         projectId,
         productionEpisodeId,
         shot.resourceId,
       );
-      setVideo(started);
+      setMediaTaskEvents([]);
+      setMediaTaskLabel("创建镜头视频");
+      setMediaTask(task);
     } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "镜头视频任务创建失败。");
-    } finally {
       setStartingVideo(false);
+      setError(startError instanceof Error ? startError.message : "镜头视频任务创建失败。");
     }
   };
 
@@ -4495,28 +5153,6 @@ export function StoryboardShotPage() {
               onCancel={() => setEditingTextField(null)}
             />
           </div>
-          <div className="shot-production-actions">
-            <button
-              className="secondary-button"
-              onClick={() => { setProductionInstruction(shot.imagePrompt?.instruction ?? ""); setProductionConfirmation(true); }}
-              disabled={startingProduction || associationsDirty || associationDraft.length === 0}
-            >
-              <Sparkles size={14} />
-              {startingProduction ? "处理中" : shot.imagePrompt ? "重生成图片提示词" : "生成图片提示词"}
-            </button>
-            <button
-              className="primary-button"
-              onClick={() => void startProduction()}
-              disabled={!shot.imagePrompt
-                || startingProduction
-                || associationsDirty
-                || associationDraft.length === 0
-                || ["queued", "running"].includes(shot.production?.status ?? "")}
-            >
-              <ImagePlus size={14} />
-              {startingProduction ? "处理中" : shot.production?.outputUrl ? "重新生成图片" : "生成图片"}
-            </button>
-          </div>
         </header>
         <section className={`shot-directing-analysis ${shot.productionMode === "first-last-continuous" ? "continuous" : "direct"}`} aria-label="镜头执行分析">
           <div className="shot-directing-toolbar">
@@ -4576,116 +5212,118 @@ export function StoryboardShotPage() {
             ))}
           </section>
         )}
-        {(shot.production?.outputUrl || (shot.productionMode === "first-last-continuous" && shot.production?.lastFrameUrl)) && (
-          <section className="shot-output-gallery" aria-label="已生成镜头帧">
-            {shot.production.outputUrl && (
-              <div className="shot-output-item">
-                <div className="shot-output-frame-shell">
+        <section className="shot-media-panel" aria-label="镜头帧生产">
+          <header>
+            <div>
+              <span className="eyebrow">IMAGE PRODUCTION</span>
+              <strong>镜头画面</strong>
+              <p>{shot.productionMode === "first-last-continuous" ? "首帧与尾帧共同定义镜头运动边界" : "本镜头仅使用首帧作为视频生成基准"}</p>
+            </div>
+            <div className="shot-production-actions">
+              <button
+                className="secondary-button"
+                onClick={() => { setProductionInstruction(shot.imagePrompt?.instruction ?? ""); setProductionConfirmation(true); }}
+                disabled={startingProduction || startingVideo || associationsDirty || associationDraft.length === 0}
+              >
+                <Sparkles size={14} />
+                {mediaTask?.taskType === "storyboard-image-prompt" && !["completed", "failed", "cancelled"].includes(mediaTask.status) ? "生成中" : shot.imagePrompt ? "重生成图片提示词" : "生成图片提示词"}
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => void startProduction()}
+                disabled={!shot.imagePrompt
+                  || startingProduction
+                  || startingVideo
+                  || associationsDirty
+                  || associationDraft.length === 0
+                  || ["queued", "running"].includes(shot.production?.status ?? "")}
+              >
+                <ImagePlus size={14} />
+                {mediaTask?.taskType === "storyboard-image" && !["completed", "failed", "cancelled"].includes(mediaTask.status) ? "生成中" : shot.production?.outputUrl ? "重新生成图片" : "生成图片"}
+              </button>
+            </div>
+          </header>
+          <div className={`shot-frame-grid ${shot.productionMode === "direct-first-frame" ? "single" : ""}`}>
+            <article className="shot-media-card">
+              <div className="shot-media-card-heading">
+                <div><span className="shot-media-index">01</span><strong>首帧</strong></div>
+                <span className={`state-label ${shot.production?.outputUrl ? "completed" : "waiting"}`}>{shot.production?.outputUrl ? "已生成" : "待生成"}</span>
+              </div>
+              <div className="shot-output-frame-shell">
+                {shot.production?.outputUrl ? (
                   <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.outputUrl!, label: `${shotCode} 首帧` })} title="预览首帧">
                     <img src={shot.production.outputUrl} alt={`${shotCode} 首帧`} />
-                    <span>当前首帧</span>
                   </button>
-                  <button
-                    className="media-regenerate-button"
-                    type="button"
-                    onClick={() => void startProduction()}
-                    disabled={!shot.imagePrompt || startingProduction}
-                  >
-                    <RefreshCw size={13} />{shot.productionMode === "first-last-continuous"
-                      ? shot.production.lastFrameUrl ? "重新生成尾帧" : "生成尾帧"
-                      : "重新生成"}
-                  </button>
-                </div>
-                <div className="shot-output-meta">
-                  {shot.production.outputAssetId && <VersionPicker projectId={projectId} assetId={shot.production.outputAssetId} label="首帧版本" />}
-                  {shot.production.outputPrompt && (
-                    <details><summary>首帧提示词</summary><textarea readOnly rows={6} value={shot.production.outputPrompt} /></details>
-                  )}
-                </div>
+                ) : (
+                  <div className="shot-media-placeholder"><ImagePlus size={28} /><strong>首帧尚未生成</strong><small>生成后可点击放大预览</small></div>
+                )}
               </div>
-            )}
-            {shot.productionMode === "first-last-continuous" && shot.production.lastFrameUrl && (
-              <div className="shot-output-item">
+              <div className="shot-media-prompt">
+                <div><span className="eyebrow">{shot.production?.outputPrompt ? "首帧实际提示词" : "待执行图片提示词"}</span>{!shot.production?.outputPrompt && shot.imagePrompt && <small>v{shot.imagePrompt.version}</small>}</div>
+                <p className={!shot.production?.outputPrompt && !shot.imagePrompt?.prompt ? "empty" : ""}>{shot.production?.outputPrompt || shot.imagePrompt?.prompt || "尚未生成图片提示词"}</p>
+              </div>
+              {shot.production?.outputAssetId && <VersionPicker projectId={projectId} assetId={shot.production.outputAssetId} label="首帧版本" />}
+            </article>
+            {shot.productionMode === "first-last-continuous" && (
+              <article className="shot-media-card">
+                <div className="shot-media-card-heading">
+                  <div><span className="shot-media-index">02</span><strong>尾帧</strong></div>
+                  <span className={`state-label ${shot.production?.lastFrameUrl ? "completed" : "waiting"}`}>{shot.production?.lastFrameUrl ? "已生成" : "待生成"}</span>
+                </div>
                 <div className="shot-output-frame-shell">
-                  <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.lastFrameUrl!, label: `${shotCode} 尾帧` })} title="预览尾帧">
-                    <img src={shot.production.lastFrameUrl} alt={`${shotCode} 尾帧`} />
-                    <span>当前尾帧</span>
-                  </button>
-                  <button
-                    className="media-regenerate-button"
-                    type="button"
-                    onClick={() => void startProduction()}
-                    disabled={!shot.imagePrompt || startingProduction}
-                  >
-                    <RefreshCw size={13} />重新生成尾帧
-                  </button>
-                </div>
-                <div className="shot-output-meta">
-                  {shot.production.lastFrameAssetId && <VersionPicker projectId={projectId} assetId={shot.production.lastFrameAssetId} label="尾帧版本" />}
-                  {shot.production.lastFramePrompt && (
-                    <details><summary>尾帧提示词</summary><textarea readOnly rows={6} value={shot.production.lastFramePrompt} /></details>
+                  {shot.production?.lastFrameUrl ? (
+                    <button className="shot-output-frame" type="button" onClick={() => setFramePreview({ url: shot.production!.lastFrameUrl!, label: `${shotCode} 尾帧` })} title="预览尾帧">
+                      <img src={shot.production.lastFrameUrl} alt={`${shotCode} 尾帧`} />
+                    </button>
+                  ) : (
+                    <div className="shot-media-placeholder"><ImagePlus size={28} /><strong>尾帧尚未生成</strong><small>用于约束镜头结束状态</small></div>
                   )}
                 </div>
-              </div>
+                <div className="shot-media-prompt">
+                  <div><span className="eyebrow">尾帧实际提示词</span></div>
+                  <p className={!shot.production?.lastFramePrompt ? "empty" : ""}>{shot.production?.lastFramePrompt || "生成尾帧后显示实际使用的提示词"}</p>
+                </div>
+                {shot.production?.lastFrameAssetId && <VersionPicker projectId={projectId} assetId={shot.production.lastFrameAssetId} label="尾帧版本" />}
+              </article>
             )}
-          </section>
-        )}
-        <section className="shot-video-panel" aria-label="镜头视频">
+          </div>
+        </section>
+        <section className="shot-media-panel shot-video-panel" aria-label="镜头视频">
           <header>
             <div>
               <span className="eyebrow">MINIMAX H3 / TURBO 4-STEP</span>
               <strong>镜头视频</strong>
-              <p>{video?.status === "failed" ? video.error : video?.status === "completed" ? `当前视频 v${video.version}` : video ? productionStatusLabel(video.status) : "尚未生成"}</p>
+              <p>{video?.status === "failed" ? video.error : video?.status === "completed" ? `当前视频 v${video.version}` : video ? productionStatusLabel(video.status) : "由镜头画面与视频提示词生成"}</p>
             </div>
             <div className="shot-production-actions">
               {video && <span className={`state-label ${video.status}`}>{productionStatusLabel(video.status)}</span>}
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => { setVideoInstruction(shot.videoPrompt?.instruction ?? ""); setVideoConfirmation(true); }}
-                disabled={!shot.production?.outputAssetId || startingVideo}
-              >
+              <button className="secondary-button" type="button" onClick={() => { setVideoInstruction(shot.videoPrompt?.instruction ?? ""); setVideoConfirmation(true); }} disabled={!shot.production?.outputAssetId || startingVideo || startingProduction}>
                 <Sparkles size={14} />{startingVideo ? "处理中" : shot.videoPrompt ? "重生成视频提示词" : "生成视频提示词"}
               </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => void createVideo()}
-                disabled={!shot.videoPrompt || startingVideo || ["queued", "running"].includes(video?.status ?? "")}
-              >
-                <Play size={14} />
-                {startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : video?.url ? "重新生成视频" : "生成视频"}
+              <button className="primary-button" type="button" onClick={() => void createVideo()} disabled={!shot.videoPrompt || startingVideo || startingProduction || ["queued", "running"].includes(video?.status ?? "")}>
+                <Play size={14} />{startingVideo ? "处理中" : ["queued", "running"].includes(video?.status ?? "") ? "正在生成" : video?.url ? "重新生成视频" : "生成视频"}
               </button>
               {video && <NavLink className="secondary-button" to={`/projects/${projectId}/production/runs/${video.runId}`}>查看运行</NavLink>}
             </div>
           </header>
-          {shot.videoPrompt && !video?.url && (
-            <details className="shot-saved-prompt" open={!video?.url}>
-              <summary>当前视频提示词 · v{shot.videoPrompt.version}</summary>
-              <textarea readOnly rows={8} value={shot.videoPrompt.prompt} />
-            </details>
-          )}
-          {video?.url && (
-            <div className="shot-video-output">
-              <div className="shot-video-shell">
-                <video controls preload="metadata" src={video.url}>
-                  <track kind="captions" />
-                </video>
-                <button
-                  className="media-regenerate-button"
-                  type="button"
-                  onClick={() => void createVideo()}
-                  disabled={!shot.videoPrompt || startingVideo}
-                >
-                  <RefreshCw size={13} />重新生成
-                </button>
-              </div>
-              <div className="shot-output-meta">
-                {video.assetId && <VersionPicker projectId={projectId} assetId={video.assetId} label="视频版本" />}
-                <details><summary>视频提示词</summary><textarea readOnly rows={8} value={video.prompt} /></details>
-              </div>
+          <article className="shot-media-card shot-video-card">
+            <div className="shot-media-card-heading">
+              <div><span className="shot-media-index">MOV</span><strong>视频成片</strong></div>
+              <span className={`state-label ${video?.status ?? "waiting"}`}>{video ? productionStatusLabel(video.status) : "待生成"}</span>
             </div>
-          )}
+            <div className="shot-video-shell">
+              {video?.url ? (
+                <video controls preload="metadata" src={video.url}><track kind="captions" /></video>
+              ) : (
+                <div className="shot-media-placeholder video"><Play size={30} /><strong>视频尚未生成</strong><small>{shot.videoPrompt ? "提示词已就绪，可以开始生成" : "请先生成视频提示词"}</small></div>
+              )}
+            </div>
+            <div className="shot-media-prompt">
+              <div><span className="eyebrow">{video?.prompt ? "视频实际提示词" : "待执行视频提示词"}</span>{!video?.prompt && shot.videoPrompt && <small>v{shot.videoPrompt.version}</small>}</div>
+              <p className={!video?.prompt && !shot.videoPrompt?.prompt ? "empty" : ""}>{video?.prompt || shot.videoPrompt?.prompt || "尚未生成视频提示词"}</p>
+            </div>
+            {video?.assetId && <VersionPicker projectId={projectId} assetId={video.assetId} label="视频版本" />}
+          </article>
         </section>
         <div className="shot-associations">
           <div className="shot-association-heading">
@@ -4820,12 +5458,36 @@ export function StoryboardShotPage() {
             </label>
             <div>
               <button className="secondary-button" type="button" onClick={() => setVideoConfirmation(false)}>取消</button>
-              <button className="primary-button" type="submit" disabled={startingVideo}>
+              <button className="primary-button" type="submit" disabled={startingVideo || startingProduction}>
                 <Sparkles size={13} />
                 {startingVideo ? "正在生成" : "生成提示词"}
               </button>
             </div>
           </form>
+        </div>
+      )}
+      {mediaTask && (
+        <div className="modal-backdrop production-generation-backdrop">
+          <section className="dialog production-generation-dialog" role="dialog" aria-modal="true" aria-labelledby="shot-media-task-title">
+            <header>
+              <div><span className="eyebrow">SHOT TASK</span><h2 id="shot-media-task-title">{mediaTaskLabel}</h2></div>
+              <span className={`generation-task-state ${mediaTask.status}`}>{mediaTask.status === "completed" ? "已完成" : mediaTask.status === "failed" ? "失败" : mediaTask.status === "cancelled" ? "已取消" : "处理中"}</span>
+            </header>
+            <div className="batch-generation-progress">
+              <progress max={mediaTask.progressTotal ?? 1} value={mediaTask.status === "completed" ? mediaTask.progressTotal ?? 1 : mediaTask.progressCompleted} />
+              <span>{mediaTask.progressTotal ? `${mediaTask.progressCompleted} / ${mediaTask.progressTotal}` : "模型处理中"}</span>
+            </div>
+            {mediaTask.status === "failed" && <div className="generation-failure-reason" role="alert"><strong>失败原因</strong><p>{mediaTaskEvents.findLast((event) => event.eventType === "failure")?.message ?? mediaTask.lastError ?? `${mediaTaskLabel}失败，后端未返回具体原因。`}</p></div>}
+            <div className="generation-stream" role="log" aria-live="polite">
+              {mediaTaskEvents.length === 0 && <div className="generation-stream-entry active"><span>00</span><p>正在建立任务连接...</p></div>}
+              {mediaTaskEvents.map((event) => <div className={`generation-stream-entry ${event.stage ?? ""}`} key={event.sequence}><span>{String(event.sequence).padStart(2, "0")}</span><p>{event.message}</p><time>{new Date(event.createdAtUtc).toLocaleTimeString("zh-CN", { hour12: false })}</time></div>)}
+            </div>
+            <footer>
+              <span>{mediaTask.status === "completed" ? `${mediaTaskLabel}已完成并刷新。` : mediaTask.status === "failed" || mediaTask.status === "cancelled" ? mediaTask.lastError ?? `${mediaTaskLabel}未完成。` : mediaTask.currentStep}</span>
+              {!['completed', 'failed', 'cancelled'].includes(mediaTask.status) && <button className="secondary-button" type="button" onClick={() => void cancelGenerationTask(mediaTask.id).then(setMediaTask).catch((cancelError: unknown) => setError(cancelError instanceof Error ? cancelError.message : '停止生成任务失败。'))}>停止</button>}
+              {["completed", "failed", "cancelled"].includes(mediaTask.status) && <button className={mediaTask.status === "completed" ? "primary-button" : "secondary-button"} type="button" onClick={() => setMediaTask(null)}>{mediaTask.status === "completed" ? "完成" : "关闭"}</button>}
+            </footer>
+          </section>
         </div>
       )}
       {productionConfirmation && (
@@ -4852,7 +5514,7 @@ export function StoryboardShotPage() {
             </label>
             <div>
               <button className="secondary-button" type="button" onClick={() => setProductionConfirmation(false)}>取消</button>
-              <button className="primary-button" type="submit" disabled={startingProduction}>
+              <button className="primary-button" type="submit" disabled={startingProduction || startingVideo}>
                 <Sparkles size={13} />
                 {startingProduction ? "正在生成" : "生成提示词"}
               </button>

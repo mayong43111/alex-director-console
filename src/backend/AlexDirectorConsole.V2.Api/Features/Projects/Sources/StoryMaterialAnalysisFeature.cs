@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Agents;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
@@ -55,7 +56,8 @@ internal sealed record StoryChapterMaterialAnalysis(
     IReadOnlyList<StoryPlotBeatMaterial> PlotBeats,
     IReadOnlyList<StoryRelationMaterial> Relations,
     string Model,
-    string Runtime);
+    string Runtime,
+    string? ContentFingerprint = null);
 
 public sealed record StoryMaterialAnalysisResult(
     string Summary,
@@ -151,24 +153,35 @@ public sealed class AnalyzeStoryMaterialCommandHandler(
             item => item.Id == sourceState.CurrentAssetId,
             cancellationToken);
         var source = ProjectSourceMapper.ToView(sourceAsset);
-        var targetChapters = command.ChapterId is Guid chapterId
-            ? source.Chapters.Where(item => item.Id == chapterId).ToArray()
-            : source.Chapters.ToArray();
-        if (targetChapters.Length == 0) return null;
-
         var previous = await StoryMaterialAnalysisQueries.FindCurrentAssetAsync(
             dbContext,
             command.ProjectId,
             command.SourceResourceId,
             cancellationToken);
+        var previousChapterAnalyses = previous.Asset is null
+            ? []
+            : StoryMaterialAnalysisQueries.ReadDocument(previous.Asset).ChapterAnalyses?.ToList() ?? [];
+        var targetChapters = command.ChapterId is Guid chapterId
+            ? source.Chapters.Where(item => item.Id == chapterId).ToArray()
+            : source.Chapters.Where(chapter => !previousChapterAnalyses.Any(previousChapter =>
+                StoryMaterialAnalysisQueries.MatchesChapter(previousChapter, chapter))).ToArray();
+        if (targetChapters.Length == 0)
+        {
+            return previous.Asset is null || previous.State is null
+                ? null
+                : StoryMaterialAnalysisQueries.ToView(
+                    previous.Asset,
+                    previous.State,
+                    StoryMaterialAnalysisQueries.ReadDocument(previous.Asset),
+                    source);
+        }
+
         var currentChapterIds = source.Chapters.Select(item => item.Id).ToHashSet();
         var targetChapterIds = targetChapters.Select(item => item.Id).ToHashSet();
-        var chapterAnalyses = previous.Asset is null
-            ? []
-            : StoryMaterialAnalysisQueries.ReadDocument(previous.Asset).ChapterAnalyses?
-                .Where(item => currentChapterIds.Contains(item.ChapterId)
-                    && !targetChapterIds.Contains(item.ChapterId))
-                .ToList() ?? [];
+        var chapterAnalyses = previousChapterAnalyses
+            .Where(item => currentChapterIds.Contains(item.ChapterId)
+                && !targetChapterIds.Contains(item.ChapterId))
+            .ToList();
         foreach (var chapter in targetChapters)
         {
             var result = await analyzer.AnalyzeAsync(project.Name, [chapter], cancellationToken);
@@ -198,7 +211,8 @@ public sealed class AnalyzeStoryMaterialCommandHandler(
                     ChapterIds = [chapter.Id]
                 }).ToArray(),
                 result.Model,
-                result.Runtime));
+                result.Runtime,
+                StoryMaterialAnalysisQueries.GetChapterFingerprint(chapter)));
         }
 
         var document = StoryMaterialAnalysisQueries.AggregateDocument(source, chapterAnalyses);
@@ -268,7 +282,7 @@ public sealed class AnalyzeStoryMaterialCommandHandler(
         state.UpdatedAtUtc = now;
         await dbContext.SaveChangesAsync(cancellationToken);
 
-        return StoryMaterialAnalysisQueries.ToView(asset, state, document);
+        return StoryMaterialAnalysisQueries.ToView(asset, state, document, source);
     }
 }
 
@@ -289,7 +303,20 @@ internal static class StoryMaterialAnalysisQueries
             cancellationToken);
         if (current.Asset is null || current.State is null) return null;
         var document = ReadDocument(current.Asset);
-        return ToView(current.Asset, current.State, document);
+        var sourceState = await dbContext.ResourceStates.AsNoTracking().SingleOrDefaultAsync(
+            item => item.ProjectId == projectId
+                && item.ResourceId == sourceResourceId
+                && item.ResourceType == ProjectSourceDefaults.AssetType,
+            cancellationToken);
+        if (sourceState is null) return null;
+        var sourceAsset = await dbContext.Assets.AsNoTracking().SingleAsync(
+            item => item.Id == sourceState.CurrentAssetId,
+            cancellationToken);
+        return ToView(
+            current.Asset,
+            current.State,
+            document,
+            ProjectSourceMapper.ToView(sourceAsset));
     }
 
     public static async Task<(Asset? Asset, ResourceState? State)> FindCurrentAssetAsync(
@@ -316,6 +343,17 @@ internal static class StoryMaterialAnalysisQueries
             asset.DocumentJson ?? throw new InvalidOperationException("素材分析缺少文档内容。"),
             ProjectSourceDefaults.JsonOptions)
         ?? throw new InvalidOperationException("素材分析内容无效。");
+
+    public static string GetChapterFingerprint(SourceChapterView chapter) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{chapter.Title}\n{chapter.Content}")));
+
+    public static bool MatchesChapter(
+        StoryChapterMaterialAnalysis analysis,
+        SourceChapterView chapter) =>
+        analysis.ChapterId == chapter.Id
+        && analysis.ContentFingerprint is not null
+        && analysis.ContentFingerprint == GetChapterFingerprint(chapter);
 
     public static StoryMaterialAnalysisDocument AggregateDocument(
         ProjectSourceView source,
@@ -395,7 +433,8 @@ internal static class StoryMaterialAnalysisQueries
     public static StoryMaterialAnalysisView ToView(
         Asset asset,
         ResourceState state,
-        StoryMaterialAnalysisDocument document) => new(
+        StoryMaterialAnalysisDocument document,
+        ProjectSourceView? currentSource = null) => new(
             asset.Id,
             asset.ResourceId,
             asset.Version,
@@ -409,7 +448,12 @@ internal static class StoryMaterialAnalysisQueries
             document.Locations,
             document.PlotBeats,
             document.Relations,
-            document.ChapterAnalyses?.Select(item => item.ChapterId).Distinct().ToArray() ?? [],
+            currentSource is null
+                ? document.ChapterAnalyses?.Select(item => item.ChapterId).Distinct().ToArray() ?? []
+                : currentSource.Chapters
+                    .Where(chapter => document.ChapterAnalyses?.Any(analysis => MatchesChapter(analysis, chapter)) == true)
+                    .Select(chapter => chapter.Id)
+                    .ToArray(),
             document.Model,
             document.Runtime,
             asset.UpdatedAtUtc);

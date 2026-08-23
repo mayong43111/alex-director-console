@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
@@ -60,6 +61,14 @@ public sealed record SaveVisualAssetCommand(
 
 public sealed record ImportStoryMaterialAssetsCommand(Guid ProjectId)
     : ICommand<IReadOnlyList<VisualAssetView>?>;
+
+public sealed record ScriptMaterialAnalysisStatusView(
+    Guid SourceAssetId,
+    int EpisodeNumber,
+    string Title,
+    string ScriptType,
+    int Version,
+    bool IsAnalyzed);
 
 public enum SaveVisualAssetStatus
 {
@@ -258,71 +267,78 @@ public sealed class ImportStoryMaterialAssetsCommandHandler(
             return null;
         }
 
-        var analysisAssets = await (
-            from state in dbContext.ResourceStates.AsNoTracking()
-            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
-            where state.ProjectId == command.ProjectId
-                && state.ResourceType == StoryMaterialAnalysisQueries.AssetType
-                && asset.Type == StoryMaterialAnalysisQueries.AssetType
-            select asset)
-            .ToListAsync(cancellationToken);
-        var analysisAsset = analysisAssets
-            .OrderByDescending(item => item.UpdatedAtUtc)
-            .FirstOrDefault();
-        if (analysisAsset is null) return [];
+        var scriptSources = await LoadScriptSourcesAsync(dbContext, command.ProjectId, cancellationToken);
+        if (scriptSources.Count == 0) return [];
+        var markers = await LoadMarkersAsync(dbContext, command.ProjectId, cancellationToken);
+        var pendingSources = scriptSources
+            .Where(source => !markers.Any(marker =>
+                marker.SourceAssetId == source.AssetId && marker.EpisodeNumber == source.EpisodeNumber))
+            .ToArray();
+        if (pendingSources.Length == 0)
+        {
+            return await new ListVisualAssetsQueryHandler(dbContext).HandleAsync(
+                new ListVisualAssetsQuery(command.ProjectId, null),
+                cancellationToken);
+        }
 
-        var analysis = StoryMaterialAnalysisQueries.ReadDocument(analysisAsset);
-        var adaptationAssets = await (
-            from state in dbContext.ResourceStates.AsNoTracking()
-            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
-            where state.ProjectId == command.ProjectId
-                && state.ResourceType == AdaptationScriptQueries.AssetType
-                && asset.Type == AdaptationScriptQueries.AssetType
-            select asset)
-            .ToListAsync(cancellationToken);
-        var adaptationAsset = adaptationAssets
-            .OrderByDescending(item => item.UpdatedAtUtc)
-            .FirstOrDefault();
-        var adaptation = adaptationAsset is null
-            ? null
-            : AdaptationScriptQueries.ReadDocument(adaptationAsset);
         var existing = await new ListVisualAssetsQueryHandler(dbContext).HandleAsync(
             new ListVisualAssetsQuery(command.ProjectId, null, true),
             cancellationToken);
         var existingKeys = existing
             .Select(item => $"{item.Kind}\n{item.Name}")
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var propGroups = adaptation?.Episodes
-            .SelectMany(episode => episode.Scenes.SelectMany(scene => scene.Props.Select(prop => new
+        var scenes = pendingSources.SelectMany(source => source.Scenes.Select(scene => new
+        {
+            Source = source,
+            Scene = scene,
+            Reference = $"E{source.EpisodeNumber:D2}《{source.Title}》 · {scene.Heading}"
+        })).ToArray();
+        var characterGroups = scenes
+            .SelectMany(item => item.Scene.Characters.Select(character => new
             {
-                Name = prop.Trim(),
-                Reference = $"{episode.Title} · {scene.Heading}"
-            })))
+                Name = character.Trim(),
+                item.Source,
+                item.Reference
+            }))
             .Where(item => item.Name.Length > 0)
             .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray() ?? [];
+            .ToArray();
+        var sceneGroups = scenes
+            .Where(item => !string.IsNullOrWhiteSpace(item.Scene.Heading))
+            .GroupBy(item => item.Scene.Heading.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var propGroups = scenes
+            .SelectMany(item => item.Scene.Props.Select(prop => new
+            {
+                Name = prop.Trim(),
+                item.Source,
+                item.Reference
+            }))
+            .Where(item => item.Name.Length > 0)
+            .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         var productionPropNames = propGroups
             .Where(group => SpecialPropPolicy.RequiresAsset(group.Key, group.Count()))
             .Select(group => group.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var requests = analysis.Characters.Select(item => new SaveVisualAssetRequest(
+        var requests = characterGroups.Select(group => new SaveVisualAssetRequest(
                 "character",
-                item.Name,
-                $"{item.Role} · {item.Goal}",
-                string.Join("、", item.Traits),
+                group.Key,
+                $"出现于 {group.Select(item => item.Source.EpisodeNumber).Distinct().Count()} 集剧本",
+                string.Empty,
                 [],
                 [],
-                item.ChapterNumbers.Select(number => $"第 {number} 章").ToArray(),
-                analysisAsset.Id))
-            .Concat(analysis.Locations.Select(item => new SaveVisualAssetRequest(
+                group.Select(item => item.Reference).Distinct().ToArray(),
+                group.First().Source.AssetId))
+            .Concat(sceneGroups.Select(group => new SaveVisualAssetRequest(
                 "scene",
-                item.Name,
-                item.Function,
-                item.Atmosphere,
+                group.Key,
+                string.Join("；", group.Select(item => item.Scene.Summary).Where(value => value.Length > 0).Distinct().Take(3)),
+                string.Join("；", group.Select(item => item.Scene.VisualDescription).Where(value => value.Length > 0).Distinct().Take(3)),
                 [],
                 [],
-                item.ChapterNumbers.Select(number => $"第 {number} 章").ToArray(),
-                analysisAsset.Id)))
+                group.Select(item => item.Reference).Distinct().ToArray(),
+                group.First().Source.AssetId)))
             .Concat(propGroups
                 .Where(group => productionPropNames.Contains(group.Key))
                 .Select(group => new SaveVisualAssetRequest(
@@ -332,46 +348,10 @@ public sealed class ImportStoryMaterialAssetsCommandHandler(
                     string.Empty,
                     [],
                     [],
-                        group.Select(item => item.Reference).Distinct().ToArray(),
-                        adaptationAsset!.Id)))
+                    group.Select(item => item.Reference).Distinct().ToArray(),
+                    group.First().Source.AssetId)))
             .Where(item => existingKeys.Add($"{item.Kind}\n{item.Name}"))
             .ToArray();
-
-        if (adaptationAsset is not null)
-        {
-            var adaptationAssetIds = await dbContext.Assets.AsNoTracking()
-                .Where(item => item.ProjectId == command.ProjectId
-                    && item.Type == AdaptationScriptQueries.AssetType)
-                .Select(item => item.Id)
-                .ToArrayAsync(cancellationToken);
-            var importedAssets = await (
-                from state in dbContext.ResourceStates
-                join asset in dbContext.Assets on state.CurrentAssetId equals asset.Id
-                where state.ProjectId == command.ProjectId
-                    && state.ResourceType == VisualAssetDefaults.AssetType
-                    && asset.Type == VisualAssetDefaults.AssetType
-                select new { Asset = asset, State = state })
-                .ToListAsync(cancellationToken);
-            var now = timeProvider.GetUtcNow();
-            foreach (var item in importedAssets)
-            {
-                var document = JsonSerializer.Deserialize<VisualAssetDocument>(
-                    item.Asset.DocumentJson ?? "{}",
-                    VisualAssetDefaults.JsonOptions);
-                if (document?.Kind != "prop"
-                    || document.SourceAssetId is not Guid sourceAssetId
-                    || !adaptationAssetIds.Contains(sourceAssetId))
-                {
-                    continue;
-                }
-
-                item.State.LifecycleStatus = productionPropNames.Contains(document.Name)
-                    ? "draft"
-                    : "retired";
-                item.State.UpdatedAtUtc = now;
-            }
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
 
         var handler = new SaveVisualAssetCommandHandler(dbContext, timeProvider);
         foreach (var request in requests)
@@ -381,11 +361,213 @@ public sealed class ImportStoryMaterialAssetsCommandHandler(
                 cancellationToken);
         }
 
+        var now = timeProvider.GetUtcNow();
+        var nextNumber = (await dbContext.Assets
+            .Where(item => item.ProjectId == command.ProjectId)
+            .Select(item => (int?)item.Number)
+            .MaxAsync(cancellationToken) ?? 0) + 1;
+        foreach (var source in pendingSources)
+        {
+            var marker = new ScriptMaterialAnalysisMarker(
+                source.AssetId,
+                source.EpisodeNumber,
+                source.Title,
+                source.ScriptType,
+                source.Scenes.SelectMany(scene => scene.Characters).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                source.Scenes.Select(scene => scene.Heading).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            var markerJson = JsonSerializer.Serialize(marker, VisualAssetDefaults.JsonOptions);
+            var markerAsset = new Asset
+            {
+                ProjectId = command.ProjectId,
+                ResourceId = Guid.NewGuid(),
+                Version = 1,
+                Number = nextNumber++,
+                Type = ScriptMaterialAnalysisQueries.AssetType,
+                SchemaVersion = 1,
+                Name = $"E{source.EpisodeNumber:D2}《{source.Title}》素材分析",
+                DocumentJson = markerJson,
+                ContentType = "application/json",
+                SizeBytes = Encoding.UTF8.GetByteCount(markerJson),
+                ProductionEpisodeId = source.ProductionEpisodeId,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            dbContext.Assets.Add(markerAsset);
+            dbContext.ResourceStates.Add(new ResourceState
+            {
+                ProjectId = command.ProjectId,
+                ResourceId = markerAsset.ResourceId,
+                ResourceType = ScriptMaterialAnalysisQueries.AssetType,
+                CurrentAssetId = markerAsset.Id,
+                LifecycleStatus = "current",
+                UpdatedAtUtc = now
+            });
+            dbContext.AssetDependencies.Add(new AssetDependency
+            {
+                ProjectId = command.ProjectId,
+                ConsumerAssetId = markerAsset.Id,
+                SourceAssetId = source.AssetId,
+                Role = "analyzes-script-materials",
+                IsRequired = true,
+                CreatedAtUtc = now
+            });
+        }
+        await dbContext.SaveChangesAsync(cancellationToken);
+
         return await new ListVisualAssetsQueryHandler(dbContext).HandleAsync(
             new ListVisualAssetsQuery(command.ProjectId, null),
             cancellationToken);
     }
+
+    public static async Task<IReadOnlyList<ScriptMaterialAnalysisStatusView>> GetStatusesAsync(
+        V2DbContext dbContext,
+        Guid projectId,
+        CancellationToken cancellationToken)
+    {
+        var sources = await LoadScriptSourcesAsync(dbContext, projectId, cancellationToken);
+        var markers = await LoadMarkersAsync(dbContext, projectId, cancellationToken);
+        return sources.Select(source => new ScriptMaterialAnalysisStatusView(
+            source.AssetId,
+            source.EpisodeNumber,
+            source.Title,
+            source.ScriptType,
+            source.Version,
+            markers.Any(marker => marker.SourceAssetId == source.AssetId
+                && marker.EpisodeNumber == source.EpisodeNumber))).ToArray();
+    }
+
+    private static async Task<IReadOnlyList<ScriptMaterialSource>> LoadScriptSourcesAsync(
+        V2DbContext dbContext,
+        Guid projectId,
+        CancellationToken cancellationToken)
+    {
+        var formalRows = await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
+            join episode in dbContext.ProductionEpisodes.AsNoTracking() on asset.ProductionEpisodeId equals episode.Id
+            where state.ProjectId == projectId
+                && state.ResourceType == "script-package"
+                && asset.Type == "script-package"
+            select new { Asset = asset, Episode = episode })
+            .ToListAsync(cancellationToken);
+        var formalSources = formalRows.Select(row =>
+        {
+            var document = JsonSerializer.Deserialize<ProductionScriptPackageDocument>(
+                row.Asset.DocumentJson ?? "{}",
+                ProjectSourceDefaults.JsonOptions);
+            var scenes = document?.Script?.Scenes.Select(scene => new ScriptMaterialScene(
+                    scene.Heading,
+                    scene.Summary,
+                    scene.VisualContrast,
+                    scene.Characters,
+                    scene.Props))
+                ?? document?.Episode?.Scenes.Select(scene => new ScriptMaterialScene(
+                    scene.Heading,
+                    scene.Summary,
+                    scene.VisualContrast ?? string.Empty,
+                    scene.Characters ?? [],
+                    scene.Props ?? []))
+                ?? [];
+            return new ScriptMaterialSource(
+                row.Asset.Id,
+                row.Asset.ResourceId,
+                row.Asset.Version,
+                row.Episode.Id,
+                row.Episode.EpisodeNumber,
+                row.Episode.Title,
+                "正式剧本",
+                scenes.ToArray());
+        }).ToList();
+
+        var coveredEpisodeIds = formalSources
+            .Where(item => item.ProductionEpisodeId is not null)
+            .Select(item => item.ProductionEpisodeId!.Value)
+            .ToHashSet();
+        var adaptationAssets = await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == projectId
+                && state.ResourceType == AdaptationScriptQueries.AssetType
+                && asset.Type == AdaptationScriptQueries.AssetType
+            select asset)
+            .ToListAsync(cancellationToken);
+        foreach (var asset in adaptationAssets)
+        {
+            var document = AdaptationScriptQueries.ReadDocument(asset);
+            foreach (var episode in document.Episodes)
+            {
+                if (document.ProductionEpisodeMap?.TryGetValue(episode.ProposalNumber, out var productionEpisodeId) == true
+                    && coveredEpisodeIds.Contains(productionEpisodeId))
+                {
+                    continue;
+                }
+                formalSources.Add(new ScriptMaterialSource(
+                    asset.Id,
+                    asset.ResourceId,
+                    asset.Version,
+                    null,
+                    episode.ProposalNumber,
+                    episode.Title,
+                    "改编方案",
+                    episode.Scenes.Select(scene => new ScriptMaterialScene(
+                        scene.Heading,
+                        scene.Summary,
+                        scene.VisualContrast ?? string.Empty,
+                        scene.Characters ?? [],
+                        scene.Props ?? [])).ToArray()));
+            }
+        }
+        return formalSources.OrderBy(item => item.EpisodeNumber).ToArray();
+    }
+
+    private static async Task<IReadOnlyList<ScriptMaterialAnalysisMarker>> LoadMarkersAsync(
+        V2DbContext dbContext,
+        Guid projectId,
+        CancellationToken cancellationToken)
+    {
+        var documents = await dbContext.Assets.AsNoTracking()
+            .Where(item => item.ProjectId == projectId
+                && item.Type == ScriptMaterialAnalysisQueries.AssetType
+                && item.DocumentJson != null)
+            .Select(item => item.DocumentJson!)
+            .ToListAsync(cancellationToken);
+        return documents.Select(document => JsonSerializer.Deserialize<ScriptMaterialAnalysisMarker>(
+                document,
+                VisualAssetDefaults.JsonOptions))
+            .OfType<ScriptMaterialAnalysisMarker>()
+            .ToArray();
+    }
 }
+
+internal static class ScriptMaterialAnalysisQueries
+{
+    public const string AssetType = "script-material-analysis";
+}
+
+internal sealed record ScriptMaterialAnalysisMarker(
+    Guid SourceAssetId,
+    int EpisodeNumber,
+    string Title,
+    string ScriptType,
+    int CharacterCount,
+    int SceneCount);
+
+internal sealed record ScriptMaterialSource(
+    Guid AssetId,
+    Guid ResourceId,
+    int Version,
+    Guid? ProductionEpisodeId,
+    int EpisodeNumber,
+    string Title,
+    string ScriptType,
+    IReadOnlyList<ScriptMaterialScene> Scenes);
+
+internal sealed record ScriptMaterialScene(
+    string Heading,
+    string Summary,
+    string VisualDescription,
+    IReadOnlyList<string> Characters,
+    IReadOnlyList<string> Props);
 
 internal static class SpecialPropPolicy
 {
@@ -538,6 +720,41 @@ public static class VisualAssetEndpoints
                 new ImportStoryMaterialAssetsCommand(projectId),
                 cancellationToken);
             return assets is null ? Results.NotFound() : Results.Ok(assets);
+        });
+
+        group.MapGet("/script-material-analysis-status", async (
+            Guid projectId,
+            V2DbContext dbContext,
+            CancellationToken cancellationToken) => Results.Ok(
+                await ImportStoryMaterialAssetsCommandHandler.GetStatusesAsync(
+                    dbContext,
+                    projectId,
+                    cancellationToken)));
+
+        group.MapPost("/import-script-materials/tasks", async (
+            Guid projectId,
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) =>
+        {
+            var task = await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryMaterialAssets,
+                "从剧本提取视觉资产",
+                new GenerationTaskPayload(projectId),
+                cancellationToken);
+            return Results.Accepted($"/api/v2/tasks/{task.Id}", task);
+        });
+
+        group.MapPost("/import-story-materials/tasks", async (
+            Guid projectId,
+            IGenerationTaskScheduler scheduler,
+            CancellationToken cancellationToken) =>
+        {
+            var task = await scheduler.EnqueueAsync(
+                GenerationTaskTypes.StoryMaterialAssets,
+                "从故事资料建立视觉资产",
+                new GenerationTaskPayload(projectId),
+                cancellationToken);
+            return Results.Accepted($"/api/v2/tasks/{task.Id}", task);
         });
 
         group.MapVisualReferenceEndpoints();

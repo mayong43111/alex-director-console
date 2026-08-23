@@ -299,7 +299,14 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
 public interface IShotVideoService
 {
     Task<ShotVideoPreview?> PreviewAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string? instruction, CancellationToken cancellationToken);
-    Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, string? instruction, CancellationToken cancellationToken);
+    Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, string? instruction, CancellationToken cancellationToken, bool enqueueBackgroundJob = true);
+    Task<ShotVideoProductionView> WaitForCompletionAsync(
+        Guid projectId,
+        Guid episodeId,
+        Guid shotResourceId,
+        Guid runId,
+        Func<ShotVideoProductionView, Task>? reportProgress,
+        CancellationToken cancellationToken);
     Task<bool> ProcessNextAsync(CancellationToken cancellationToken);
     Task<bool> ProcessAsync(Guid runId, CancellationToken cancellationToken);
 }
@@ -331,7 +338,7 @@ public sealed class ShotVideoService(
         if (context is null) return null;
         var workflow = await workflowProvider.ReadAsync(cancellationToken);
         var draft = await promptAgent.GenerateAsync(BuildAgentInput(context, instruction), cancellationToken);
-        var prompt = BuildPrompt(context.Shot, draft, context.Settings.VideoPromptModel);
+        var prompt = BuildPrompt(context.Shot, context.Characters, context.SpeakerIds, draft, context.Settings.VideoPromptModel);
         return BuildPreview(context, prompt, workflow);
     }
 
@@ -376,7 +383,8 @@ public sealed class ShotVideoService(
         string prompt,
         string previewHash,
         string? instruction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool enqueueBackgroundJob = true)
     {
         var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
         if (context is null) return null;
@@ -507,21 +515,60 @@ public sealed class ShotVideoService(
             CreatedAtUtc = now
         });
         await dbContext.SaveChangesAsync(cancellationToken);
-        var jobId = backgroundJobs.Enqueue<ShotVideoJob>(
-            job => job.ExecuteAsync(run.Id, CancellationToken.None));
-        task.PlanJson = JsonSerializer.Serialize(new { hangfireJobId = jobId }, StoryboardDefaults.JsonOptions);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        if (enqueueBackgroundJob)
+        {
+            var jobId = backgroundJobs.Enqueue<ShotVideoJob>(
+                job => job.ExecuteAsync(run.Id, CancellationToken.None));
+            task.PlanJson = JsonSerializer.Serialize(new { hangfireJobId = jobId }, StoryboardDefaults.JsonOptions);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
         return new(run.Id, run.Status, run.CurrentStage, null, null, null, preview.Prompt, now, null);
+    }
+
+    public async Task<ShotVideoProductionView> WaitForCompletionAsync(
+        Guid projectId,
+        Guid episodeId,
+        Guid shotResourceId,
+        Guid runId,
+        Func<ShotVideoProductionView, Task>? reportProgress,
+        CancellationToken cancellationToken)
+    {
+        var deadline = timeProvider.GetUtcNow().AddHours(1);
+        string? reportedStage = null;
+        while (timeProvider.GetUtcNow() < deadline)
+        {
+            await ProcessAsync(runId, cancellationToken);
+            var current = await ShotVideoQueries.GetAsync(
+                dbContext,
+                projectId,
+                episodeId,
+                shotResourceId,
+                cancellationToken)
+                ?? throw new InvalidOperationException("视频生产任务不存在。");
+            if (reportProgress is not null && !string.Equals(reportedStage, current.CurrentStage, StringComparison.Ordinal))
+            {
+                reportedStage = current.CurrentStage;
+                await reportProgress(current);
+            }
+            if (current.Status == "completed") return current;
+            if (current.Status is "failed" or "cancelled")
+                throw new InvalidOperationException(current.Error ?? "视频生成失败。");
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+        throw new TimeoutException("等待 ComfyUI 视频生成完成超时。");
     }
 
     public async Task<bool> ProcessNextAsync(CancellationToken cancellationToken)
     {
-        var runId = await dbContext.ProductionRuns.AsNoTracking()
+        var candidates = await dbContext.ProductionRuns.AsNoTracking()
             .Where(item => item.RunType == RunType
                 && (item.Status == "queued" || item.Status == "running"))
+            .Select(item => new { item.Id, item.CreatedAtUtc })
+            .ToListAsync(cancellationToken);
+        var runId = candidates
             .OrderBy(item => item.CreatedAtUtc)
             .Select(item => (Guid?)item.Id)
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefault();
         if (runId is null) return false;
         await ProcessAsync(runId.Value, cancellationToken);
         return true;
@@ -530,19 +577,33 @@ public sealed class ShotVideoService(
     public async Task<bool> ProcessAsync(Guid runId, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
+        var leaseOwner = $"{Environment.MachineName}:{Guid.NewGuid():N}";
+        var leaseExpiresAt = now.AddMinutes(2);
+        var acquired = await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE "ProductionRuns"
+            SET "LeaseOwner" = {leaseOwner}, "LeaseExpiresAtUtc" = {leaseExpiresAt}
+            WHERE "Id" = {runId}
+              AND "RunType" = {RunType}
+              AND "Status" IN ('queued', 'running')
+              AND ("LeaseExpiresAtUtc" IS NULL OR "LeaseExpiresAtUtc" < {now})
+            """, cancellationToken);
+        if (acquired == 0)
+        {
+            return await dbContext.ProductionRuns.AsNoTracking().AnyAsync(
+                item => item.Id == runId
+                    && item.RunType == RunType
+                    && (item.Status == "queued" || item.Status == "running"),
+                cancellationToken);
+        }
         var run = await dbContext.ProductionRuns.SingleOrDefaultAsync(
             item => item.Id == runId
                 && item.RunType == RunType
                 && (item.Status == "queued" || item.Status == "running"),
             cancellationToken);
         if (run is null) return false;
-        if (run.LeaseExpiresAtUtc is not null && run.LeaseExpiresAtUtc >= now) return true;
         var item = await dbContext.ProductionRunItems.SingleAsync(
             candidate => candidate.RunId == run.Id && candidate.Stage == RunType,
             cancellationToken);
-        run.LeaseOwner = Environment.MachineName;
-        run.LeaseExpiresAtUtc = now.AddMinutes(2);
-        await dbContext.SaveChangesAsync(cancellationToken);
 
         try
         {
@@ -579,6 +640,23 @@ public sealed class ShotVideoService(
         }
         finally
         {
+            if (run.RequestedByTaskId is Guid requestedTaskId)
+            {
+                var cancellationRequested = await dbContext.AgentTasks.AsNoTracking()
+                    .AnyAsync(candidate => candidate.Id == requestedTaskId && candidate.Status == "cancelled", CancellationToken.None);
+                if (cancellationRequested)
+                {
+                    now = timeProvider.GetUtcNow();
+                    run.Status = "cancelled";
+                    run.CurrentStage = "cancelled";
+                    run.LastError = "用户已停止生成";
+                    run.CompletedAtUtc = now;
+                    item.Status = "cancelled";
+                    item.ErrorCode = "Cancelled";
+                    item.ErrorDetail = "用户已停止生成";
+                    item.CompletedAtUtc = now;
+                }
+            }
             run.LeaseOwner = null;
             run.LeaseExpiresAtUtc = null;
             run.UpdatedAtUtc = timeProvider.GetUtcNow();
@@ -871,6 +949,35 @@ public sealed class ShotVideoService(
         var linkedAssets = await dbContext.Assets.AsNoTracking()
             .Where(item => linkedAssetIds.Contains(item.Id))
             .ToListAsync(cancellationToken);
+        var projectVisualAssets = await (
+            from state in dbContext.ResourceStates.AsNoTracking()
+            join asset in dbContext.Assets.AsNoTracking() on state.CurrentAssetId equals asset.Id
+            where state.ProjectId == projectId
+                && state.ResourceType == "visual-asset"
+                && state.LifecycleStatus != "retired"
+            select asset).ToListAsync(cancellationToken);
+        var episodeShotAssetIds = await dbContext.ShotDefinitions.AsNoTracking()
+            .Where(item => item.ProjectId == projectId && item.ProductionEpisodeId == episodeId)
+            .Select(item => item.ShotAssetId)
+            .ToArrayAsync(cancellationToken);
+        var episodeShotAssets = await dbContext.Assets.AsNoTracking()
+            .Where(item => episodeShotAssetIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        var dialogueSpeakerNames = episodeShotAssets
+            .Select(item => JsonSerializer.Deserialize<StoryboardShotDocument>(
+                item.DocumentJson ?? "{}",
+                StoryboardDefaults.JsonOptions))
+            .Where(item => item is not null)
+            .SelectMany(item => ParseDialogueSpeakers(item!.Dialogue));
+        var speakerIds = projectVisualAssets
+            .Select(VisualAssetMapper.ReadDocument)
+            .Where(item => item.Kind == "character")
+            .Select(item => item.Name)
+            .Concat(dialogueSpeakerNames)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .Select((name, index) => new { name, id = $"S{index + 1}" })
+            .ToDictionary(item => item.name, item => item.id, StringComparer.Ordinal);
         var characters = new List<ShotVideoPromptCharacterContext>();
         foreach (var asset in linkedAssets)
         {
@@ -880,9 +987,10 @@ public sealed class ShotVideoService(
             characters.Add(new(
                 asset.Id, asset.ResourceId, document.Name, document.Summary,
                 document.VisualDescription, document.MustKeep, document.Avoid,
-                voice?.AssetId, voice?.Name, voice?.DesignPrompt, voice?.Language, voice?.Seed));
+                voice?.AssetId, voice?.Name, voice?.DesignPrompt, voice?.Language, voice?.Seed,
+                speakerIds.GetValueOrDefault(document.Name, "S1")));
         }
-        return new(definition, shotAsset, settingsAsset, shot, settings, firstFrame, lastFrame, characters);
+        return new(definition, shotAsset, settingsAsset, shot, settings, firstFrame, lastFrame, characters, speakerIds);
     }
 
     private async Task<Asset?> ResolveCurrentFrameAsync(
@@ -937,13 +1045,17 @@ public sealed class ShotVideoService(
 
     private static string BuildPrompt(
         StoryboardShotDocument shot,
+        IReadOnlyList<ShotVideoPromptCharacterContext> characters,
+        IReadOnlyDictionary<string, string> speakerIds,
         ShotVideoPromptDraft draft,
         string? videoPromptModel) => ShotVideoPromptInstructions.UsesMiniMaxH3Format(videoPromptModel)
-        ? BuildMiniMaxH3Prompt(shot, draft)
-        : BuildDefaultPrompt(shot, draft);
+        ? BuildMiniMaxH3Prompt(shot, characters, speakerIds, draft)
+        : BuildDefaultPrompt(shot, characters, speakerIds, draft);
 
     private static string BuildDefaultPrompt(
         StoryboardShotDocument shot,
+        IReadOnlyList<ShotVideoPromptCharacterContext> characters,
+        IReadOnlyDictionary<string, string> speakerIds,
         ShotVideoPromptDraft draft) => $$"""
         Create one continuous {{shot.DurationSeconds:0.###}}-second cinematic take.
 
@@ -951,7 +1063,7 @@ public sealed class ShotVideoService(
         CAMERA: Preserve the supplied first frame's exact framing and camera axis.
         CONTINUITY: {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}}
 
-        AUDIO TIMELINE: {{BuildDialogueTimeline(shot)}}
+        AUDIO TIMELINE: {{BuildDialogueTimeline(shot, characters, speakerIds, draft.VoicePerformancePrompt)}}
         VOICE: {{draft.VoicePerformancePrompt}}
         AMBIENCE: {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
 
@@ -960,6 +1072,8 @@ public sealed class ShotVideoService(
 
     private static string BuildMiniMaxH3Prompt(
         StoryboardShotDocument shot,
+        IReadOnlyList<ShotVideoPromptCharacterContext> characters,
+        IReadOnlyDictionary<string, string> speakerIds,
         ShotVideoPromptDraft draft)
     {
         var duration = shot.DurationSeconds.ToString("0.00", CultureInfo.InvariantCulture);
@@ -969,7 +1083,7 @@ public sealed class ShotVideoService(
         return $$"""
             {{alignment}}
 
-            integrated_multimodal_description: [Shot 1] {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}} The camera preserves the supplied first frame's exact framing and axis. {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}} {{BuildDialogueTimeline(shot)}} Voice performance: {{draft.VoicePerformancePrompt}} The image result is a clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays.
+            integrated_multimodal_description: [Shot 1] {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}} The camera preserves the supplied first frame's exact framing and axis. {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}} {{BuildDialogueTimeline(shot, characters, speakerIds, draft.VoicePerformancePrompt)}} The image result is a clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays.
 
             overall_soundscape: {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
 
@@ -977,13 +1091,70 @@ public sealed class ShotVideoService(
             """;
     }
 
-    private static string BuildDialogueTimeline(StoryboardShotDocument shot)
+    private static string BuildDialogueTimeline(
+        StoryboardShotDocument shot,
+        IReadOnlyList<ShotVideoPromptCharacterContext> characters,
+        IReadOnlyDictionary<string, string> speakerIds,
+        string voicePerformance)
     {
         if (string.IsNullOrWhiteSpace(shot.Dialogue))
             return "No human voice for the entire clip. All faces remain naturally closed-mouth.";
         var speechEnd = Math.Min(3, Math.Max(2, shot.DurationSeconds * .375));
-        return $"From 0.2 to {speechEnd:0.#} seconds, the host says exactly once in Mandarin Chinese: \"{shot.Dialogue}\" "
-            + $"At {speechEnd:0.#} seconds the sentence is complete. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds there is absolute vocal silence: no extra syllables, words, repetition, humming, or vocalization. The host's lips remain closed after the sentence.";
+        var dialogueLines = shot.Dialogue.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var blocks = dialogueLines.Select((line, index) => BuildDialogueBlock(line, index, characters, speakerIds, voicePerformance));
+        return $"From 0.2 to {speechEnd:0.#} seconds, {string.Join(" ", blocks)} "
+            + $"At {speechEnd:0.#} seconds all dialogue is complete. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds there is absolute vocal silence: no extra syllables, words, repetition, humming, or vocalization. All on-screen characters keep their lips completely closed after the dialogue.";
+    }
+
+    private static string BuildDialogueBlock(
+        string line,
+        int index,
+        IReadOnlyList<ShotVideoPromptCharacterContext> characters,
+        IReadOnlyDictionary<string, string> speakerIds,
+        string voicePerformance)
+    {
+        var separator = line.IndexOfAny(['：', ':']);
+        var speakerLabel = separator > 0 ? line[..separator].Trim() : string.Empty;
+        var speakerName = NormalizeSpeakerName(speakerLabel);
+        var performanceCue = SpeakerPerformanceCue(speakerLabel);
+        var spokenText = separator > 0 ? line[(separator + 1)..].Trim() : line.Trim();
+        var character = characters.FirstOrDefault(item => string.Equals(item.Name, speakerName, StringComparison.Ordinal));
+        var speakerId = speakerIds.GetValueOrDefault(speakerName, character?.SpeakerId ?? $"S{index + 1}");
+        var language = character?.VoiceLanguage?.StartsWith("zh", StringComparison.OrdinalIgnoreCase) == false
+            ? "English"
+            : "Chinese";
+        var identity = character is null
+            ? $"The {(string.IsNullOrWhiteSpace(speakerName) ? "speaker" : speakerName)}, with a stable voice"
+            : $"The character {character.Name}, {character.Summary}, with {character.VoiceDesignPrompt ?? "a stable natural voice"}";
+        if (speakerName.Contains("旁白", StringComparison.Ordinal) || speakerName.Contains("narrator", StringComparison.OrdinalIgnoreCase))
+            return $"{identity} ({speakerId}) says in an off-screen voiceover: <d>[{language}] {spokenText}</d> while all corresponding on-screen characters' lips remain completely closed.";
+        var performance = string.IsNullOrWhiteSpace(performanceCue)
+            ? voicePerformance.Trim()
+            : $"performing with {performanceCue}; {voicePerformance.Trim()}";
+        return $"{identity} ({speakerId}) {performance} and says: <d>[{language}] {spokenText}</d>";
+    }
+
+    private static IEnumerable<string> ParseDialogueSpeakers(string? dialogue) =>
+        string.IsNullOrWhiteSpace(dialogue)
+            ? []
+            : dialogue.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(line => line.IndexOfAny(['：', ':']) is var separator && separator > 0
+                    ? NormalizeSpeakerName(line[..separator])
+                    : string.Empty)
+                .Where(name => !string.IsNullOrWhiteSpace(name));
+
+    private static string NormalizeSpeakerName(string value)
+    {
+        var annotationStart = value.IndexOfAny(['（', '(']);
+        return (annotationStart >= 0 ? value[..annotationStart] : value).Trim();
+    }
+
+    private static string SpeakerPerformanceCue(string value)
+    {
+        var start = value.IndexOfAny(['（', '(']);
+        if (start < 0) return string.Empty;
+        var end = value.LastIndexOfAny(['）', ')']);
+        return end > start ? value[(start + 1)..end].Trim() : value[(start + 1)..].Trim();
     }
 
     private static string RemoveWrittenContentInstructions(string value)
@@ -1046,7 +1217,8 @@ public sealed class ShotVideoService(
         ProjectSettingsDocument Settings,
         Asset FirstFrame,
         Asset? LastFrame,
-        IReadOnlyList<ShotVideoPromptCharacterContext> Characters);
+        IReadOnlyList<ShotVideoPromptCharacterContext> Characters,
+        IReadOnlyDictionary<string, string> SpeakerIds);
 }
 
 internal static class ShotVideoQueries

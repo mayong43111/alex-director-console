@@ -335,6 +335,11 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.NotNull(referencePrompt);
         Assert.Contains("left 55%", referencePrompt.Prompt);
         Assert.Contains("pure solid white", referencePrompt.Prompt);
+        var initialPromptCall = Assert.Single(factory.VisualReferencePromptWriterCalls);
+        Assert.Equal("gpt-image-2", initialPromptCall.TargetImageModel);
+        Assert.Equal("character", initialPromptCall.SubjectKind);
+        Assert.False(initialPromptCall.IsImageEdit);
+        Assert.Null(initialPromptCall.PreviousPrompt);
 
         var promptedAssets = await client.GetFromJsonAsync<VisualAssetView[]>(
             $"/api/v2/projects/{projectId}/visual-assets");
@@ -383,6 +388,15 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
             item.ConsumerAssetId == reference.AssetId && item.Role == "uses-prompt"));
 
+        var foundryConfiguration = await dbContext.FoundryConfigurations.SingleOrDefaultAsync();
+        if (foundryConfiguration is null)
+        {
+            foundryConfiguration = new FoundryConfiguration { UpdatedAtUtc = DateTimeOffset.UtcNow };
+            dbContext.FoundryConfigurations.Add(foundryConfiguration);
+        }
+        foundryConfiguration.ImageProvider = "comfyui";
+        await dbContext.SaveChangesAsync();
+
         const string revisionInstruction = "缩短牛角，披风改为深蓝色，保持四视图布局。";
         var retryPromptResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/prompt/generate",
@@ -391,7 +405,12 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         var retriedPrompt = await factory.CompleteGenerationTaskAsync<VisualReferencePromptView>(retryPromptResponse);
         Assert.NotNull(retriedPrompt);
         Assert.Equal(referencePrompt.Version + 1, retriedPrompt.Version);
-        Assert.Contains($"Revision instruction: {revisionInstruction}", retriedPrompt.Prompt);
+        Assert.Equal(2, factory.VisualReferencePromptWriterCalls.Count);
+        var revisionPromptCall = factory.VisualReferencePromptWriterCalls[1];
+        Assert.Equal(revisionInstruction, revisionPromptCall.Instruction);
+        Assert.Equal(referencePrompt.Prompt, revisionPromptCall.PreviousPrompt);
+        Assert.True(revisionPromptCall.IsImageEdit);
+        Assert.Equal("Qwen Image Edit 2511", revisionPromptCall.TargetImageModel);
         var retryResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/reference/generate",
             null);
@@ -399,7 +418,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         var retried = await factory.CompleteGenerationTaskAsync<VisualReferenceImageView>(retryResponse);
         Assert.NotNull(retried);
         Assert.Equal(reference.Version + 1, retried.Version);
-        Assert.Contains($"Revision instruction: {revisionInstruction}", retried.Prompt);
+        Assert.Equal(retriedPrompt.Prompt, retried.Prompt);
         var imageVersions = await dbContext.Assets
             .Where(item => item.Type == "visual-reference-image")
             .OrderBy(item => item.Version)
@@ -451,9 +470,12 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             new { kind = "character" });
         batchPromptResponse.EnsureSuccessStatusCode();
         var batchPrompts = await factory.CompleteGenerationTaskAsync<BatchVisualReferenceResult>(batchPromptResponse);
-        Assert.Equal(1, batchPrompts?.Generated);
-        Assert.Equal(1, batchPrompts?.Skipped);
+        Assert.Equal(2, batchPrompts?.Generated);
+        Assert.Equal(0, batchPrompts?.Skipped);
         Assert.Equal(0, batchPrompts?.Failed);
+        var batchPromptCall = factory.VisualReferencePromptWriterCalls[^1];
+        Assert.Equal("Krea 2 Turbo", batchPromptCall.TargetImageModel);
+        Assert.False(batchPromptCall.IsImageEdit);
 
         var repeatedPromptResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/visual-assets/reference/prompts/generate-missing",
@@ -555,7 +577,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Import_story_materials_creates_character_and_scene_once()
+    public async Task Import_script_materials_uses_formal_script_without_source_analysis()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
@@ -569,26 +591,53 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         sourceResponse.EnsureSuccessStatusCode();
         var source = await sourceResponse.Content.ReadFromJsonAsync<ProjectSourceView>();
         Assert.NotNull(source);
-        var analysisResponse = await client.PostAsync(
-            $"/api/v2/projects/{projectId}/sources/{source.Id}/analysis",
-            null);
-        analysisResponse.EnsureSuccessStatusCode();
         var draftResponse = await client.PostAsJsonAsync(
             $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft",
-            new { desiredEpisodeCount = 1 });
+            new { mode = AdaptationModes.SourceChapters, desiredEpisodeCount = 1 });
         draftResponse.EnsureSuccessStatusCode();
+        var formalResponse = await client.PostAsync(
+            $"/api/v2/projects/{projectId}/sources/{source.Id}/script-draft/episodes/1/production-script/tasks",
+            null);
+        await factory.CompleteGenerationTaskAsync<AdaptationScriptView>(formalResponse);
+
+        var pendingStatuses = await client.GetFromJsonAsync<ScriptMaterialAnalysisStatusView[]>(
+            $"/api/v2/projects/{projectId}/visual-assets/script-material-analysis-status");
+        Assert.Collection(
+            Assert.IsType<ScriptMaterialAnalysisStatusView[]>(pendingStatuses),
+            status =>
+            {
+                Assert.Equal("正式剧本", status.ScriptType);
+                Assert.False(status.IsAnalyzed);
+            },
+            status =>
+            {
+                Assert.Equal("改编方案", status.ScriptType);
+                Assert.False(status.IsAnalyzed);
+            });
 
         var firstImport = await client.PostAsync(
-            $"/api/v2/projects/{projectId}/visual-assets/import-story-materials",
+            $"/api/v2/projects/{projectId}/visual-assets/import-script-materials/tasks",
             null);
-        firstImport.EnsureSuccessStatusCode();
-        var firstAssets = await firstImport.Content.ReadFromJsonAsync<VisualAssetView[]>();
+        var taskJson = await firstImport.Content.ReadAsStringAsync();
+        var taskId = JsonDocument.Parse(taskJson).RootElement.GetProperty("id").GetGuid();
+        var firstAssets = await factory.CompleteGenerationTaskAsync<VisualAssetView[]>(firstImport);
+        var taskEvents = await client.GetStringAsync($"/api/v2/tasks/{taskId}/events?after=0");
+        Assert.Contains("\"stage\":\"queued\"", taskEvents, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"running\"", taskEvents, StringComparison.Ordinal);
+        Assert.Contains("\"stage\":\"completed\"", taskEvents, StringComparison.Ordinal);
         Assert.NotNull(firstAssets);
-        Assert.Equal(3, firstAssets.Length);
+        Assert.Equal(4, firstAssets.Length);
         Assert.Contains(firstAssets, item => item.Kind == "character" && item.Name == "达达尼昂");
-        Assert.Contains(firstAssets, item => item.Kind == "scene" && item.Name == "巴黎");
+        Assert.Contains(firstAssets, item => item.Kind == "scene" && item.Name == "外景 · 巴黎街道 · 日");
+        Assert.Contains(firstAssets, item => item.Kind == "scene" && item.Name == "第二章");
         Assert.Contains(firstAssets, item => item.Kind == "prop" && item.Name == "推荐信");
         Assert.DoesNotContain(firstAssets, item => item.Kind == "prop" && item.Name == "椅子");
+
+        var analyzedStatuses = await client.GetFromJsonAsync<ScriptMaterialAnalysisStatusView[]>(
+            $"/api/v2/projects/{projectId}/visual-assets/script-material-analysis-status");
+        Assert.All(
+            Assert.IsType<ScriptMaterialAnalysisStatusView[]>(analyzedStatuses),
+            status => Assert.True(status.IsAnalyzed));
 
         var secondImport = await client.PostAsync(
             $"/api/v2/projects/{projectId}/visual-assets/import-story-materials",
@@ -596,7 +645,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         secondImport.EnsureSuccessStatusCode();
         var secondAssets = await secondImport.Content.ReadFromJsonAsync<VisualAssetView[]>();
         Assert.NotNull(secondAssets);
-        Assert.Equal(3, secondAssets.Length);
+        Assert.Equal(4, secondAssets.Length);
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
@@ -604,9 +653,10 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
             .Where(item => item.ProjectId == projectId && item.Type == "visual-asset")
             .Select(item => item.Id)
             .ToArrayAsync();
-        Assert.Equal(3, await dbContext.AssetDependencies
+        Assert.Equal(4, await dbContext.AssetDependencies
             .CountAsync(item => visualAssetIds.Contains(item.ConsumerAssetId)));
-        Assert.False(await dbContext.ProductionEpisodes.AnyAsync());
+        Assert.True(await dbContext.ProductionEpisodes.AnyAsync());
+        Assert.False(await dbContext.Assets.AnyAsync(item => item.Type == StoryMaterialAnalysisQueries.AssetType));
     }
 
     [Theory]

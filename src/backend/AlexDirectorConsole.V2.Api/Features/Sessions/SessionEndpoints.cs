@@ -21,6 +21,8 @@ public sealed record RetrySessionMessageRequest(string? Page, string? Episode);
 
 public static class SessionEndpoints
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public static IEndpointRouteBuilder MapSessions(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/v2/sessions");
@@ -111,7 +113,7 @@ public static class SessionEndpoints
                         item.Stage,
                         item.Message,
                         item.DataJson,
-                        item.CreatedAtUtc));
+                        item.CreatedAtUtc), JsonOptions);
                     await context.Response.WriteAsync($"id: {item.Sequence}\nevent: {item.EventType}\ndata: {payload}\n\n", cancellationToken);
                     await context.Response.Body.FlushAsync(cancellationToken);
                     sequence = item.Sequence;
