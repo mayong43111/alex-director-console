@@ -297,7 +297,12 @@ public sealed class GenerationTaskJob(
                 return await services.GetRequiredService<ICommandDispatcher>().SendAsync(
                     new GenerateStoryboardCommand(
                         payload.ProjectId,
-                        payload.ProductionEpisodeId ?? throw new InvalidOperationException("缺少生产集标识。")),
+                        payload.ProductionEpisodeId ?? throw new InvalidOperationException("缺少生产集标识。"),
+                        progress => ReportStoryboardDesignProgressAsync(
+                            dbContext,
+                            task,
+                            progress,
+                            cancellationToken)),
                     cancellationToken);
             case GenerationTaskTypes.StoryboardImagePrompt:
                 return await services.GetRequiredService<IStoryboardMediaPromptService>().GenerateImagePromptAsync(
@@ -320,8 +325,7 @@ public sealed class GenerationTaskJob(
                     videoPrompt.Prompt,
                     videoPrompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
                     videoPrompt.Instruction,
-                    cancellationToken,
-                    enqueueBackgroundJob: false)
+                    cancellationToken)
                     ?? throw new InvalidOperationException("镜头不存在。");
                 return await services.GetRequiredService<IShotVideoService>().WaitForCompletionAsync(
                     payload.ProjectId,
@@ -432,6 +436,32 @@ public sealed class GenerationTaskJob(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    private static async Task ReportStoryboardDesignProgressAsync(
+        V2DbContext dbContext,
+        AgentTask task,
+        StoryboardDesignProgress progress,
+        CancellationToken cancellationToken)
+    {
+        await dbContext.Entry(task).ReloadAsync(cancellationToken);
+        if (task.Status == "cancelled") throw new OperationCanceledException("分镜任务已停止。", cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        task.ProgressCompleted = progress.Completed;
+        task.ProgressTotal = progress.Total;
+        task.CurrentStep = $"S{progress.SceneNumber:00} · {progress.Heading}：已生成 {progress.ShotCount} 镜";
+        task.UpdatedAtUtc = now;
+        task.LeaseExpiresAtUtc = now.AddMinutes(30);
+        await SessionAgentTaskJob.AppendEventAsync(
+            dbContext,
+            task.Id,
+            "progress",
+            "running",
+            $"[{progress.Completed}/{progress.Total}] {task.CurrentStep}",
+            JsonSerializer.Serialize(progress, JsonOptions),
+            now,
+            cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
     private static async Task ReportShotVideoProgressAsync(
         V2DbContext dbContext,
         AgentTask task,
@@ -489,6 +519,7 @@ public sealed class GenerationTaskRecoveryJob(
                     || task.TaskType == GenerationTaskTypes.VisualReferenceImage
                     || task.TaskType == GenerationTaskTypes.VisualReferencePromptBatch
                     || task.TaskType == GenerationTaskTypes.VisualReferenceImageBatch
+                    || task.TaskType == GenerationTaskTypes.StoryboardDesign
                     || task.TaskType == GenerationTaskTypes.StoryboardImagePrompt
                     || task.TaskType == GenerationTaskTypes.StoryboardImagePreview
                     || task.TaskType == GenerationTaskTypes.StoryboardImage
@@ -502,8 +533,7 @@ public sealed class GenerationTaskRecoveryJob(
                     || task.TaskType == GenerationTaskTypes.VoiceProfile
                     || task.TaskType == GenerationTaskTypes.ProductionScript
                     || task.TaskType == GenerationTaskTypes.StoryMaterialAssets
-                    || task.TaskType == "session-message"
-                    || task.TaskType == ShotVideoService.RunType))
+                    || task.TaskType == "session-message"))
             .Select(task => new { task.Id, task.TaskType, task.ContextSnapshotJson, task.Status, task.LeaseExpiresAtUtc })
             .Take(500)
             .ToArrayAsync(cancellationToken);
@@ -517,12 +547,6 @@ public sealed class GenerationTaskRecoveryJob(
             if (task.TaskType == "session-message")
             {
                 backgroundJobs.Enqueue<SessionAgentTaskJob>(job => job.ExecuteAsync(task.Id, CancellationToken.None));
-            }
-            else if (task.TaskType == ShotVideoService.RunType)
-            {
-                using var context = JsonDocument.Parse(task.ContextSnapshotJson);
-                var runId = context.RootElement.GetProperty("runId").GetGuid();
-                backgroundJobs.Enqueue<ShotVideoJob>(job => job.ExecuteAsync(runId, CancellationToken.None));
             }
             else
             {

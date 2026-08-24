@@ -19,6 +19,8 @@ import {
   Edit3,
   Eye,
   AudioLines,
+  FileImage,
+  FileVideo,
   ImagePlus,
   List,
   Play,
@@ -852,12 +854,13 @@ function ProjectSettingsEditor({ projectId }: { projectId: string }) {
             {coverPreview && coverInstruction.trim() !== coverPreviewInstruction && (
               <p className="cover-prompt-stale">修改意见已变化，请先生成新提示词。</p>
             )}
+            {error && <p className="settings-error" role="alert">{error}</p>}
             <div className="cover-prompt-actions">
               <button className="secondary-button" type="button" onClick={() => { setCoverConfirmation(false); setCoverPreview(null); }}>取消</button>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={!coverInstruction.trim() || previewingCoverPrompt || generatingCover}
+                disabled={previewingCoverPrompt || generatingCover}
                 onClick={() => void previewCover(coverInstruction)}
               >
                 {previewingCoverPrompt ? <span className="spinner" /> : <Sparkles size={13} />}
@@ -4424,6 +4427,7 @@ export function StoryboardPage() {
   const loading = productionEpisodeId !== "" && loadedEpisodeId !== productionEpisodeId;
   const currentStoryboard = storyboard?.productionEpisodeId === productionEpisodeId ? storyboard : null;
   const allShotIds = currentStoryboard?.shots.map((shot) => shot.resourceId) ?? [];
+  const storyboardSceneCount = new Set(currentStoryboard?.shots.map((shot) => shot.sceneNumber) ?? []).size;
   const selectedBatchShotIds = selectedShotIds.length > 0 ? selectedShotIds : undefined;
   const allShotsSelected = allShotIds.length > 0 && selectedShotIds.length === allShotIds.length;
   const toggleShotSelection = (shotResourceId: string) => {
@@ -4490,6 +4494,11 @@ export function StoryboardPage() {
                 label: `E${String(item.episodeNumber).padStart(2, "0")} · ${item.title}`,
               }))}
             />
+            <div className="storyboard-statistics" aria-label="分镜统计">
+              <span><strong>{storyboardSceneCount || "—"}</strong> 场</span>
+              <span><strong>{currentStoryboard?.shots.length || "—"}</strong> 镜</span>
+              <span><strong>{currentStoryboard ? currentStoryboard.totalDurationSeconds.toFixed(1) : "—"}</strong> 秒</span>
+            </div>
             <button className="primary-button" onClick={generate} disabled={generating || !productionEpisodeId}>
               <WandSparkles size={14} />
               {generating ? "正在设计分镜" : currentStoryboard ? "重新生成草稿" : "生成分镜草稿"}
@@ -4498,7 +4507,7 @@ export function StoryboardPage() {
               {selectedShotIds.length > 0 && <span className="storyboard-selection-count">已选 {selectedShotIds.length} 个镜头 · 将重新生成</span>}
               <Tooltip title={batchAction === "image-prompts" ? "正在批量生成图片提示词" : selectedBatchShotIds ? "重新生成选中镜头的图片提示词" : "补齐缺失的图片提示词"}>
                 <button className="secondary-button storyboard-batch-button" aria-label="批量生成图片提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("image-prompts", "批量图片提示词", () => generateMissingStoryboardImagePrompts(projectId, productionEpisodeId, selectedBatchShotIds))}>
-                  <WandSparkles size={14} />
+                  <FileImage size={14} />
                 </button>
               </Tooltip>
               <Tooltip title={batchAction === "images" ? "正在批量生成图片" : selectedBatchShotIds ? "重新生成选中镜头的图片" : "补齐缺失的图片"}>
@@ -4508,7 +4517,7 @@ export function StoryboardPage() {
               </Tooltip>
               <Tooltip title={batchAction === "video-prompts" ? "正在批量生成视频提示词" : selectedBatchShotIds ? "重新生成选中镜头的视频提示词" : "补齐缺失的视频提示词"}>
                 <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频提示词" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("video-prompts", "批量视频提示词", () => generateMissingStoryboardVideoPrompts(projectId, productionEpisodeId, selectedBatchShotIds))}>
-                  <Sparkles size={14} />
+                  <FileVideo size={14} />
                 </button>
               </Tooltip>
               <Tooltip title={batchAction === "videos" ? "正在批量生成视频" : selectedBatchShotIds ? "重新生成选中镜头的视频" : "补齐缺失的视频"}>

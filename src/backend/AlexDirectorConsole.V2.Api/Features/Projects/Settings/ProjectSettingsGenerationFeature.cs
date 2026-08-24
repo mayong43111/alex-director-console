@@ -500,17 +500,20 @@ public sealed class ProjectCoverService(
             settingsAsset,
             settings,
             instruction,
-            ReadPrompt(previousMetadata),
+            ReadPrompt(previousMetadata, settingsAsset.Id),
             FoundryConfigurationView.TextToImageModel(configuration),
             GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
             modelSize);
     }
 
-    private static string? ReadPrompt(string? metadataJson)
+    private static string? ReadPrompt(string? metadataJson, Guid settingsAssetId)
     {
         if (string.IsNullOrWhiteSpace(metadataJson)) return null;
         using var document = JsonDocument.Parse(metadataJson);
-        return document.RootElement.TryGetProperty("prompt", out var prompt)
+        return document.RootElement.TryGetProperty("settingsAssetId", out var recordedSettingsAssetId)
+            && recordedSettingsAssetId.TryGetGuid(out var parsedSettingsAssetId)
+            && parsedSettingsAssetId == settingsAssetId
+            && document.RootElement.TryGetProperty("prompt", out var prompt)
             ? prompt.GetString()
             : null;
     }

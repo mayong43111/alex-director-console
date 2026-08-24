@@ -235,16 +235,16 @@ export function AppShell() {
       window.removeEventListener("alex:project-updated", updateProject);
   }, [projectId]);
   const [isAgentOverlay, setIsAgentOverlay] = useState(
-    () => window.matchMedia("(max-width: 1279px)").matches,
+    () => window.matchMedia("(max-width: 1023px)").matches,
   );
   const [agentOpen, setAgentOpen] = useState(
-    () => window.matchMedia("(min-width: 1280px)").matches,
+    () => window.matchMedia("(min-width: 1024px)").matches,
   );
   const updateAgentOpen = (open: boolean) => {
     setAgentOpen(open);
   };
   useEffect(() => {
-    const mobileQuery = window.matchMedia("(max-width: 1279px)");
+    const mobileQuery = window.matchMedia("(max-width: 1023px)");
     const syncAgentVisibility = (
       event: MediaQueryListEvent | MediaQueryList,
     ) => {

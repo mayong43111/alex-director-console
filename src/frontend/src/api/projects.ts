@@ -75,16 +75,26 @@ export async function updateProject(
 
 export async function deleteProject(
   projectId: string,
+  force = false,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`/api/v2/projects/${projectId}`, {
+  const query = force ? '?force=true' : ''
+  const response = await fetch(`/api/v2/projects/${projectId}${query}`, {
     method: 'DELETE',
     signal,
   })
 
   if (!response.ok) {
-    throw new Error(await readProjectError(response, '项目删除失败，请稍后重试。'))
+    const message = await readProjectError(response, '项目删除失败，请稍后重试。')
+    if (response.status === 409) {
+      throw new ProjectDeleteConflictError(message)
+    }
+    throw new Error(message)
   }
+}
+
+export class ProjectDeleteConflictError extends Error {
+  override name = 'ProjectDeleteConflictError'
 }
 
 export interface ProjectDescriptionAssistResult {

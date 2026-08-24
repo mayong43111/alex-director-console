@@ -36,11 +36,12 @@ public static class ProjectManagementEndpoint
                 "/api/v2/projects/{projectId:guid}",
                 async (
                     Guid projectId,
+                    bool? force,
                     ICommandDispatcher dispatcher,
                     CancellationToken cancellationToken) =>
                 {
                     var result = await dispatcher.SendAsync(
-                        new DeleteProjectCommand(projectId),
+                        new DeleteProjectCommand(projectId, force ?? false),
                         cancellationToken);
 
                     return result switch
@@ -48,7 +49,7 @@ public static class ProjectManagementEndpoint
                         DeleteProjectResult.Deleted => Results.NoContent(),
                         DeleteProjectResult.NotFound => Results.NotFound(),
                         _ => Results.Problem(
-                            detail: "项目已有设定、资产或生产数据，不能直接删除。",
+                            detail: "项目已有设定、资产或生产数据。确认后可删除项目及全部关联数据。",
                             statusCode: StatusCodes.Status409Conflict)
                     };
                 })

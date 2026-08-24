@@ -498,12 +498,19 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             ProjectSettingsView settings,
             ProductionScriptPackageView scriptPackage,
             IReadOnlyList<VisualAssetView> assets,
+            Func<StoryboardDesignProgress, Task>? reportProgress,
             CancellationToken cancellationToken)
         {
             var scenes = scriptPackage.Episode.Scenes;
-            return Task.FromResult(
-                new StoryboardDesignResult(
-                    scenes.SelectMany((scene, sceneIndex) => new[]
+            return DesignAsync();
+
+            async Task<StoryboardDesignResult> DesignAsync()
+            {
+                var shots = new List<StoryboardShotDraft>();
+                for (var sceneIndex = 0; sceneIndex < scenes.Count; sceneIndex++)
+                {
+                    var scene = scenes[sceneIndex];
+                    shots.AddRange(new[]
                     {
                         new StoryboardShotDraft(
                             scene.SceneNumber,
@@ -555,9 +562,19 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                                     "人物背对镜头位于画面中心，双手自然垂下。",
                                     "人物完成转身后正对镜头，视线落向画外对手。",
                                     "0.0-1.0 秒从背面中景开始；1.0-2.5 秒人物向左转身，镜头缓慢推进并保持轴线；2.5-3.0 秒在正面视线落定时切出。")
-                    }).ToArray(),
-                    "gpt-5.4-test",
-                    "Test Harness"));
+                    });
+                    if (reportProgress is not null)
+                    {
+                        await reportProgress(new(
+                            sceneIndex + 1,
+                            scenes.Count,
+                            scene.SceneNumber,
+                            scene.Heading,
+                            2));
+                    }
+                }
+                return new(shots, "gpt-5.4-test", "Test Harness");
+            }
         }
     }
 

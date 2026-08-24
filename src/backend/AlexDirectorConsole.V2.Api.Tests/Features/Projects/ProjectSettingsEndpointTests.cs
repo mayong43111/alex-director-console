@@ -364,6 +364,50 @@ public sealed class ProjectSettingsEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Cover_preview_rewrites_prompt_after_project_settings_change()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var initialSaveResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("现代东方奇幻动画"));
+        initialSaveResponse.EnsureSuccessStatusCode();
+
+        var initialPreviewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = (string?)null });
+        var initialPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(
+            initialPreviewResponse);
+        var coverResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover",
+            new
+            {
+                instruction = (string?)null,
+                confirmedPrompt = initialPreview.Prompt,
+                previewHash = initialPreview.PreviewHash
+            });
+        await factory.CompleteGenerationTaskAsync<ProjectCoverResponse>(coverResponse);
+
+        var updatedSaveResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings",
+            ValidSettings("东方彩色志怪冒险漫画"));
+        updatedSaveResponse.EnsureSuccessStatusCode();
+        var updatedPreviewResponse = await client.PostAsJsonAsync(
+            $"/api/v2/projects/{projectId}/settings/cover/preview",
+            new { instruction = (string?)null });
+        var updatedPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(
+            updatedPreviewResponse);
+
+        Assert.Equal("Agent-authored cinematic cover prompt v2", updatedPreview.Prompt);
+        Assert.Equal(2, factory.ProjectCoverPromptWriterCalls.Count);
+        var updatedWriterCall = factory.ProjectCoverPromptWriterCalls[1];
+        Assert.Null(updatedWriterCall.PreviousPrompt);
+        Assert.Equal(
+            "东方彩色志怪冒险漫画",
+            updatedWriterCall.ProjectContext.GetProperty("visualStyle").GetString());
+    }
+
+    [Fact]
     public async Task Post_cover_accepts_prompt_edited_after_agent_preview()
     {
         using var client = factory.CreateClient();

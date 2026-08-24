@@ -22,7 +22,7 @@ public sealed record UpdateProjectResult(
         new(null, new Dictionary<string, string[]>(), true);
 }
 
-public sealed record DeleteProjectCommand(Guid ProjectId)
+public sealed record DeleteProjectCommand(Guid ProjectId, bool Force)
     : ICommand<DeleteProjectResult>;
 
 public enum DeleteProjectResult

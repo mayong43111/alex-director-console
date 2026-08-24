@@ -116,7 +116,7 @@ export async function assistProjectSettingsField(
     body: JSON.stringify({ field, currentValue, instruction, context }),
   })
   if (!response.ok) throw await readError(response, 'AI 帮写失败。')
-  return waitForGenerationResult<ProjectSettingsAssistResult>(await response.json() as GenerationTask)
+  return response.json() as Promise<ProjectSettingsAssistResult>
 }
 
 export async function previewProjectCover(

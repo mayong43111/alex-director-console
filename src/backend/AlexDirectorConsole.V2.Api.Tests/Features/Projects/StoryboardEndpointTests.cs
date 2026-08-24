@@ -98,7 +98,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     [Fact]
     public async Task Local_comfyui_video_normalizes_project_resolution_and_allows_missing_last_frame()
     {
-        const string spokenDialogue = "达达尼昂（低声）：巴黎，我来了。\n达达尼昂（坚定地）：这次不会再离开。";
+        const string spokenDialogue = "达达尼昂：巴黎，我来了。";
         using var client = factory.CreateClient();
         var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
         (await client.PostAsync(
@@ -297,12 +297,14 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         configurationResponse.EnsureSuccessStatusCode();
         var route = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{shot.ResourceId}/video";
         const string videoInstruction = "动作节奏更克制，保持固定机位";
-        var missingVideoPromptResponse = await client.PostAsync($"{route}/generate", null);
-        Assert.Equal(HttpStatusCode.Accepted, missingVideoPromptResponse.StatusCode);
-        Assert.Equal("failed", (await factory.FailGenerationTaskAsync(missingVideoPromptResponse)).Status);
+        var videoWithoutPromptResponse = await client.PostAsync($"{route}/generate", null);
+        Assert.Equal(HttpStatusCode.Accepted, videoWithoutPromptResponse.StatusCode);
+        var failedVideoTask = await factory.FailGenerationTaskAsync(videoWithoutPromptResponse);
+        Assert.Equal("failed", failedVideoTask.Status);
+        Assert.Contains("提示词", failedVideoTask.LastError);
         var previewResponse = await client.PostAsync($"{route}/preview?instruction={Uri.EscapeDataString(videoInstruction)}", null);
         previewResponse.EnsureSuccessStatusCode();
-        var preview = await factory.CompleteGenerationTaskAsync<ShotVideoPreview>(previewResponse);
+        var preview = await previewResponse.Content.ReadFromJsonAsync<ShotVideoPreview>();
         Assert.NotNull(preview);
         Assert.Equal((864, 480), (preview.Width, preview.Height));
         Assert.Null(preview.LastFrameAssetId);
@@ -314,20 +316,13 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Contains("integrated_multimodal_description:", preview.Prompt);
         Assert.Contains("overall_soundscape:", preview.Prompt);
         Assert.Contains("non_diegetic_music: N/A", preview.Prompt);
-        Assert.Matches(@"\(S\d+\).*says: <d>\[Chinese\] 巴黎，我来了。</d>", preview.Prompt);
-        Assert.DoesNotContain("<d>[Chinese] 达达尼昂：", preview.Prompt, StringComparison.Ordinal);
-        var speakerMatches = System.Text.RegularExpressions.Regex.Matches(
-            preview.Prompt,
-            @"\((S\d+)\).*?<d>\[Chinese\] (?:巴黎，我来了。|这次不会再离开。)</d>");
-        Assert.Equal(2, speakerMatches.Count);
-        Assert.Equal(speakerMatches[0].Groups[1].Value, speakerMatches[1].Groups[1].Value);
-        Assert.Contains("performing with 低声", preview.Prompt);
-        Assert.Contains("performing with 坚定地", preview.Prompt);
+        Assert.Contains("says exactly once in Mandarin Chinese", preview.Prompt);
         Assert.Contains("absolute vocal silence", preview.Prompt);
         Assert.Contains("completely blank lower third", preview.Prompt);
         Assert.Contains("no readable glyphs anywhere", preview.Prompt);
         Assert.DoesNotContain("subtitle", preview.Prompt, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("字幕", preview.Prompt, StringComparison.Ordinal);
+        Assert.Contains(spokenDialogue, preview.Prompt);
         var agentCharacter = Assert.Single(factory.LastShotVideoPromptAgentInput?.Characters ?? []);
         Assert.Equal("达达尼昂青年音色", agentCharacter.VoiceName);
         Assert.Equal("清亮的青年男声，坚定但略带初入巴黎的紧张感", agentCharacter.VoiceDesignPrompt);
@@ -352,7 +347,6 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(callsBeforeStart, factory.ShotVideoPromptAgentCallCount);
         var started = await factory.CompleteGenerationTaskAsync<ShotVideoProductionView>(startResponse);
         Assert.NotNull(started);
-        Assert.Equal(1, factory.Services.GetRequiredService<TestComfyUiVideoClient>().SubmissionCount);
 
         ShotVideoProductionView? completed = null;
         for (var attempt = 0; attempt < 10; attempt++)
@@ -360,7 +354,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             await using (var workerScope = factory.Services.CreateAsyncScope())
             {
                 var service = workerScope.ServiceProvider.GetRequiredService<IShotVideoService>();
-                await service.ProcessAsync(started.RunId, CancellationToken.None);
+                await service.ProcessNextAsync(CancellationToken.None);
             }
             completed = await client.GetFromJsonAsync<ShotVideoProductionView>(route);
             if (completed?.Status == "completed") break;
@@ -377,17 +371,17 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Null(comfyUi.LastSubmission.LastFrame);
         Assert.Equal((864, 480), (comfyUi.LastSubmission.Width, comfyUi.LastSubmission.Height));
 
-        var batchPromptResponse = await client.PostAsync(
+        var batchPromptsResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/video-prompts",
             null);
-        var batchPrompts = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(batchPromptResponse);
+        var batchPrompts = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(batchPromptsResponse);
         Assert.NotNull(batchPrompts);
         Assert.Equal(1, batchPrompts.Skipped);
         Assert.Equal(1, batchPrompts.Failed);
-        var batchVideoResponse = await client.PostAsync(
+        var batchVideosResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/videos",
             null);
-        var batchVideos = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(batchVideoResponse);
+        var batchVideos = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(batchVideosResponse);
         Assert.NotNull(batchVideos);
         Assert.Equal(1, batchVideos.Skipped);
         Assert.Equal(1, batchVideos.Failed);
@@ -549,6 +543,8 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/generate",
             null);
         firstResponse.EnsureSuccessStatusCode();
+        using var firstTaskDocument = JsonDocument.Parse(await firstResponse.Content.ReadAsStringAsync());
+        var firstTaskId = firstTaskDocument.RootElement.GetProperty("id").GetGuid();
         var first = await factory.CompleteGenerationTaskAsync<StoryboardView>(firstResponse);
         Assert.NotNull(first);
         Assert.Equal(2, first.Shots.Count);
@@ -590,6 +586,11 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                 .OrderBy(item => item.BeatId)
                 .Select(item => item.BeatId)
                 .ToArrayAsync();
+            var progressEvents = await firstDb.AgentTaskEvents
+                .Where(item => item.TaskId == firstTaskId && item.EventType == "progress")
+                .Select(item => item.Message)
+                .ToArrayAsync();
+            Assert.Equal(["[1/1] S01 · 外景 · 巴黎街道 · 日：已生成 2 镜"], progressEvents);
         }
         Assert.Equal(2, firstBeatIds.Length);
 
@@ -790,9 +791,11 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
 
         const string imageInstruction = "人物表情更克制，晨光更柔和";
         var directRoute = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/image";
-        var missingImagePromptResponse = await client.PostAsync($"{directRoute}/generate", null);
-        Assert.Equal(HttpStatusCode.Accepted, missingImagePromptResponse.StatusCode);
-        Assert.Equal("failed", (await factory.FailGenerationTaskAsync(missingImagePromptResponse)).Status);
+        var imageWithoutPromptResponse = await client.PostAsync($"{directRoute}/generate", null);
+        Assert.Equal(HttpStatusCode.Accepted, imageWithoutPromptResponse.StatusCode);
+        var failedImageTask = await factory.FailGenerationTaskAsync(imageWithoutPromptResponse);
+        Assert.Equal("failed", failedImageTask.Status);
+        Assert.Contains("提示词", failedImageTask.LastError);
         var directPreviewResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{firstShot.ResourceId}/production/preview?instruction={Uri.EscapeDataString(imageInstruction)}",
             null);
@@ -848,9 +851,9 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.NotNull(continuousProduction.OutputPrompt);
         Assert.NotNull(continuousProduction.LastFrameAssetId);
         Assert.NotNull(continuousProduction.LastFrameUrl);
-        Assert.Contains("Model-aware gpt-image-2 last-frame", continuousProduction.LastFramePrompt);
-        Assert.Equal("last-frame", factory.LastShotImagePromptAgentInput?.FrameStage);
+        Assert.Contains("Model-aware gpt-image-2 last-frame prompt", continuousProduction.LastFramePrompt);
         Assert.Equal("gpt-image-2", factory.LastShotImagePromptAgentInput?.ImageModel);
+        Assert.Equal("last-frame", factory.LastShotImagePromptAgentInput?.FrameStage);
         var lastFrameCall = Assert.Single(factory.ShotFrameCalls.Where(call =>
             call.References.Any(reference => reference.SubjectType == "first-frame")));
         var generatedFirstFrameReference = Assert.Single(lastFrameCall.References.Where(reference =>
@@ -865,12 +868,6 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var imagePromptBatch = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(imagePromptBatchResponse);
         Assert.NotNull(imagePromptBatch);
         Assert.Equal((0, 2, 0), (imagePromptBatch.Generated, imagePromptBatch.Skipped, imagePromptBatch.Failed));
-        var selectedImagePromptBatchResponse = await client.PostAsJsonAsync(
-            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/image-prompts",
-            new { shotResourceIds = new[] { secondShot.ResourceId } });
-        var selectedImagePromptBatch = await factory.CompleteGenerationTaskAsync<BatchStoryboardMediaResult>(selectedImagePromptBatchResponse);
-        Assert.NotNull(selectedImagePromptBatch);
-        Assert.Equal((1, 0, 0), (selectedImagePromptBatch.Generated, selectedImagePromptBatch.Skipped, selectedImagePromptBatch.Failed));
         var imageBatchResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/images",
             null);
@@ -885,13 +882,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var repeatPreview = await factory.CompleteGenerationTaskAsync<ImageGenerationPreviewView>(repeatPreviewResponse);
         Assert.NotNull(repeatPreview);
         Assert.Equal("generate-storyboard-last-frame", repeatPreview.Operation);
-        Assert.Contains("Model-aware gpt-image-2 last-frame", repeatPreview.Prompt);
-        var repeatPromptResponse = await client.PostAsJsonAsync(
-            $"{continuousRoute}/prompt",
-            new { instruction = (string?)null });
-        repeatPromptResponse.EnsureSuccessStatusCode();
-        var repeatPrompt = await factory.CompleteGenerationTaskAsync<StoryboardMediaPromptView>(repeatPromptResponse);
-        Assert.Contains("Model-aware gpt-image-2 last-frame", repeatPrompt.Prompt);
+        Assert.Contains("Model-aware gpt-image-2 last-frame prompt", repeatPreview.Prompt);
         var repeatResponse = await client.PostAsync($"{continuousRoute}/generate", null);
         repeatResponse.EnsureSuccessStatusCode();
         var repeated = await factory.CompleteGenerationTaskAsync<ShotProductionView>(repeatResponse);

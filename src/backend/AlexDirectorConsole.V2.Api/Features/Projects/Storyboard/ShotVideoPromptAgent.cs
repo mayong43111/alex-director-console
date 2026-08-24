@@ -24,8 +24,7 @@ public sealed record ShotVideoPromptCharacterContext(
     string? VoiceName,
     string? VoiceDesignPrompt,
     string? VoiceLanguage,
-    int? VoiceSeed,
-    string SpeakerId);
+    int? VoiceSeed);
 
 public sealed record ShotVideoPromptAgentInput(
     string ProjectName,

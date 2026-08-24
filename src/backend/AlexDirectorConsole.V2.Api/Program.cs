@@ -113,7 +113,10 @@ builder.Services.AddScoped<IShotVideoService, ShotVideoService>();
 builder.Services.AddScoped<IStoryboardMediaPromptService, StoryboardMediaPromptService>();
 builder.Services.AddScoped<IStoryboardMediaBatchService, StoryboardMediaBatchService>();
 builder.Services.AddScoped<IStoryboardDialogueAudioService, StoryboardDialogueAudioService>();
-builder.Services.AddTransient<ShotVideoJob>();
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHostedService<ShotVideoWorker>();
+}
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
 builder.Services.AddSingleton<IAgentCatalog, AgentCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();

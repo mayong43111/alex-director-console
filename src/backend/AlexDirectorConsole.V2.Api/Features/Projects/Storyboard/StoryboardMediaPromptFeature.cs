@@ -533,10 +533,8 @@ public sealed class StoryboardMediaBatchService(
                     prompt.Prompt,
                     prompt.PreviewHash ?? throw new InvalidOperationException("当前视频提示词缺少预览校验值，请重新生成。"),
                     prompt.Instruction,
-                    cancellationToken,
-                    enqueueBackgroundJob: false)
+                    cancellationToken)
                     ?? throw new InvalidOperationException("镜头不存在。");
-                await videoService.ProcessAsync(started.RunId, cancellationToken);
                 var submitted = await ShotVideoQueries.GetAsync(
                     dbContext, projectId, productionEpisodeId, shot.ShotResourceId, cancellationToken);
                 if (submitted?.Status == "failed")
@@ -559,7 +557,6 @@ public sealed class StoryboardMediaBatchService(
         {
             foreach (var entry in pending.ToArray())
             {
-                await videoService.ProcessAsync(entry.RunId, cancellationToken);
                 var current = await ShotVideoQueries.GetAsync(
                     dbContext, projectId, productionEpisodeId, entry.Shot.ShotResourceId, cancellationToken);
                 if (current?.Status is not ("completed" or "failed" or "cancelled")) continue;

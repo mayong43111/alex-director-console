@@ -71,6 +71,17 @@ public sealed class DeleteProjectCommandHandler(V2DbContext dbContext)
             return DeleteProjectResult.NotFound;
         }
 
+        if (!command.Force && await HasProjectDataAsync(command.ProjectId, cancellationToken))
+        {
+            return DeleteProjectResult.HasDependencies;
+        }
+
+        if (command.Force)
+        {
+            await DeleteProjectDataAsync(project, cancellationToken);
+            return DeleteProjectResult.Deleted;
+        }
+
         dbContext.Projects.Remove(project);
         try
         {
@@ -81,5 +92,96 @@ public sealed class DeleteProjectCommandHandler(V2DbContext dbContext)
         {
             return DeleteProjectResult.HasDependencies;
         }
+    }
+
+    private async Task<bool> HasProjectDataAsync(Guid projectId, CancellationToken cancellationToken) =>
+        await dbContext.ProductionEpisodes.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.Assets.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ResourceStates.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.AssetDependencies.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.VisualReferences.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ShotDefinitions.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ShotBeatClaims.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ShotAssetLinks.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.DirectorDecisions.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ValidationRuns.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.AgentTasks.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.AgentTaskItems.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ProductionRuns.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.ProductionRunItems.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.Sessions.AnyAsync(item => item.ProjectId == projectId, cancellationToken)
+        || await dbContext.CopilotConversations.AnyAsync(item => item.ProjectId == projectId, cancellationToken);
+
+    private async Task DeleteProjectDataAsync(
+        Database.Models.Project project,
+        CancellationToken cancellationToken)
+    {
+        var projectId = project.Id;
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        project.CurrentCreativeSettingsId = null;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        await dbContext.ProductionRunItems
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ProductionRuns
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        await dbContext.AgentTaskOutputs
+            .Where(output =>
+                dbContext.AgentTasks.Any(task => task.Id == output.TaskId && task.ProjectId == projectId)
+                || dbContext.Assets.Any(asset => asset.Id == output.AssetId && asset.ProjectId == projectId))
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.AgentTaskItems
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        await dbContext.VisualReferences
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ShotBeatClaims
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ShotAssetLinks
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ShotDefinitions
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.AssetDependencies
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ResourceStates
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        await dbContext.ValidationRuns
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.DirectorDecisions
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        await dbContext.Assets
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.AgentTasks
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.ProductionEpisodes
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.Sessions
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.CopilotConversations
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        dbContext.Projects.Remove(project);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 }

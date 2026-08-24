@@ -45,6 +45,13 @@ public sealed record StoryboardDesignResult(
     string Model,
     string Runtime);
 
+public sealed record StoryboardDesignProgress(
+    int Completed,
+    int Total,
+    int SceneNumber,
+    string Heading,
+    int ShotCount);
+
 public sealed record StoryboardLinkedAssetView(
     Guid AssetId,
     Guid ResourceId,
@@ -140,6 +147,7 @@ public interface IStoryboardDesigner
         ProjectSettingsView settings,
         ProductionScriptPackageView scriptPackage,
         IReadOnlyList<VisualAssetView> assets,
+        Func<StoryboardDesignProgress, Task>? reportProgress,
         CancellationToken cancellationToken);
 }
 
@@ -166,7 +174,10 @@ public interface IStoryboardShotTextRewriter
 public sealed record GetStoryboardQuery(Guid ProjectId, Guid ProductionEpisodeId)
     : IQuery<StoryboardView?>;
 
-public sealed record GenerateStoryboardCommand(Guid ProjectId, Guid ProductionEpisodeId)
+public sealed record GenerateStoryboardCommand(
+    Guid ProjectId,
+    Guid ProductionEpisodeId,
+    Func<StoryboardDesignProgress, Task>? ReportProgress = null)
     : ICommand<StoryboardView?>;
 
 public sealed record UpdateStoryboardShotAssetsCommand(
@@ -251,7 +262,12 @@ public sealed class GenerateStoryboardCommandHandler(
         var visualAssets = await new ListVisualAssetsQueryHandler(dbContext).HandleAsync(
             new ListVisualAssetsQuery(command.ProjectId, null),
             cancellationToken);
-        var result = await designer.DesignAsync(settings, scriptPackage, visualAssets, cancellationToken);
+        var result = await designer.DesignAsync(
+            settings,
+            scriptPackage,
+            visualAssets,
+            command.ReportProgress,
+            cancellationToken);
         var shots = Normalize(result.Shots, scriptPackage, visualAssets);
         var beatIds = BuildBeatIdQueues(scriptPackage);
         var previousClaims = await dbContext.ShotBeatClaims
@@ -900,6 +916,7 @@ public sealed class MafStoryboardDesigner(
         ProjectSettingsView settings,
         ProductionScriptPackageView scriptPackage,
         IReadOnlyList<VisualAssetView> assets,
+        Func<StoryboardDesignProgress, Task>? reportProgress,
         CancellationToken cancellationToken)
     {
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
@@ -934,45 +951,114 @@ public sealed class MafStoryboardDesigner(
                     }
                 },
                 loggerFactory);
-        var input = JsonSerializer.Serialize(new
+        var scenes = scriptPackage.Episode.Scenes.OrderBy(item => item.SceneNumber).ToArray();
+        var shots = new List<StoryboardShotDraft>();
+        for (var sceneIndex = 0; sceneIndex < scenes.Length; sceneIndex++)
         {
-            project = new
+            var scene = scenes[sceneIndex];
+            var requiredHooks = new List<StoryboardHookDraft>();
+            if (sceneIndex == 0)
             {
-                settings.ProjectName,
-                settings.AspectRatio,
-                settings.VisualStyle,
-                settings.ArtDirection,
-                settings.CameraLanguage,
-                settings.SoundStrategy,
-                settings.CharacterDesign,
-                settings.ImagePromptPrefix
-            },
-            targetSeconds = scriptPackage.TargetSeconds ?? scriptPackage.Episode.TargetSeconds,
-            episode = scriptPackage.Episode,
-            specialPropNames = assets.Where(item => item.Kind == "prop").Select(item => item.Name),
-            assets = assets.Select(item => new
+                requiredHooks.AddRange((scriptPackage.Episode.SmallHooks ?? [])
+                    .Select(item => new StoryboardHookDraft("small", item)));
+            }
+            if (sceneIndex == scenes.Length - 1)
             {
-                item.Kind,
-                item.Name,
-                item.Summary,
-                item.VisualDescription,
-                item.MustKeep,
-                item.Avoid
-            })
-        }, StoryboardDefaults.JsonOptions);
-        var response = await agent.RunAsync(
-            $"为该正式剧本设计完整分镜：\n{input}",
-            cancellationToken: cancellationToken);
-        var text = response.Text?.Trim() ?? string.Empty;
-        var start = text.IndexOf('{');
-        var end = text.LastIndexOf('}');
-        if (start < 0 || end <= start)
-            throw new InvalidOperationException("GPT-5.4 未返回 JSON 分镜。");
-        var payload = JsonSerializer.Deserialize<StoryboardPayload>(
-            text[start..(end + 1)],
-            StoryboardDefaults.JsonOptions)
-            ?? throw new InvalidOperationException("GPT-5.4 未返回有效分镜。");
-        return new(payload.Shots, LlmChatClientFactory.GetModel(configuration!), "MAF HarnessAgent");
+                requiredHooks.AddRange((scriptPackage.Episode.BigHooks ?? [])
+                    .Select(item => new StoryboardHookDraft("big", item)));
+            }
+            var input = JsonSerializer.Serialize(new
+            {
+                project = new
+                {
+                    settings.ProjectName,
+                    settings.AspectRatio,
+                    settings.VisualStyle,
+                    settings.ArtDirection,
+                    settings.CameraLanguage,
+                    settings.SoundStrategy,
+                    settings.CharacterDesign,
+                    settings.ImagePromptPrefix
+                },
+                episode = new
+                {
+                    scriptPackage.Episode.Title,
+                    scriptPackage.Episode.Logline,
+                    scriptPackage.Episode.TargetSeconds
+                },
+                scene,
+                requiredHooks,
+                specialPropNames = assets.Where(item => item.Kind == "prop").Select(item => item.Name),
+                assets = assets.Select(item => new
+                {
+                    item.Kind,
+                    item.Name,
+                    item.Summary,
+                    item.VisualDescription,
+                    item.MustKeep,
+                    item.Avoid
+                })
+            }, StoryboardDefaults.JsonOptions);
+            var sceneShots = await DesignSceneAsync(
+                scene.SceneNumber,
+                scene.ShotPlan!.Select(item => item.ShotNumber).ToHashSet(),
+                input);
+            shots.AddRange(sceneShots);
+            if (reportProgress is not null)
+            {
+                await reportProgress(new(
+                    sceneIndex + 1,
+                    scenes.Length,
+                    scene.SceneNumber,
+                    scene.Heading,
+                    sceneShots.Count));
+            }
+        }
+        return new(shots, LlmChatClientFactory.GetModel(configuration!), "MAF HarnessAgent");
+
+        async Task<IReadOnlyList<StoryboardShotDraft>> DesignSceneAsync(
+            int sceneNumber,
+            HashSet<int> plannedShotNumbers,
+            string input)
+        {
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= 2; attempt++)
+            {
+                try
+                {
+                    var response = await agent.RunAsync(
+                        $"仅设计正式剧本第 {sceneNumber} 场的分镜。必须只返回该场 shotPlan 中的镜头，镜号不得新增、遗漏或重复；requiredHooks 中的爆点必须原文映射且只映射一次。返回 {{\"shots\":[...]}}：\n{input}",
+                        cancellationToken: cancellationToken);
+                    var text = response.Text?.Trim() ?? string.Empty;
+                    var start = text.IndexOf('{');
+                    var end = text.LastIndexOf('}');
+                    if (start < 0 || end <= start)
+                        throw new InvalidOperationException($"第 {sceneNumber} 场未返回 JSON 分镜。");
+                    var payload = JsonSerializer.Deserialize<StoryboardPayload>(
+                        text[start..(end + 1)],
+                        StoryboardDefaults.JsonOptions)
+                        ?? throw new InvalidOperationException($"第 {sceneNumber} 场未返回有效分镜。");
+                    var actualShotNumbers = payload.Shots
+                        .Where(item => item.SceneNumber == sceneNumber)
+                        .Select(item => item.ShotNumber)
+                        .ToHashSet();
+                    if (payload.Shots.Any(item => item.SceneNumber != sceneNumber)
+                        || payload.Shots.Count != plannedShotNumbers.Count
+                        || !actualShotNumbers.SetEquals(plannedShotNumbers))
+                    {
+                        throw new InvalidOperationException($"第 {sceneNumber} 场返回的镜号与正式剧本拍摄计划不一致。");
+                    }
+                    return payload.Shots;
+                }
+                catch (Exception error) when (error is JsonException || error is InvalidOperationException)
+                {
+                    lastError = error;
+                }
+            }
+            throw new InvalidOperationException(
+                $"第 {sceneNumber} 场分镜生成失败：{lastError?.Message ?? "模型输出无效。"}",
+                lastError);
+        }
     }
 
     private sealed class StoryboardPayload

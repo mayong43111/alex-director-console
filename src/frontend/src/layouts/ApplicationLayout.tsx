@@ -34,14 +34,14 @@ export function ApplicationLayout() {
         ? "项目只引用服务能力，不在项目内保存密钥"
         : "从创意设定到分集交付的全部制作空间";
   const [isAgentOverlay, setIsAgentOverlay] = useState(
-    () => window.matchMedia("(max-width: 1279px)").matches,
+    () => window.matchMedia("(max-width: 1023px)").matches,
   );
   const [agentOpen, setAgentOpen] = useState(
-    () => !inSettings && window.matchMedia("(min-width: 1280px)").matches,
+    () => !inSettings && window.matchMedia("(min-width: 1024px)").matches,
   );
 
   useEffect(() => {
-    const mobileQuery = window.matchMedia("(max-width: 1279px)");
+    const mobileQuery = window.matchMedia("(max-width: 1023px)");
     const syncAgentVisibility = (event: MediaQueryListEvent | MediaQueryList) => {
       setIsAgentOverlay(event.matches);
       setAgentOpen(!inSettings && !event.matches);

@@ -22,6 +22,7 @@ import {
   createProject,
   deleteProject,
   listProjects,
+  ProjectDeleteConflictError,
   updateProject,
   type ProjectRecord,
 } from "../api/projects";
@@ -118,6 +119,7 @@ export function ProjectCenterPage() {
   const [saving, setSaving] = useState(false);
   const [descriptionAgentStatus, setDescriptionAgentStatus] = useState<AgentTextAreaStatus>("idle");
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [forceDeleteProject, setForceDeleteProject] = useState<ProjectRecord | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -187,15 +189,20 @@ export function ProjectCenterPage() {
     setEditor({ mode: "edit", project });
   }
 
-  async function removeProject(project: ProjectRecord) {
+  async function removeProject(project: ProjectRecord, force = false) {
     if (deletingId) return;
     setDeletingId(project.id);
     setActionError(null);
     try {
-      await deleteProject(project.id);
+      await deleteProject(project.id, force);
       sessionStorage.removeItem(`alex-director-v2.project.${project.id}`);
       setProjects((current) => current.filter((item) => item.id !== project.id));
+      setForceDeleteProject(null);
     } catch (error) {
+      if (!force && error instanceof ProjectDeleteConflictError) {
+        setForceDeleteProject(project);
+        return;
+      }
       setActionError(error instanceof Error ? error.message : "项目删除失败，请稍后重试。");
     } finally {
       setDeletingId(null);
@@ -262,7 +269,7 @@ export function ProjectCenterPage() {
           </Tooltip>
           <Popconfirm
             title="删除项目"
-            description={`确定删除“${project.name}”吗？已有业务数据的项目不会被删除。`}
+            description={`确定删除“${project.name}”吗？如果项目包含业务数据，将需要再次确认。`}
             okText="删除"
             cancelText="取消"
             okButtonProps={{ danger: true, loading: deletingId === project.id }}
@@ -360,6 +367,25 @@ export function ProjectCenterPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+      <Modal
+        title="永久删除项目及全部数据？"
+        open={forceDeleteProject !== null}
+        okText="删除全部数据"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        confirmLoading={deletingId === forceDeleteProject?.id}
+        cancelButtonProps={{ disabled: deletingId === forceDeleteProject?.id }}
+        closable={deletingId !== forceDeleteProject?.id}
+        maskClosable={false}
+        onCancel={() => {
+          if (!deletingId) setForceDeleteProject(null);
+        }}
+        onOk={() => forceDeleteProject && removeProject(forceDeleteProject, true)}
+      >
+        <p>
+          将永久删除“{forceDeleteProject?.name}”及其项目设定、素材与媒体资产、剧本、分镜、生产任务、对话和全部关联数据。此操作不可恢复。
+        </p>
       </Modal>
     </div>
   );
