@@ -5147,7 +5147,10 @@ export function StoryboardShotPage() {
           <section className="shot-workbench">
         <header>
           <div>
-            <h2>{shotCode}</h2>
+            <div className="shot-detail-heading">
+              <h2>{shotCode}</h2>
+              <span><strong>{shot.durationSeconds.toFixed(1)}</strong> 秒</span>
+            </div>
             <EditableShotText
               field="visualDescription"
               value={shot.visualDescription || shot.composition}

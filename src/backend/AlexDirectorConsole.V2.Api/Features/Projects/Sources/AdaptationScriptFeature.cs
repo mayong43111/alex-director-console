@@ -575,6 +575,13 @@ public sealed class GenerateAdaptationScriptCommandHandler(
 
     private static AdaptationEpisodeDraft NormalizeOutline(AdaptationEpisodeDraft episode)
     {
+        if (string.IsNullOrWhiteSpace(episode.Title)
+            || string.IsNullOrWhiteSpace(episode.Logline)
+            || episode.TargetSeconds <= 0)
+        {
+            throw new InvalidOperationException(
+                $"第 {episode.ProposalNumber} 集缺少标题、故事线或有效目标时长。");
+        }
         if (episode.Scenes.Count == 0)
             throw new InvalidOperationException($"第 {episode.ProposalNumber} 集没有大纲节点。");
         return episode with
@@ -1302,7 +1309,7 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 ShotPlan = normalizedShots
             };
         }).ToArray();
-        ValidateDialogueTiming(normalizedScenes, outline.ProposalNumber);
+        ValidateDialogueShotCapacity(normalizedScenes, outline.ProposalNumber);
         return script with
         {
             Title = outline.Title,
@@ -1314,36 +1321,23 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
         };
     }
 
-    private static void ValidateDialogueTiming(
+    private static void ValidateDialogueShotCapacity(
         IReadOnlyList<ProductionScriptSceneDraft> scenes,
         int episodeNumber)
     {
-        const int maximumLineCharacters = 32;
-        const double maximumDialogueCharactersPerSecond = 3.2;
         var failures = new List<string>();
         foreach (var scene in scenes)
         {
             var lines = scene.Dialogues.SelectMany(dialogue => dialogue.Lines).ToArray();
-            var overlongLineCount = lines.Count(
-                line => CountSpokenCharacters(line) > maximumLineCharacters);
-            if (overlongLineCount > 0)
-                failures.Add($"第 {scene.SceneNumber} 场有 {overlongLineCount} 句超过 {maximumLineCharacters} 字");
-
-            var characterCount = lines.Sum(CountSpokenCharacters);
-            var maximumCharacters = (int)Math.Floor(
-                scene.TargetSeconds * maximumDialogueCharactersPerSecond);
-            if (characterCount > maximumCharacters)
+            if (scene.ShotPlan!.Count < lines.Length)
                 failures.Add(
-                    $"第 {scene.SceneNumber} 场对白 {characterCount} 字，{scene.TargetSeconds:0.#} 秒最多 {maximumCharacters} 字");
+                    $"第 {scene.SceneNumber} 场有 {lines.Length} 句对白，但只有 {scene.ShotPlan.Count} 个镜头；每句对白必须有独立镜头");
         }
 
         if (failures.Count > 0)
             throw new InvalidOperationException(
                 $"第 {episodeNumber} 集对白未通过：{string.Join("；", failures)}。请一次修正全部场次。");
     }
-
-    private static int CountSpokenCharacters(string line) =>
-        line.Count(character => !char.IsWhiteSpace(character));
 
     private static double[] NormalizeShotDurations(
         IReadOnlyList<AdaptationShotPlanDraft> shots,
@@ -1964,20 +1958,12 @@ public sealed class MafAdaptationScriptWriter(
                 projectSettings.SoundStrategy
             },
             storyGraph = new { analysis.Summary, analysis.Characters, analysis.Relations },
-            deliveryConstraints = new
-            {
-                EstimatedChineseCharactersPerSecond = 4,
-                MaximumDialogueShare = .65,
-                MaximumEpisodeDialogueCharacters = (int)Math.Floor(outline.TargetSeconds * 2.6),
-                PreferredLineCharacters = "8-20",
-                AbsoluteMaximumLineCharacters = 32
-            },
             correction = string.IsNullOrWhiteSpace(correction)
                 ? null
                 : new
                 {
                     Failure = correction,
-                    RequiredAction = "只重写上一版的dialogues；错误中每个最多N字的场次都必须压到N-8字以内。"
+                    RequiredAction = "根据 Failure 修正上一版，同时保持大纲、人物身份和事件顺序不变。"
                 },
             previousScript = string.IsNullOrWhiteSpace(correction) ? null : previousScript,
             outline

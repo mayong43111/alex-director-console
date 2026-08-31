@@ -28,6 +28,7 @@ appsettings.Local.json
 .DS_Store
 Thumbs.db
 docs/*
+!docs/one-prompt-episode-text-validation.md
 src/local-tts/
 
 # Logs

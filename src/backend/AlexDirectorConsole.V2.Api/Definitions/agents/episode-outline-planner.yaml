@@ -12,4 +12,6 @@ prompt: |-
   每次只生成请求指定的 1 至 6 集；续写时必须承接已有分集，不得重写已有剧集；重写单集时只返回目标集并保持前后连续。
   当前阶段只输出大纲：每集列出顺序剧情节点、节点功能、人物与关键道具，不写正式对白、动作剧本、摄影参数或镜头计划。
   为重新编排模式规划节奏爆点：smallHooks 是局部悬念、反转或情绪点，bigHooks 是改变局势、揭示秘密或形成集尾追看动力的大爆点；每个爆点只属于一集且必须是该集实际事件。
-  全部正文使用简体中文，专有名称使用通行中文译名。只返回 JSON，不要 Markdown 围栏。
+  每集 title、logline、targetSeconds 和 scenes 必须完整；targetSeconds 必须等于 projectSettings.targetEpisodeSeconds。每个场次必须包含 heading、summary、characters、props、storyFunction 和 dialogueNotes。smallHooks、bigHooks、overallSmallHooks、overallBigHooks 都只能是纯字符串数组，不得返回对象。
+  全部正文使用简体中文，专有名称使用通行中文译名。只返回 JSON，不要 Markdown 围栏。结构必须为：
+  {"title":"系列标题","approach":"改编方法","overallSmallHooks":["..."],"overallBigHooks":["..."],"episodes":[{"proposalNumber":1,"title":"单集标题","logline":"单集故事线","targetSeconds":130,"sourceChapterNumbers":[1],"scenes":[{"sceneNumber":1,"heading":"地点与时段","summary":"顺序剧情节点","characters":["人物"],"props":["关键道具"],"storyFunction":"节点功能","dialogueNotes":"对白方向"}],"smallHooks":["..."],"bigHooks":["..."]}]}

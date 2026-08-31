@@ -399,11 +399,7 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
             Assert.NotEmpty(scene.Dialogues);
             Assert.NotEmpty(scene.ShotPlan);
             var dialogueLines = scene.Dialogues.SelectMany(dialogue => dialogue.Lines).ToArray();
-            Assert.All(dialogueLines, line => Assert.True(
-                line.Count(character => !char.IsWhiteSpace(character)) <= 32));
-            Assert.True(
-                dialogueLines.Sum(line => line.Count(character => !char.IsWhiteSpace(character)))
-                    <= Math.Floor(scene.TargetSeconds * 3.2));
+            Assert.True(scene.ShotPlan.Count >= dialogueLines.Length);
         });
         Assert.Equal(
             package.Episode.TargetSeconds,

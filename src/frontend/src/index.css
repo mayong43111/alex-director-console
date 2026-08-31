@@ -1122,6 +1122,9 @@ button { color: inherit; }
 .shot-workbench > header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 14px; border: 1px solid var(--line); background: #fff; }
 .shot-workbench > header > div:first-child { min-width: 0; flex: 1; }
 .shot-workbench h2 { margin: 2px 0; font-size: 16px; }
+.shot-detail-heading { display: flex; align-items: baseline; gap: 10px; }
+.shot-detail-heading > span { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.shot-detail-heading > span strong { color: var(--ink); font-size: 12px; }
 .shot-workbench header p { margin: 0; color: var(--muted); font-size: 12px !important; }
 .shot-production-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .shot-saved-prompt { margin: 0; border-bottom: 1px solid var(--line); background: #f8faf9; }

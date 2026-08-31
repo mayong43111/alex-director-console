@@ -522,8 +522,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                             "建立场景空间与人物关系",
                             scene.Heading,
                             scene.Action,
-                            string.Empty,
-                            "环境声",
+                            $"{scene.Dialogues[0].Character}：{scene.Dialogues[0].Lines[0]}",
+                            "环境声与对白",
                             scene.Characters,
                             [],
                             null,
@@ -542,8 +542,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                             "主体位于画面视觉中心",
                             scene.Summary,
                             scene.Action,
-                            string.Join(" ", scene.Dialogues.SelectMany(dialogue =>
-                                dialogue.Lines.Select(line => $"{dialogue.Character}：{line}"))),
+                            $"{scene.Dialogues[0].Character}：{scene.Dialogues[0].Lines[1]}",
                             "动作声与对白",
                             scene.Characters,
                             [],
@@ -557,10 +556,10 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                                         .Select(item => new StoryboardHookDraft("big", item))
                                     : []
                                     ],
-                                    "first-last-continuous",
-                                    "人物从背对镜头转为正面，结束朝向必须由尾帧明确约束。",
-                                    "人物背对镜头位于画面中心，双手自然垂下。",
-                                    "人物完成转身后正对镜头，视线落向画外对手。",
+                                    "direct-first-frame",
+                                    "普通转身与缓慢推进不需要额外尾帧约束。",
+                                    "人物位于画面中心，视线落向行动方向。",
+                                    string.Empty,
                                     "0.0-1.0 秒从背面中景开始；1.0-2.5 秒人物向左转身，镜头缓慢推进并保持轴线；2.5-3.0 秒在正面视线落定时切出。")
                     });
                     if (reportProgress is not null)

@@ -478,6 +478,7 @@ public sealed class GenerateStoryboardCommandHandler(
             && string.IsNullOrWhiteSpace(item.LastFrameDescription)))
             throw new InvalidOperationException("首尾帧镜头必须包含明确的尾帧描述。");
 
+        ValidateDialogueMapping(proposed, scriptPackage);
         ValidateHooks(proposed, scriptPackage);
 
         if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
@@ -508,6 +509,64 @@ public sealed class GenerateStoryboardCommandHandler(
             .ToArray();
     }
 
+    internal static void ValidateDialogueMapping(
+        IReadOnlyList<StoryboardShotDraft> proposed,
+        ProductionScriptPackageView scriptPackage)
+    {
+        foreach (var scene in scriptPackage.Episode.Scenes)
+        {
+            ValidateSceneDialogueMapping(
+                scene.SceneNumber,
+                proposed.Where(item => item.SceneNumber == scene.SceneNumber).ToArray(),
+                scene.Dialogues.SelectMany(dialogue =>
+                    dialogue.Lines.Select(line => $"{dialogue.Character}：{line}")));
+        }
+    }
+
+    internal static void ValidateSceneDialogueMapping(
+        int sceneNumber,
+        IReadOnlyList<StoryboardShotDraft> sceneShots,
+        IEnumerable<string> expectedDialogueLines)
+    {
+        static Dictionary<string, int> Counts(IEnumerable<string> lines) => lines
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0)
+            .GroupBy(line => line, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+
+        var actualLines = new List<string>();
+        foreach (var shot in sceneShots)
+        {
+            var lines = shot.Dialogue
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (lines.Length > 1)
+                throw new InvalidOperationException(
+                    $"第 {sceneNumber} 场第 {shot.ShotNumber} 镜包含多句对白；每个镜头最多只能有一句对白。");
+            if (lines.Length == 1)
+                actualLines.Add(lines[0]);
+        }
+
+        var expected = Counts(expectedDialogueLines);
+        var actual = Counts(actualLines);
+        if (expected.Count != actual.Count
+            || expected.Any(item => !actual.TryGetValue(item.Key, out var count) || count != item.Value))
+        {
+            var missing = expected
+                .SelectMany(item => Enumerable.Repeat(
+                    item.Key,
+                    item.Value - (actual.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+                .ToArray();
+            var unexpected = actual
+                .SelectMany(item => Enumerable.Repeat(
+                    item.Key,
+                    item.Value - (expected.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+                .ToArray();
+            throw new InvalidOperationException(
+                $"第 {sceneNumber} 场对白必须逐句且仅一次映射到独立镜头，并保持“角色：台词”原文不变。"
+                + $"缺失：{string.Join(" | ", missing)}；多余或改写：{string.Join(" | ", unexpected)}。");
+        }
+    }
+
     private static string[] NormalizeNames(IReadOnlyList<string> values) => values
         .Select(item => item.Trim())
         .Where(item => item.Length > 0)
@@ -529,6 +588,44 @@ public sealed class GenerateStoryboardCommandHandler(
             .Select(item => new StoryboardHookDraft(item.Type.Trim().ToLowerInvariant(), item.Description.Trim()))
             .Where(item => item.Description.Length > 0)
             .ToArray();
+
+    internal static void ValidateSceneHooks(
+        int sceneNumber,
+        IReadOnlyList<StoryboardShotDraft> sceneShots,
+        IEnumerable<StoryboardHookDraft> expectedHooks)
+    {
+        static Dictionary<string, int> Counts(IEnumerable<StoryboardHookDraft> hooks) => hooks
+            .GroupBy(HookKey, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+
+        var actualHooks = sceneShots.SelectMany(item => NormalizeHooks(item.Hooks)).ToArray();
+        if (actualHooks.Any(item => item.Type is not ("small" or "big")))
+            throw new InvalidOperationException($"第 {sceneNumber} 场分镜爆点类型只能是 small 或 big。");
+
+        var expected = Counts(expectedHooks.Select(item =>
+            new StoryboardHookDraft(item.Type.Trim().ToLowerInvariant(), item.Description.Trim())));
+        var actual = Counts(actualHooks);
+        if (expected.Count == actual.Count
+            && expected.All(item => actual.TryGetValue(item.Key, out var count) && count == item.Value))
+        {
+            return;
+        }
+
+        static string Display(string key) => key.Replace('\n', ':');
+        var missing = expected
+            .SelectMany(item => Enumerable.Repeat(
+                Display(item.Key),
+                item.Value - (actual.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+            .ToArray();
+        var unexpected = actual
+            .SelectMany(item => Enumerable.Repeat(
+                Display(item.Key),
+                item.Value - (expected.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+            .ToArray();
+        throw new InvalidOperationException(
+            $"第 {sceneNumber} 场爆点必须逐条原文映射且仅映射一次。"
+            + $"缺失：{string.Join(" | ", missing)}；多余或改写：{string.Join(" | ", unexpected)}。");
+    }
 
     private static void ValidateHooks(
         IReadOnlyList<StoryboardShotDraft> shots,
@@ -952,21 +1049,17 @@ public sealed class MafStoryboardDesigner(
                 },
                 loggerFactory);
         var scenes = scriptPackage.Episode.Scenes.OrderBy(item => item.SceneNumber).ToArray();
+        var requiredHooksByScene = AssignHooksToScenes(
+            scenes,
+            (scriptPackage.Episode.SmallHooks ?? [])
+                .Select(item => new StoryboardHookDraft("small", item))
+                .Concat((scriptPackage.Episode.BigHooks ?? [])
+                    .Select(item => new StoryboardHookDraft("big", item))));
         var shots = new List<StoryboardShotDraft>();
         for (var sceneIndex = 0; sceneIndex < scenes.Length; sceneIndex++)
         {
             var scene = scenes[sceneIndex];
-            var requiredHooks = new List<StoryboardHookDraft>();
-            if (sceneIndex == 0)
-            {
-                requiredHooks.AddRange((scriptPackage.Episode.SmallHooks ?? [])
-                    .Select(item => new StoryboardHookDraft("small", item)));
-            }
-            if (sceneIndex == scenes.Length - 1)
-            {
-                requiredHooks.AddRange((scriptPackage.Episode.BigHooks ?? [])
-                    .Select(item => new StoryboardHookDraft("big", item)));
-            }
+            var requiredHooks = requiredHooksByScene[scene.SceneNumber];
             var input = JsonSerializer.Serialize(new
             {
                 project = new
@@ -1002,6 +1095,9 @@ public sealed class MafStoryboardDesigner(
             var sceneShots = await DesignSceneAsync(
                 scene.SceneNumber,
                 scene.ShotPlan!.Select(item => item.ShotNumber).ToHashSet(),
+                scene.Dialogues.SelectMany(dialogue =>
+                    dialogue.Lines.Select(line => $"{dialogue.Character}：{line}")),
+                requiredHooks,
                 input);
             shots.AddRange(sceneShots);
             if (reportProgress is not null)
@@ -1019,6 +1115,8 @@ public sealed class MafStoryboardDesigner(
         async Task<IReadOnlyList<StoryboardShotDraft>> DesignSceneAsync(
             int sceneNumber,
             HashSet<int> plannedShotNumbers,
+            IEnumerable<string> expectedDialogueLines,
+            IEnumerable<StoryboardHookDraft> expectedHooks,
             string input)
         {
             Exception? lastError = null;
@@ -1026,8 +1124,11 @@ public sealed class MafStoryboardDesigner(
             {
                 try
                 {
+                    var correction = lastError is null
+                        ? string.Empty
+                        : $"\n上一版错误：{lastError.Message} 请只修正该错误，仍须返回完整场次分镜。";
                     var response = await agent.RunAsync(
-                        $"仅设计正式剧本第 {sceneNumber} 场的分镜。必须只返回该场 shotPlan 中的镜头，镜号不得新增、遗漏或重复；requiredHooks 中的爆点必须原文映射且只映射一次。返回 {{\"shots\":[...]}}：\n{input}",
+                        $"仅设计正式剧本第 {sceneNumber} 场的分镜。必须只返回该场 shotPlan 中的镜头，镜号不得新增、遗漏或重复；requiredHooks 中的爆点必须原文映射且只映射一次。返回 {{\"shots\":[...]}}：\n{input}{correction}",
                         cancellationToken: cancellationToken);
                     var text = response.Text?.Trim() ?? string.Empty;
                     var start = text.IndexOf('{');
@@ -1048,6 +1149,14 @@ public sealed class MafStoryboardDesigner(
                     {
                         throw new InvalidOperationException($"第 {sceneNumber} 场返回的镜号与正式剧本拍摄计划不一致。");
                     }
+                    GenerateStoryboardCommandHandler.ValidateSceneDialogueMapping(
+                        sceneNumber,
+                        payload.Shots,
+                        expectedDialogueLines);
+                    GenerateStoryboardCommandHandler.ValidateSceneHooks(
+                        sceneNumber,
+                        payload.Shots,
+                        expectedHooks);
                     return payload.Shots;
                 }
                 catch (Exception error) when (error is JsonException || error is InvalidOperationException)
@@ -1058,6 +1167,53 @@ public sealed class MafStoryboardDesigner(
             throw new InvalidOperationException(
                 $"第 {sceneNumber} 场分镜生成失败：{lastError?.Message ?? "模型输出无效。"}",
                 lastError);
+        }
+    }
+
+    internal static IReadOnlyDictionary<int, IReadOnlyList<StoryboardHookDraft>> AssignHooksToScenes(
+        IReadOnlyList<ProductionScriptSceneDraft> scenes,
+        IEnumerable<StoryboardHookDraft> hooks)
+    {
+        var assignments = scenes.ToDictionary(
+            scene => scene.SceneNumber,
+            _ => new List<StoryboardHookDraft>());
+        foreach (var hook in hooks.Where(item => !string.IsNullOrWhiteSpace(item.Description)))
+        {
+            var bigrams = SignificantBigrams(hook.Description).Distinct(StringComparer.Ordinal).ToArray();
+            var selected = scenes
+                .Select(scene => new
+                {
+                    Scene = scene,
+                    Score = scene.Characters.Count(name => hook.Description.Contains(name, StringComparison.Ordinal)) * 100
+                        + bigrams.Count(bigram => SceneText(scene).Contains(bigram, StringComparison.Ordinal))
+                })
+                .OrderByDescending(item => item.Score)
+                .ThenBy(item => hook.Type.Equals("big", StringComparison.OrdinalIgnoreCase)
+                    ? -item.Scene.SceneNumber
+                    : item.Scene.SceneNumber)
+                .First()
+                .Scene;
+            assignments[selected.SceneNumber].Add(hook);
+        }
+
+        return assignments.ToDictionary(
+            item => item.Key,
+            item => (IReadOnlyList<StoryboardHookDraft>)item.Value);
+
+        static string SceneText(ProductionScriptSceneDraft scene) => string.Join('\n',
+            scene.Heading,
+            scene.Summary,
+            scene.Action,
+            scene.StoryFunction,
+            scene.DialogueIntent ?? string.Empty,
+            string.Join('\n', scene.Dialogues.SelectMany(dialogue =>
+                dialogue.Lines.Select(line => $"{dialogue.Character}：{line}"))));
+
+        static IEnumerable<string> SignificantBigrams(string value)
+        {
+            var characters = value.Where(char.IsLetterOrDigit).ToArray();
+            for (var index = 0; index < characters.Length - 1; index++)
+                yield return new string([characters[index], characters[index + 1]]);
         }
     }
 
@@ -1991,8 +2147,7 @@ public static class ShotProductionModes
     public const string DirectFirstFrame = "direct-first-frame";
     public const string FirstLastContinuous = "first-last-continuous";
 
-    public static string ForDuration(double durationSeconds) =>
-        durationSeconds <= ThresholdSeconds ? DirectFirstFrame : FirstLastContinuous;
+    public static string ForDuration(double durationSeconds) => DirectFirstFrame;
 
     public static bool IsSupported(string? mode) => mode is DirectFirstFrame or FirstLastContinuous;
 

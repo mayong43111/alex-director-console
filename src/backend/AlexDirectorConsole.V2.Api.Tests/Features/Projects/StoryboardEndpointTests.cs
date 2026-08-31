@@ -25,6 +25,105 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     public Task DisposeAsync() => Task.CompletedTask;
 
     [Fact]
+    public void Dialogue_mapping_rejects_multiple_lines_in_one_shot()
+    {
+        var shot = new StoryboardShotDraft(
+            1,
+            1,
+            3,
+            "中景",
+            "平视",
+            "固定",
+            "人物居中",
+            "两人交谈",
+            "人物依次开口",
+            "刘备：俺也去。\n关羽：我也去。",
+            "环境声",
+            ["刘备", "关羽"],
+            [],
+            ProductionMode: ShotProductionModes.DirectFirstFrame,
+            FrameStrategyReason: "单一首帧足够",
+            FirstFrameDescription: "两人相对而立",
+            CutDescription: "人物说完后切出");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateSceneDialogueMapping(
+                1,
+                [shot],
+                ["刘备：俺也去。", "关羽：我也去。"]));
+
+        Assert.Contains("每个镜头最多只能有一句对白", error.Message);
+    }
+
+    [Fact]
+    public void Hook_mapping_reports_missing_and_rewritten_hooks()
+    {
+        var shot = new StoryboardShotDraft(
+            1,
+            1,
+            3,
+            "中景",
+            "平视",
+            "固定",
+            "人物居中",
+            "人物抬头",
+            "人物看向榜文",
+            string.Empty,
+            "环境声",
+            ["刘备"],
+            [],
+            [new StoryboardHookDraft("small", "刘备抬头看榜")]);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateSceneHooks(
+                1,
+                [shot],
+                [new StoryboardHookDraft("small", "刘备榜下长叹")]));
+
+        Assert.Contains("缺失：small:刘备榜下长叹", error.Message);
+        Assert.Contains("多余或改写：small:刘备抬头看榜", error.Message);
+    }
+
+    [Fact]
+    public void Hooks_are_assigned_to_the_most_relevant_scene()
+    {
+        static ProductionScriptSceneDraft Scene(
+            int number,
+            string summary,
+            IReadOnlyList<string> characters) => new(
+                number,
+                $"第 {number} 场",
+                summary,
+                summary,
+                [],
+                characters,
+                [],
+                summary,
+                30,
+                "紧凑",
+                "人物反应",
+                [new AdaptationShotPlanDraft(1, 30, "中景", "平视", "固定", "推进剧情")]);
+
+        var assignments = MafStoryboardDesigner.AssignHooksToScenes(
+            [
+                Scene(1, "黄巾骤起，各州郡贴榜募兵。", ["张角"]),
+                Scene(2, "刘备榜前长叹，张飞被他的志向打动。", ["刘备", "张飞"]),
+                Scene(3, "关羽进入酒肆，三人同桌并相约桃园。", ["刘备", "张飞", "关羽"])
+            ],
+            [
+                new StoryboardHookDraft("small", "刘备叹气却不是懦弱，而是有志无力"),
+                new StoryboardHookDraft("small", "张飞被刘备的志向打动"),
+                new StoryboardHookDraft("small", "关羽一出场就带着命案前史"),
+                new StoryboardHookDraft("small", "三人第一次同桌就把话说透了"),
+                new StoryboardHookDraft("big", "三人约定次日桃园相见，共同举事")
+            ]);
+
+        Assert.Empty(assignments[1]);
+        Assert.Equal(2, assignments[2].Count);
+        Assert.Equal(3, assignments[3].Count);
+    }
+
+    [Fact]
     public async Task Unknown_episode_has_no_storyboard()
     {
         using var client = factory.CreateClient();
@@ -66,8 +165,9 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             null);
         storyboardResponse.EnsureSuccessStatusCode();
         var storyboard = await factory.CompleteGenerationTaskAsync<StoryboardView>(storyboardResponse);
-        var dialogueShot = Assert.Single(storyboard!.Shots, shot => !string.IsNullOrWhiteSpace(shot.Dialogue));
-        Assert.NotNull(dialogueShot.DialogueAudio);
+        var dialogueShots = storyboard!.Shots.Where(shot => !string.IsNullOrWhiteSpace(shot.Dialogue)).ToArray();
+        Assert.Equal(2, dialogueShots.Length);
+        Assert.All(dialogueShots, shot => Assert.NotNull(shot.DialogueAudio));
 
         var route = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/dialogue-audio";
         var result = await (await client.PostAsync(route, null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
@@ -77,9 +177,11 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        var audio = Assert.Single(await dbContext.Assets
+        var audioAssets = await dbContext.Assets
             .Where(item => item.ProjectId == projectId && item.Type == StoryboardDialogueAudioService.AssetType)
-            .ToListAsync());
+            .ToListAsync();
+        Assert.Equal(2, audioAssets.Count);
+        var audio = audioAssets[0];
         Assert.Equal("audio/wav", audio.ContentType);
         Assert.NotNull(audio.BlobContent);
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
@@ -556,18 +658,18 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(["平视", "平视"], first.Shots.Select(item => item.CameraAngle));
         Assert.Equal(["固定", "缓慢推进"], first.Shots.Select(item => item.CameraMovement));
         Assert.Equal(
-            [ShotProductionModes.DirectFirstFrame, ShotProductionModes.FirstLastContinuous],
+            [ShotProductionModes.DirectFirstFrame, ShotProductionModes.DirectFirstFrame],
             first.Shots.Select(item => item.ProductionMode));
         Assert.All(first.Shots, shot => Assert.False(string.IsNullOrWhiteSpace(shot.FrameStrategyReason)));
         Assert.All(first.Shots, shot => Assert.False(string.IsNullOrWhiteSpace(shot.FirstFrameDescription)));
         Assert.All(first.Shots, shot => Assert.False(string.IsNullOrWhiteSpace(shot.CutDescription)));
         Assert.Empty(first.Shots[0].LastFrameDescription);
-        Assert.False(string.IsNullOrWhiteSpace(first.Shots[1].LastFrameDescription));
+        Assert.Empty(first.Shots[1].LastFrameDescription);
         Assert.All(first.Shots, shot => Assert.Equal(
             "达达尼昂攥紧推荐信，穿过拥挤的街道，抬头寻找特雷维尔府邸。",
             shot.Action));
-        Assert.Contains("达达尼昂：巴黎，我来了。", first.Shots[1].Dialogue);
-        Assert.Contains("达达尼昂：特雷维尔先生一定会见我。", first.Shots[1].Dialogue);
+        Assert.Equal("达达尼昂：巴黎，我来了。", first.Shots[0].Dialogue);
+        Assert.Equal("达达尼昂：特雷维尔先生一定会见我。", first.Shots[1].Dialogue);
         var hooks = first.Shots.SelectMany(item => item.Hooks).ToArray();
         Assert.Equal(["small", "big"], hooks.Select(item => item.Type));
         Assert.Equal(["推荐信不翼而飞", "幕后势力首次现身"], hooks.Select(item => item.Description));
@@ -827,6 +929,10 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var outputBytes = await client.GetByteArrayAsync(directProduction.OutputUrl);
         Assert.Equal([0x89, 0x50, 0x4e, 0x47], outputBytes[..4]);
 
+        var continuousModeResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{secondShot.ResourceId}/mode",
+            new { requiresLastFrame = true });
+        continuousModeResponse.EnsureSuccessStatusCode();
         var continuousPreviewResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{secondShot.ResourceId}/production/preview",
             null);
