@@ -38,7 +38,8 @@ public sealed record StoryboardShotDraft(
     string FrameStrategyReason = "",
     string FirstFrameDescription = "",
     string LastFrameDescription = "",
-    string CutDescription = "");
+    string CutDescription = "",
+    string Narration = "");
 
 public sealed record StoryboardDesignResult(
     IReadOnlyList<StoryboardShotDraft> Shots,
@@ -102,7 +103,8 @@ public sealed record StoryboardShotView(
     ShotProductionView? Production,
     ShotVideoProductionView? VideoProduction,
     string Status,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string Narration = "");
 
 public sealed record StoryboardView(
     Guid ProductionEpisodeId,
@@ -139,7 +141,8 @@ internal sealed record StoryboardShotDocument(
     string FrameStrategyReason = "",
     string FirstFrameDescription = "",
     string LastFrameDescription = "",
-    string CutDescription = "");
+    string CutDescription = "",
+    string Narration = "");
 
 public interface IStoryboardDesigner
 {
@@ -239,9 +242,7 @@ public sealed class GetStoryboardQueryHandler(V2DbContext dbContext)
 public sealed class GenerateStoryboardCommandHandler(
     V2DbContext dbContext,
     IStoryboardDesigner designer,
-    IStoryboardDialogueAudioService dialogueAudioService,
-    TimeProvider timeProvider,
-    ILogger<GenerateStoryboardCommandHandler> logger)
+    TimeProvider timeProvider)
     : ICommandHandler<GenerateStoryboardCommand, StoryboardView?>
 {
     public async Task<StoryboardView?> HandleAsync(
@@ -339,7 +340,8 @@ public sealed class GenerateStoryboardCommandHandler(
                 shot.FrameStrategyReason.Trim(),
                 shot.FirstFrameDescription.Trim(),
                 shot.LastFrameDescription.Trim(),
-                shot.CutDescription.Trim());
+                shot.CutDescription.Trim(),
+                shot.Narration.Trim());
             var documentJson = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
             var shotAsset = new Asset
             {
@@ -436,17 +438,6 @@ public sealed class GenerateStoryboardCommandHandler(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        var dialogueResult = await dialogueAudioService.GenerateMissingAsync(
-            command.ProjectId,
-            command.ProductionEpisodeId,
-            cancellationToken);
-        if (dialogueResult.Failed > 0)
-        {
-            logger.LogWarning(
-                "Storyboard dialogue TTS completed with {FailureCount} failures: {Errors}",
-                dialogueResult.Failed,
-                string.Join(" | ", dialogueResult.Errors));
-        }
         return await StoryboardQueries.GetAsync(
             dbContext,
             command.ProjectId,
@@ -479,6 +470,7 @@ public sealed class GenerateStoryboardCommandHandler(
             throw new InvalidOperationException("首尾帧镜头必须包含明确的尾帧描述。");
 
         ValidateDialogueMapping(proposed, scriptPackage);
+        ValidateNarrationMapping(proposed, scriptPackage);
         ValidateHooks(proposed, scriptPackage);
 
         if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
@@ -503,7 +495,9 @@ public sealed class GenerateStoryboardCommandHandler(
                     ShotSize = plan.ShotSize,
                     CameraAngle = plan.CameraAngle,
                     CameraMovement = plan.CameraMovement,
-                    Props = NormalizePropNames(item.Props, visualAssets)
+                    Props = NormalizePropNames(item.Props, visualAssets),
+                    Dialogue = item.Dialogue.Trim(),
+                    Narration = item.Narration.Trim()
                 };
             })
             .ToArray();
@@ -563,6 +557,63 @@ public sealed class GenerateStoryboardCommandHandler(
                 .ToArray();
             throw new InvalidOperationException(
                 $"第 {sceneNumber} 场对白必须逐句且仅一次映射到独立镜头，并保持“角色：台词”原文不变。"
+                + $"缺失：{string.Join(" | ", missing)}；多余或改写：{string.Join(" | ", unexpected)}。");
+        }
+    }
+
+    internal static void ValidateNarrationMapping(
+        IReadOnlyList<StoryboardShotDraft> proposed,
+        ProductionScriptPackageView scriptPackage)
+    {
+        foreach (var scene in scriptPackage.Episode.Scenes)
+        {
+            ValidateSceneNarrationMapping(
+                scene.SceneNumber,
+                proposed.Where(item => item.SceneNumber == scene.SceneNumber).ToArray(),
+                scene.Narrations ?? []);
+        }
+    }
+
+    internal static void ValidateSceneNarrationMapping(
+        int sceneNumber,
+        IReadOnlyList<StoryboardShotDraft> sceneShots,
+        IEnumerable<string> expectedNarrations)
+    {
+        static Dictionary<string, int> Counts(IEnumerable<string> lines) => lines
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0)
+            .GroupBy(line => line, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+
+        var actualLines = new List<string>();
+        foreach (var shot in sceneShots)
+        {
+            var lines = shot.Narration
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (lines.Length > 1)
+                throw new InvalidOperationException(
+                    $"第 {sceneNumber} 场第 {shot.ShotNumber} 镜包含多段旁白；每个镜头最多只能有一段旁白。");
+            if (lines.Length == 1)
+                actualLines.Add(lines[0]);
+        }
+
+        var expected = Counts(expectedNarrations);
+        var actual = Counts(actualLines);
+        if (expected.Count != actual.Count
+            || expected.Any(item => !actual.TryGetValue(item.Key, out var count) || count != item.Value))
+        {
+            var missing = expected
+                .SelectMany(item => Enumerable.Repeat(
+                    item.Key,
+                    item.Value - (actual.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+                .ToArray();
+            var unexpected = actual
+                .SelectMany(item => Enumerable.Repeat(
+                    item.Key,
+                    item.Value - (expected.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
+                .ToArray();
+            throw new InvalidOperationException(
+                $"第 {sceneNumber} 场旁白必须逐段且仅一次映射到独立镜头，并保持原文不变。"
                 + $"缺失：{string.Join(" | ", missing)}；多余或改写：{string.Join(" | ", unexpected)}。");
         }
     }
@@ -812,7 +863,8 @@ internal static class StoryboardQueries
                 production,
                 videoProduction,
                 state.LifecycleStatus,
-                asset.UpdatedAtUtc));
+                asset.UpdatedAtUtc,
+                document.Narration));
             }
         var firstDocument = JsonSerializer.Deserialize<StoryboardShotDocument>(
             assets[definitions[0].ShotAssetId].DocumentJson!,
@@ -1097,6 +1149,7 @@ public sealed class MafStoryboardDesigner(
                 scene.ShotPlan!.Select(item => item.ShotNumber).ToHashSet(),
                 scene.Dialogues.SelectMany(dialogue =>
                     dialogue.Lines.Select(line => $"{dialogue.Character}：{line}")),
+                scene.Narrations ?? [],
                 requiredHooks,
                 input);
             shots.AddRange(sceneShots);
@@ -1116,6 +1169,7 @@ public sealed class MafStoryboardDesigner(
             int sceneNumber,
             HashSet<int> plannedShotNumbers,
             IEnumerable<string> expectedDialogueLines,
+            IEnumerable<string> expectedNarrations,
             IEnumerable<StoryboardHookDraft> expectedHooks,
             string input)
         {
@@ -1153,6 +1207,10 @@ public sealed class MafStoryboardDesigner(
                         sceneNumber,
                         payload.Shots,
                         expectedDialogueLines);
+                    GenerateStoryboardCommandHandler.ValidateSceneNarrationMapping(
+                        sceneNumber,
+                        payload.Shots,
+                        expectedNarrations);
                     GenerateStoryboardCommandHandler.ValidateSceneHooks(
                         sceneNumber,
                         payload.Shots,
@@ -1206,6 +1264,7 @@ public sealed class MafStoryboardDesigner(
             scene.Action,
             scene.StoryFunction,
             scene.DialogueIntent ?? string.Empty,
+            string.Join('\n', scene.Narrations ?? []),
             string.Join('\n', scene.Dialogues.SelectMany(dialogue =>
                 dialogue.Lines.Select(line => $"{dialogue.Character}：{line}"))));
 
@@ -1529,6 +1588,7 @@ public sealed class RewriteStoryboardShotTextCommandHandler(
             LastFrameDescription = revision.LastFrameDescription,
             CutDescription = revision.CutDescription,
             Dialogue = context.Document.Dialogue,
+            Narration = context.Document.Narration,
             Sound = revision.Sound,
             Model = revision.Model,
             Runtime = revision.Runtime
@@ -1567,7 +1627,7 @@ internal static class StoryboardShotTextFields
     private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
     {
         "visualDescription", "firstFrameDescription",
-        "lastFrameDescription", "cutDescription", "dialogue", "sound"
+        "lastFrameDescription", "cutDescription", "narration", "dialogue", "sound"
     };
 
     public static string? Normalize(string? field) =>
@@ -1581,6 +1641,7 @@ internal static class StoryboardShotTextFields
         "firstFrameDescription" => "首帧描述",
         "lastFrameDescription" => "尾帧描述",
         "cutDescription" => "CUT 执行描述",
+        "narration" => "旁白",
         "dialogue" => "对白",
         "sound" => "声音",
         _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")
@@ -1589,7 +1650,7 @@ internal static class StoryboardShotTextFields
     public static StoryboardShotDocument Apply(StoryboardShotDocument document, string field, string value)
     {
         var normalized = value.Trim();
-        if (field is not ("dialogue" or "sound") && string.IsNullOrWhiteSpace(normalized))
+        if (field is not ("narration" or "dialogue" or "sound") && string.IsNullOrWhiteSpace(normalized))
             throw new InvalidOperationException($"{Label(field)}不能为空。");
         return field switch
         {
@@ -1597,6 +1658,7 @@ internal static class StoryboardShotTextFields
             "firstFrameDescription" => document with { FirstFrameDescription = normalized },
             "lastFrameDescription" => document with { LastFrameDescription = normalized },
             "cutDescription" => document with { CutDescription = normalized },
+            "narration" => document with { Narration = normalized },
             "dialogue" => document with { Dialogue = normalized },
             "sound" => document with { Sound = normalized },
             _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")

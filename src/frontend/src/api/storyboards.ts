@@ -15,6 +15,7 @@ export interface StoryboardShot {
   composition: string
   visualDescription: string
   action: string
+  narration: string
   dialogue: string
   sound: string
   characters: string[]
@@ -51,6 +52,7 @@ export type StoryboardShotTextField =
   | 'firstFrameDescription'
   | 'lastFrameDescription'
   | 'cutDescription'
+  | 'narration'
   | 'dialogue'
   | 'sound'
 

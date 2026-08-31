@@ -1143,16 +1143,16 @@ button { color: inherit; }
 .shot-directing-analysis > div, .shot-audio-cues { min-width: 0; margin: 0; padding: 11px 12px; background: #fff; }
 .shot-directing-analysis p { margin: 5px 0 0; color: #334155; font-size: 10px !important; line-height: 1.65; white-space: pre-wrap; }
 .shot-cut-description, .shot-audio-cues { grid-column: 1 / -1; }
-.shot-audio-cues { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.shot-audio-cues { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
 .shot-audio-cues > div { min-width: 0; }
 .shot-audio-cues dt { color: var(--muted); font-size: 9px; }
 .shot-audio-cues dd { margin: 0; color: #334155; font-size: 10px; line-height: 1.6; white-space: pre-wrap; }
-.shot-editable-text { position: relative; min-width: 0; padding-right: 27px; }
+.shot-editable-text { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 8px; }
 .shot-editable-text > p.empty { color: var(--muted); font-style: italic; }
-.shot-text-field-actions { position: absolute; top: 1px; right: 0; display: flex; gap: 3px; }
+.shot-text-field-actions { display: flex; gap: 3px; }
 .shot-text-field-actions .icon-button { width: 24px; height: 24px; min-height: 24px; color: var(--muted); background: #f8faf9; }
 .shot-text-field-actions .icon-button:hover { color: var(--accent); background: #eef5ff; }
-.shot-editable-text.editing { padding-right: 0; }
+.shot-editable-text.editing { display: block; }
 .shot-editable-text textarea { width: 100%; min-height: 74px; resize: vertical; padding: 8px 9px; border: 1px solid #91caff; border-radius: 3px; color: var(--ink); background: #fff; font: 11px/1.6 'Noto Sans SC', sans-serif; outline: none; }
 .shot-editable-text textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(22,119,255,.1); }
 .shot-text-edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }

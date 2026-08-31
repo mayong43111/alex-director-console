@@ -148,6 +148,7 @@ export interface ProductionScriptSceneDraft {
   summary: string
   action: string
   dialogues: ScreenplayDialogueDraft[]
+  narrations?: string[]
   characters: string[]
   props: string[]
   storyFunction: string

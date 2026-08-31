@@ -4008,20 +4008,33 @@ export function ScriptPage() {
                   <p>{activeScene.dialogueIntent || "旧版大纲未记录对白意图。"}</p>
                 </div>
               ) : (
-                <div className="production-screenplay-dialogues">
-                  <header><span>对白</span><small>{activeScene.dialogues.length} 组</small></header>
-                  {activeScene.dialogues.length > 0 ? activeScene.dialogues.map((dialogue, index) => (
-                    <div className="screenplay-dialogue" key={`${dialogue.character}-${index}`}>
-                      <div className="screenplay-dialogue-cue">
-                        <strong>{dialogue.character}</strong>
-                        {dialogue.parenthetical && <small>（{dialogue.parenthetical}）</small>}
-                      </div>
-                      <div className="screenplay-dialogue-lines">
-                        {dialogue.lines.map((line, lineIndex) => <p key={lineIndex}>{line}</p>)}
-                      </div>
+                <>
+                  {(activeScene.narrations?.length ?? 0) > 0 && (
+                    <div className="production-screenplay-dialogues production-screenplay-narrations">
+                      <header><span>旁白</span><small>{activeScene.narrations?.length ?? 0} 段</small></header>
+                      {activeScene.narrations?.map((line, index) => (
+                        <div className="screenplay-dialogue" key={`narration-${index}`}>
+                          <div className="screenplay-dialogue-cue"><strong>旁白</strong></div>
+                          <div className="screenplay-dialogue-lines"><p>{line}</p></div>
+                        </div>
+                      ))}
                     </div>
-                  )) : <p>本场无对白。</p>}
-                </div>
+                  )}
+                  <div className="production-screenplay-dialogues">
+                    <header><span>对白</span><small>{activeScene.dialogues.length} 组</small></header>
+                    {activeScene.dialogues.length > 0 ? activeScene.dialogues.map((dialogue, index) => (
+                      <div className="screenplay-dialogue" key={`${dialogue.character}-${index}`}>
+                        <div className="screenplay-dialogue-cue">
+                          <strong>{dialogue.character}</strong>
+                          {dialogue.parenthetical && <small>（{dialogue.parenthetical}）</small>}
+                        </div>
+                        <div className="screenplay-dialogue-lines">
+                          {dialogue.lines.map((line, lineIndex) => <p key={lineIndex}>{line}</p>)}
+                        </div>
+                      </div>
+                    )) : <p>本场无对白。</p>}
+                  </div>
+                </>
               )}
             </section>
             <section className="production-execution-plan">
@@ -4108,6 +4121,7 @@ export function ScriptPage() {
                 <label className="wide"><span>场次摘要</span><textarea required value={sceneEditor.summary} onChange={(event) => setSceneEditor({ ...sceneEditor, summary: event.target.value })} /></label>
                 <label className="wide"><span>故事功能</span><textarea required value={sceneEditor.storyFunction} onChange={(event) => setSceneEditor({ ...sceneEditor, storyFunction: event.target.value })} /></label>
                 <label className="wide"><span>对白意图</span><textarea value={sceneEditor.dialogueIntent ?? ""} onChange={(event) => setSceneEditor({ ...sceneEditor, dialogueIntent: event.target.value || null })} /></label>
+                <label className="wide"><span>旁白（每行一段）</span><textarea value={(sceneEditor.narrations ?? []).join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, narrations: splitEditorLines(event.target.value) })} /></label>
                 <label className="wide"><span>动作正文</span><textarea className="scene-action-input" required value={sceneEditor.action} onChange={(event) => setSceneEditor({ ...sceneEditor, action: event.target.value })} /></label>
                 <label><span>人物（每行一个）</span><textarea value={sceneEditor.characters.join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, characters: splitEditorLines(event.target.value) })} /></label>
                 <label><span>道具（每行一个）</span><textarea value={sceneEditor.props.join("\n")} onChange={(event) => setSceneEditor({ ...sceneEditor, props: splitEditorLines(event.target.value) })} /></label>
@@ -4710,6 +4724,7 @@ const shotTextFieldLabels: Record<StoryboardShotTextField, string> = {
   firstFrameDescription: "首帧描述",
   lastFrameDescription: "尾帧描述",
   cutDescription: "CUT 执行描述",
+  narration: "旁白",
   dialogue: "对白",
   sound: "声音",
 };
@@ -5209,6 +5224,7 @@ export function StoryboardShotPage() {
             <EditableShotText field="cutDescription" value={shot.cutDescription || shot.action} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={5} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} />
           </div>
           <div className="shot-audio-cues">
+            <div><span className="eyebrow">旁白</span><EditableShotText field="narration" value={shot.narration} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
             <div><span className="eyebrow">对白</span><EditableShotText field="dialogue" value={shot.dialogue} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
             <div><span className="eyebrow">声音</span><EditableShotText field="sound" value={shot.sound} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
           </div>

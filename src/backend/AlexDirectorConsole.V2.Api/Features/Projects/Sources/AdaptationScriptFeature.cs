@@ -79,7 +79,8 @@ public sealed record ProductionScriptSceneDraft(
     string Rhythm,
     string VisualContrast,
     IReadOnlyList<AdaptationShotPlanDraft> ShotPlan,
-    string? DialogueIntent = null);
+    string? DialogueIntent = null,
+    IReadOnlyList<string>? Narrations = null);
 
 public sealed record ProductionScriptEpisodeDraft(
     string Title,
@@ -1292,6 +1293,10 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 Summary = scene.Summary?.Trim() ?? string.Empty,
                 Action = scene.Action.Trim(),
                 Dialogues = normalizedDialogues,
+                Narrations = (scene.Narrations ?? [])
+                    .Select(line => line.Trim())
+                    .Where(line => line.Length > 0)
+                    .ToArray(),
                 Characters = (scene.Characters ?? [])
                     .Select(item => item.Trim())
                     .Where(item => item.Length > 0)
@@ -1328,10 +1333,11 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
         var failures = new List<string>();
         foreach (var scene in scenes)
         {
-            var lines = scene.Dialogues.SelectMany(dialogue => dialogue.Lines).ToArray();
-            if (scene.ShotPlan!.Count < lines.Length)
+            var spokenLineCount = scene.Dialogues.Sum(dialogue => dialogue.Lines.Count)
+                + (scene.Narrations?.Count ?? 0);
+            if (scene.ShotPlan!.Count < spokenLineCount)
                 failures.Add(
-                    $"第 {scene.SceneNumber} 场有 {lines.Length} 句对白，但只有 {scene.ShotPlan.Count} 个镜头；每句对白必须有独立镜头");
+                    $"第 {scene.SceneNumber} 场有 {spokenLineCount} 句对白或旁白，但只有 {scene.ShotPlan.Count} 个镜头；每句有声文本必须有独立镜头");
         }
 
         if (failures.Count > 0)

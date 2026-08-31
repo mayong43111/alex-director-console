@@ -487,7 +487,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                                 "平视",
                                 "缓慢推进",
                                 "呈现人物行动与对白")
-                        ])],
+                            ])],
                     outline.SmallHooks ?? [],
                     outline.BigHooks ?? []));
     }
@@ -531,7 +531,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                             "人物保持同一朝向与站位，单一首帧足以约束镜头。",
                             $"{scene.Heading}内，人物保持初始站位并看向行动方向。",
                             string.Empty,
-                            "0.0-1.0 秒建立空间；1.0-2.0 秒保持机位，让人物完成单一方向动作后切出。"),
+                            "0.0-1.0 秒建立空间；1.0-2.0 秒保持机位，让人物完成单一方向动作后切出。",
+                            Narration: scene.Narrations?.FirstOrDefault() ?? string.Empty),
                         new StoryboardShotDraft(
                             scene.SceneNumber,
                             2,
@@ -560,7 +561,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                                     "普通转身与缓慢推进不需要额外尾帧约束。",
                                     "人物位于画面中心，视线落向行动方向。",
                                     string.Empty,
-                                    "0.0-1.0 秒从背面中景开始；1.0-2.5 秒人物向左转身，镜头缓慢推进并保持轴线；2.5-3.0 秒在正面视线落定时切出。")
+                                    "0.0-1.0 秒从背面中景开始；1.0-2.5 秒人物向左转身，镜头缓慢推进并保持轴线；2.5-3.0 秒在正面视线落定时切出。",
+                                    Narration: string.Empty)
                     });
                     if (reportProgress is not null)
                     {

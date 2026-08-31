@@ -56,6 +56,35 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public void Narration_mapping_reports_missing_and_rewritten_narrations()
+    {
+        var shot = new StoryboardShotDraft(
+            1,
+            1,
+            3,
+            "全景",
+            "平视",
+            "固定",
+            "巴黎街道",
+            "人群从街道穿过",
+            "建立城市环境",
+            string.Empty,
+            "城市环境声",
+            [],
+            [],
+            Narration: "十七世纪，少年抵达巴黎。");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateSceneNarrationMapping(
+                1,
+                [shot],
+                ["十七世纪，达达尼昂抵达巴黎。"]));
+
+        Assert.Contains("缺失：十七世纪，达达尼昂抵达巴黎。", error.Message);
+        Assert.Contains("多余或改写：十七世纪，少年抵达巴黎。", error.Message);
+    }
+
+    [Fact]
     public void Hook_mapping_reports_missing_and_rewritten_hooks()
     {
         var shot = new StoryboardShotDraft(
@@ -167,13 +196,20 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var storyboard = await factory.CompleteGenerationTaskAsync<StoryboardView>(storyboardResponse);
         var dialogueShots = storyboard!.Shots.Where(shot => !string.IsNullOrWhiteSpace(shot.Dialogue)).ToArray();
         Assert.Equal(2, dialogueShots.Length);
-        Assert.All(dialogueShots, shot => Assert.NotNull(shot.DialogueAudio));
+        Assert.All(dialogueShots, shot => Assert.Null(shot.DialogueAudio));
 
         var route = $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/batch/dialogue-audio";
         var result = await (await client.PostAsync(route, null)).Content.ReadFromJsonAsync<BatchStoryboardMediaResult>();
-        Assert.Equal(0, result?.Generated);
-        Assert.Equal(2, result?.Skipped);
+        Assert.Equal(2, result?.Generated);
+        Assert.Equal(0, result?.Skipped);
         Assert.Equal(0, result?.Failed);
+
+        var withAudio = await client.GetFromJsonAsync<StoryboardView>(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
+        Assert.NotNull(withAudio);
+        Assert.All(
+            withAudio.Shots.Where(shot => !string.IsNullOrWhiteSpace(shot.Dialogue)),
+            shot => Assert.NotNull(shot.DialogueAudio));
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
@@ -615,6 +651,17 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.NotNull(withDialogue);
         var withDialogueShot = withDialogue.Shots.Single(item => item.ResourceId == original.ResourceId);
 
+        const string manualNarration = "十七世纪的巴黎，野心与阴谋同时苏醒。";
+        var setNarrationResponse = await client.PutAsJsonAsync(
+            $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{original.ResourceId}/text/narration",
+            new { value = manualNarration });
+        setNarrationResponse.EnsureSuccessStatusCode();
+        var withNarration = await setNarrationResponse.Content.ReadFromJsonAsync<StoryboardView>();
+        Assert.NotNull(withNarration);
+        var withNarrationShot = withNarration.Shots.Single(item => item.ResourceId == original.ResourceId);
+        Assert.Equal(manualNarration, withNarrationShot.Narration);
+        Assert.Equal(withDialogueShot.Dialogue, withNarrationShot.Dialogue);
+
         var clearDialogueResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/shots/{original.ResourceId}/text/dialogue",
             new { value = "  " });
@@ -622,7 +669,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var cleared = await clearDialogueResponse.Content.ReadFromJsonAsync<StoryboardView>();
         Assert.NotNull(cleared);
         var clearedShot = cleared.Shots.Single(item => item.ResourceId == original.ResourceId);
-        Assert.Equal(withDialogueShot.Version + 1, clearedShot.Version);
+        Assert.Equal(withNarrationShot.Version + 1, clearedShot.Version);
         Assert.Empty(clearedShot.Dialogue);
         Assert.Equal(manualShot.FirstFrameDescription, clearedShot.FirstFrameDescription);
 
