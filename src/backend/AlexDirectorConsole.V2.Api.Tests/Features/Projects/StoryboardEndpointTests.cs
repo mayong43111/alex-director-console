@@ -135,9 +135,9 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
 
         var assignments = MafStoryboardDesigner.AssignHooksToScenes(
             [
-                Scene(1, "黄巾骤起，各州郡贴榜募兵。", ["张角"]),
+                Scene(1, "朝政烂透了，黄巾骤起，各州郡贴榜募兵。", ["张角"]),
                 Scene(2, "刘备榜前长叹，张飞被他的志向打动。", ["刘备", "张飞"]),
-                Scene(3, "关羽进入酒肆，三人同桌并相约桃园。", ["刘备", "张飞", "关羽"])
+                Scene(3, "关羽进入酒肆，三人围桌把话说开并相约桃园。", ["刘备", "张飞", "关羽"])
             ],
             [
                 new StoryboardHookDraft("small", "刘备叹气却不是懦弱，而是有志无力"),

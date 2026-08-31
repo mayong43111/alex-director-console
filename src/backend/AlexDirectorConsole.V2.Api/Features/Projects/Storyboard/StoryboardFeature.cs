@@ -1238,12 +1238,17 @@ public sealed class MafStoryboardDesigner(
         foreach (var hook in hooks.Where(item => !string.IsNullOrWhiteSpace(item.Description)))
         {
             var bigrams = SignificantBigrams(hook.Description).Distinct(StringComparer.Ordinal).ToArray();
+            var significantCharacters = hook.Description
+                .Where(char.IsLetterOrDigit)
+                .Distinct()
+                .ToArray();
             var selected = scenes
                 .Select(scene => new
                 {
                     Scene = scene,
                     Score = scene.Characters.Count(name => hook.Description.Contains(name, StringComparison.Ordinal)) * 100
-                        + bigrams.Count(bigram => SceneText(scene).Contains(bigram, StringComparison.Ordinal))
+                        + bigrams.Count(bigram => SceneText(scene).Contains(bigram, StringComparison.Ordinal)) * 10
+                        + significantCharacters.Count(character => SceneText(scene).Contains(character))
                 })
                 .OrderByDescending(item => item.Score)
                 .ThenBy(item => hook.Type.Equals("big", StringComparison.OrdinalIgnoreCase)
