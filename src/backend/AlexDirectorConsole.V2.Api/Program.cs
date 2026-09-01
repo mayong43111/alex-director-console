@@ -91,9 +91,12 @@ if (!builder.Environment.IsEnvironment("Testing"))
 }
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IFoundryConnectionTester, AzureFoundryConnectionTester>();
-builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromSeconds(30));
-builder.Services.AddHttpClient("ComfyUiVideo", client => client.Timeout = TimeSpan.FromMinutes(5));
-builder.Services.AddHttpClient("ComfyUiImage", client => client.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddHttpClient("ComfyUi", client => client.Timeout = TimeSpan.FromMinutes(2))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddHttpClient("ComfyUiVideo", client => client.Timeout = TimeSpan.FromMinutes(5))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddHttpClient("ComfyUiImage", client => client.Timeout = TimeSpan.FromMinutes(5))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
 builder.Services.AddHttpClient<ILocalVoiceDesigner, LocalQwenVoiceDesigner>((provider, client) =>
 {
     var baseUrl = provider.GetRequiredService<IConfiguration>()["LocalTts:BaseUrl"]

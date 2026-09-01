@@ -34,6 +34,7 @@ import {
   Upload,
   WandSparkles,
   X,
+  Square,
 } from "lucide-react";
 import {
   assistProjectSettingsField,
@@ -98,6 +99,7 @@ import {
 } from "../api/storyboards";
 import type { ImageGenerationPreview } from "../api/generation";
 import {
+  cancelEpisodeVideoGeneration,
   cancelGenerationTask,
   getGenerationTask,
   subscribeGenerationTask,
@@ -4318,6 +4320,7 @@ export function StoryboardPage() {
   const [batchAction, setBatchAction] = useState("");
   const [batchLabel, setBatchLabel] = useState("");
   const [batchFeedback, setBatchFeedback] = useState<{ label: string; result: BatchStoryboardMediaResult } | null>(null);
+  const [cancellingVideos, setCancellingVideos] = useState(false);
   const [selectedShotIds, setSelectedShotIds] = useState<string[]>([]);
   const [framePreviewIndex, setFramePreviewIndex] = useState(0);
   const [framePreviewOpen, setFramePreviewOpen] = useState(false);
@@ -4444,6 +4447,7 @@ export function StoryboardPage() {
   const storyboardSceneCount = new Set(currentStoryboard?.shots.map((shot) => shot.sceneNumber) ?? []).size;
   const selectedBatchShotIds = selectedShotIds.length > 0 ? selectedShotIds : undefined;
   const allShotsSelected = allShotIds.length > 0 && selectedShotIds.length === allShotIds.length;
+  const hasActiveVideos = currentStoryboard?.shots.some((shot) => ["queued", "running"].includes(shot.videoProduction?.status ?? "")) ?? false;
   const toggleShotSelection = (shotResourceId: string) => {
     setSelectedShotIds((current) => current.includes(shotResourceId)
       ? current.filter((id) => id !== shotResourceId)
@@ -4494,6 +4498,26 @@ export function StoryboardPage() {
       setBatchAction("");
     }
   };
+  const stopEpisodeVideos = async () => {
+    setCancellingVideos(true);
+    setError("");
+    try {
+      const result = await cancelEpisodeVideoGeneration(projectId, productionEpisodeId);
+      setStoryboard(await getStoryboard(projectId, productionEpisodeId));
+      setBatchAction("");
+      setStoryboardTask((current) => current && !["completed", "failed", "cancelled"].includes(current.status)
+        ? { ...current, status: "cancelled", currentStep: "已停止", lastError: "用户已停止生成" }
+        : current);
+      setBatchFeedback({
+        label: "停止视频生成",
+        result: { generated: 0, skipped: 0, failed: 0, errors: [`已取消 ${result.cancelledTasks} 个任务、${result.cancelledRuns} 个视频运行`] },
+      });
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "停止本集视频生成失败。");
+    } finally {
+      setCancellingVideos(false);
+    }
+  };
   return (
     <div className="page full-height-page storyboard-page">
       <div className="storyboard-workspace">
@@ -4537,6 +4561,11 @@ export function StoryboardPage() {
               <Tooltip title={batchAction === "videos" ? "正在批量生成视频" : selectedBatchShotIds ? "重新生成选中镜头的视频" : "补齐缺失的视频"}>
                 <button className="secondary-button storyboard-batch-button" aria-label="批量生成视频" disabled={Boolean(batchAction) || !currentStoryboard} onClick={() => void runBatch("videos", "批量视频", () => generateMissingStoryboardVideos(projectId, productionEpisodeId, selectedBatchShotIds))}>
                   <Play size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip title="停止本集所有正在排队或生成的视频，并清空 ComfyUI 队列">
+                <button className="secondary-button storyboard-batch-button" aria-label="停止全部视频生成" disabled={cancellingVideos || (!hasActiveVideos && batchAction !== "videos")} onClick={() => void stopEpisodeVideos()}>
+                  <Square size={13} />
                 </button>
               </Tooltip>
             </div>
@@ -4725,6 +4754,7 @@ const shotTextFieldLabels: Record<StoryboardShotTextField, string> = {
   lastFrameDescription: "尾帧描述",
   cutDescription: "CUT 执行描述",
   narration: "旁白",
+  dialogueCharacter: "对白角色",
   dialogue: "对白",
   sound: "声音",
 };
@@ -4738,6 +4768,7 @@ function EditableShotText({
   shotContext,
   rows = 4,
   emptyText = "暂无内容",
+  showCharacterCount = false,
   onEdit,
   onEditingValueChange,
   onSave,
@@ -4751,6 +4782,7 @@ function EditableShotText({
   shotContext: unknown;
   rows?: number;
   emptyText?: string;
+  showCharacterCount?: boolean;
   onEdit: (field: StoryboardShotTextField, value: string) => void;
   onEditingValueChange: (value: string) => void;
   onSave: () => void;
@@ -4758,6 +4790,7 @@ function EditableShotText({
 }) {
   const editing = editingField === field;
   const label = shotTextFieldLabels[field];
+  const characterCount = Array.from((editing ? editingValue : value).replace(/\s/g, "")).length;
   return (
     <div className={`shot-editable-text${editing ? " editing" : ""}`}>
       {editing
@@ -4776,10 +4809,13 @@ function EditableShotText({
               aria-label={`编辑${label}`}
             />
             <div className="shot-text-edit-actions">
-              <button className="secondary-button" type="button" disabled={saving} onClick={onCancel}>取消</button>
-              <button className="primary-button" type="button" disabled={saving || editingValue.trim() === value.trim()} onClick={onSave}>
-                <Save size={13} />{saving ? "保存中" : "保存"}
-              </button>
+              {showCharacterCount && <span className="shot-character-count">{characterCount} 字</span>}
+              <div>
+                <button className="secondary-button" type="button" disabled={saving} onClick={onCancel}>取消</button>
+                <button className="primary-button" type="button" disabled={saving || editingValue.trim() === value.trim()} onClick={onSave}>
+                  <Save size={13} />{saving ? "保存中" : "保存"}
+                </button>
+              </div>
             </div>
           </>
         )
@@ -4787,6 +4823,7 @@ function EditableShotText({
           <>
             <p className={value ? "" : "empty"}>{value || emptyText}</p>
             <div className="shot-text-field-actions">
+              {showCharacterCount && <span className="shot-character-count">{characterCount} 字</span>}
               <button className="icon-button" type="button" title={`编辑${label}`} aria-label={`编辑${label}`} onClick={() => onEdit(field, value)}>
                 <Edit3 size={13} />
               </button>
@@ -5224,8 +5261,9 @@ export function StoryboardShotPage() {
             <EditableShotText field="cutDescription" value={shot.cutDescription || shot.action} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={5} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} />
           </div>
           <div className="shot-audio-cues">
-            <div><span className="eyebrow">旁白</span><EditableShotText field="narration" value={shot.narration} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
-            <div><span className="eyebrow">对白</span><EditableShotText field="dialogue" value={shot.dialogue} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
+            <div><span className="eyebrow">旁白</span><EditableShotText field="narration" value={shot.narration} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} showCharacterCount onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
+            <div><span className="eyebrow">对白角色</span><EditableShotText field="dialogueCharacter" value={shot.dialogueCharacter} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
+            <div><span className="eyebrow">对白</span><EditableShotText field="dialogue" value={shot.dialogue} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} showCharacterCount onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
             <div><span className="eyebrow">声音</span><EditableShotText field="sound" value={shot.sound} editingField={editingTextField} editingValue={editingTextValue} saving={savingText} shotContext={shot} rows={4} onEdit={beginTextEdit} onEditingValueChange={setEditingTextValue} onSave={() => void saveShotText()} onCancel={() => setEditingTextField(null)} /></div>
           </div>
         </section>

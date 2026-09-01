@@ -177,21 +177,26 @@ public sealed class StoryboardDialogueAudioService(
         var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(item => item.Id == definition.ShotAssetId, cancellationToken);
         var shot = JsonSerializer.Deserialize<StoryboardShotDocument>(shotAsset.DocumentJson ?? "{}", StoryboardDefaults.JsonOptions)
             ?? throw new InvalidOperationException("镜头内容无效。");
-        if (string.IsNullOrWhiteSpace(shot.Dialogue)) throw new InvalidOperationException("当前镜头没有对白。");
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        if (string.IsNullOrWhiteSpace(dialogue.Text)) throw new InvalidOperationException("当前镜头没有对白。");
+        if (string.IsNullOrWhiteSpace(dialogue.Character)) throw new InvalidOperationException("当前镜头对白缺少角色。");
 
         var linkedAssetIds = await StoryboardQueries.GetLinkedAssetIdsAsync(dbContext, definition, cancellationToken);
         var linkedAssets = await dbContext.Assets.AsNoTracking()
             .Where(item => linkedAssetIds.Contains(item.Id))
             .ToListAsync(cancellationToken);
-        var character = linkedAssets.FirstOrDefault(item => VisualAssetMapper.ReadDocument(item).Kind == "character");
-        var voice = character is not null
-            ? await voiceProfileService.GetAsync(projectId, character.ResourceId, cancellationToken)
-            : await GetOnlyProjectVoiceAsync(projectId, cancellationToken);
+        var character = linkedAssets.FirstOrDefault(item =>
+        {
+            var document = VisualAssetMapper.ReadDocument(item);
+            return document.Kind == "character"
+                && string.Equals(document.Name, dialogue.Character, StringComparison.OrdinalIgnoreCase);
+        });
+        if (character is null)
+            throw new InvalidOperationException($"对白角色“{dialogue.Character}”没有绑定到当前镜头的角色资产。");
+        var voice = await voiceProfileService.GetAsync(projectId, character.ResourceId, cancellationToken);
         if (voice is null)
         {
-            throw new InvalidOperationException(character is null
-                ? "当前镜头没有绑定角色，且项目没有唯一的默认旁白音色。"
-                : $"角色“{character.Name}”没有音色设定。");
+            throw new InvalidOperationException($"角色“{character.Name}”没有音色设定。");
         }
         var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking().SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (configuration is null || !configuration.IsEnabled) throw new InvalidOperationException("请先启用 ComfyUI。");
@@ -199,7 +204,7 @@ public sealed class StoryboardDialogueAudioService(
         var generated = await comfyUiClient.GenerateAsync(
             new(
                 configuration.BaseUrl,
-                shot.Dialogue.Trim(),
+                dialogue.Text,
                 voice.DesignPrompt,
                 voice.Language,
                 voice.Seed,
@@ -224,7 +229,8 @@ public sealed class StoryboardDialogueAudioService(
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
                 operation = "comfyui-qwen3-tts-dialogue",
-                text = shot.Dialogue.Trim(),
+                character = dialogue.Character,
+                text = dialogue.Text,
                 shotAssetId = shotAsset.Id,
                 voiceProfileAssetId = voice.AssetId,
                 voice.Name,
@@ -275,7 +281,7 @@ public sealed class StoryboardDialogueAudioService(
                 if (await GetCurrentAsync(projectId, shot.ShotResourceId, cancellationToken) is not null) { skipped++; continue; }
                 var shotAsset = await dbContext.Assets.AsNoTracking().SingleAsync(item => item.Id == shot.ShotAssetId, cancellationToken);
                 var document = JsonSerializer.Deserialize<StoryboardShotDocument>(shotAsset.DocumentJson ?? "{}", StoryboardDefaults.JsonOptions);
-                if (string.IsNullOrWhiteSpace(document?.Dialogue)) { skipped++; continue; }
+                if (document is null || string.IsNullOrWhiteSpace(StoryboardDialogue.From(document.DialogueCharacter, document.Dialogue).Text)) { skipped++; continue; }
                 await GenerateAsync(projectId, productionEpisodeId, shot.ShotResourceId, cancellationToken);
                 generated++;
             }

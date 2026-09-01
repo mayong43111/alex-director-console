@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using AlexDirectorConsole.V2.Api.Features.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
@@ -23,6 +24,38 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     public Task InitializeAsync() => factory.ResetDatabaseAsync();
 
     public Task DisposeAsync() => Task.CompletedTask;
+
+    [Fact]
+    public void Legacy_dialogue_is_split_into_character_and_spoken_text()
+    {
+        var dialogue = StoryboardDialogue.From(string.Empty, "刘备：俺也去。");
+
+        Assert.Equal("刘备", dialogue.Character);
+        Assert.Equal("俺也去。", dialogue.Text);
+    }
+
+    [Fact]
+    public void Dialogue_mapping_requires_a_separate_character()
+    {
+        var shot = CreateDialogueShot("俺也去。", string.Empty, 4);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateSceneDialogueMapping(1, [shot], ["刘备：俺也去。"]));
+
+        Assert.Contains("缺少 dialogueCharacter", error.Message);
+    }
+
+    [Fact]
+    public void Dialogue_timing_rejects_text_that_cannot_finish_before_the_tail_buffer()
+    {
+        var shot = CreateDialogueShot("这句话一共有十个发音字符", "刘备", 3);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateDialogueTiming([shot]));
+
+        Assert.Contains("无法完整容纳", error.Message);
+        Assert.Contains("至少需要", error.Message);
+    }
 
     [Fact]
     public void Dialogue_mapping_rejects_multiple_lines_in_one_shot()
@@ -54,6 +87,12 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
 
         Assert.Contains("每个镜头最多只能有一句对白", error.Message);
     }
+
+    private static StoryboardShotDraft CreateDialogueShot(string dialogue, string character, double durationSeconds) => new(
+        1, 1, durationSeconds, "中景", "平视", "固定", "人物居中", "人物说话", "人物开口",
+        dialogue, "环境声", ["刘备"], [], ProductionMode: ShotProductionModes.DirectFirstFrame,
+        FrameStrategyReason: "单一首帧足够", FirstFrameDescription: "人物面向镜头", CutDescription: "说完后切出",
+        DialogueCharacter: character);
 
     [Fact]
     public void Narration_mapping_reports_missing_and_rewritten_narrations()
@@ -165,6 +204,79 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public async Task Cancel_episode_videos_stops_active_video_tasks_and_runs_only()
+    {
+        using var client = factory.CreateClient();
+        var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
+        var now = DateTimeOffset.UtcNow;
+        Guid videoTaskId;
+        Guid unrelatedTaskId;
+        Guid[] runIds;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            var scriptAsset = await dbContext.Assets.FirstAsync(item =>
+                item.ProjectId == projectId && item.ProductionEpisodeId == productionEpisodeId);
+            var videoTask = new AgentTask
+            {
+                ProjectId = projectId,
+                ProductionEpisodeId = productionEpisodeId,
+                Intent = "批量生成分镜视频",
+                TaskType = GenerationTaskTypes.StoryboardVideoBatch,
+                Status = "running",
+                RequestedBy = "test",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            var unrelatedTask = new AgentTask
+            {
+                ProjectId = projectId,
+                ProductionEpisodeId = productionEpisodeId,
+                Intent = "生成图片",
+                TaskType = GenerationTaskTypes.StoryboardImage,
+                Status = "queued",
+                RequestedBy = "test",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+            var runs = new[] { "running", "queued" }.Select(status => new ProductionRun
+            {
+                ProjectId = projectId,
+                ProductionEpisodeId = productionEpisodeId,
+                ScriptPackageAssetId = scriptAsset.Id,
+                CreativeSettingsAssetId = scriptAsset.Id,
+                RunType = ShotVideoService.RunType,
+                Status = status,
+                CurrentStage = status,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            }).ToArray();
+            dbContext.AgentTasks.AddRange(videoTask, unrelatedTask);
+            dbContext.ProductionRuns.AddRange(runs);
+            await dbContext.SaveChangesAsync();
+            videoTaskId = videoTask.Id;
+            unrelatedTaskId = unrelatedTask.Id;
+            runIds = runs.Select(item => item.Id).ToArray();
+        }
+
+        var response = await client.PostAsJsonAsync(
+            "/api/v2/tasks/videos/cancel",
+            new { projectId, productionEpisodeId });
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<CancelEpisodeVideoGenerationResult>();
+        Assert.Equal(1, result?.CancelledTasks);
+        Assert.Equal(2, result?.CancelledRuns);
+        await using var verificationScope = factory.Services.CreateAsyncScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<V2DbContext>();
+        Assert.Equal("cancelled", (await verificationDb.AgentTasks.SingleAsync(item => item.Id == videoTaskId)).Status);
+        Assert.Equal("queued", (await verificationDb.AgentTasks.SingleAsync(item => item.Id == unrelatedTaskId)).Status);
+        Assert.All(
+            await verificationDb.ProductionRuns.Where(item => runIds.Contains(item.Id)).ToArrayAsync(),
+            run => Assert.Equal("cancelled", run.Status));
+    }
+
+    [Fact]
     public async Task Dialogue_audio_is_generated_by_comfyui_and_saved_as_a_versioned_asset()
     {
         using var client = factory.CreateClient();
@@ -236,7 +348,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     [Fact]
     public async Task Local_comfyui_video_normalizes_project_resolution_and_allows_missing_last_frame()
     {
-        const string spokenDialogue = "达达尼昂：巴黎，我来了。";
+        const string spokenDialogue = "巴黎，我来了。";
         using var client = factory.CreateClient();
         var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
         (await client.PostAsync(
@@ -254,6 +366,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
             var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
             var shotAsset = await dbContext.Assets.SingleAsync(item => item.Id == shot.AssetId);
             var shotDocument = JsonNode.Parse(shotAsset.DocumentJson!)!.AsObject();
+            shotDocument["dialogueCharacter"] = "达达尼昂";
             shotDocument["dialogue"] = spokenDialogue;
             shotAsset.DocumentJson = shotDocument.ToJsonString();
             var project = await dbContext.Projects.SingleAsync(item => item.Id == projectId);
@@ -450,12 +563,19 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.DoesNotContain(videoInstruction, preview.Prompt);
         Assert.Equal(videoInstruction, factory.LastShotVideoPromptAgentInput?.Instruction);
         Assert.Equal("minimax-h3", factory.LastShotVideoPromptAgentInput?.VideoPromptModel);
+        Assert.Equal("达达尼昂", factory.LastShotVideoPromptAgentInput?.DialogueCharacter);
         Assert.StartsWith("For the target video, at 0.00 seconds", preview.Prompt);
         Assert.Contains("integrated_multimodal_description:", preview.Prompt);
+        Assert.Contains("one uninterrupted continuous shot", preview.Prompt);
+        Assert.Contains("No cuts, shot changes", preview.Prompt);
+        Assert.Contains("Audio is mandatory", preview.Prompt);
+        Assert.Contains("first spoken syllable begins immediately at exactly 0.00 seconds", preview.Prompt);
+        Assert.Contains("(S1) begins speaking immediately in Mandarin Chinese: <d>[Chinese]", preview.Prompt);
+        Assert.Contains("</d>", preview.Prompt);
         Assert.Contains("overall_soundscape:", preview.Prompt);
         Assert.Contains("non_diegetic_music: N/A", preview.Prompt);
-        Assert.Contains("says exactly once in Mandarin Chinese", preview.Prompt);
-        Assert.Contains("absolute vocal silence", preview.Prompt);
+        Assert.Contains($"<d>[Chinese] {spokenDialogue}</d>", preview.Prompt);
+        Assert.Contains("is vocally silent with closed lips", preview.Prompt);
         Assert.Contains("completely blank lower third", preview.Prompt);
         Assert.Contains("no readable glyphs anywhere", preview.Prompt);
         Assert.DoesNotContain("subtitle", preview.Prompt, StringComparison.OrdinalIgnoreCase);
@@ -466,6 +586,19 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal("清亮的青年男声，坚定但略带初入巴黎的紧张感", agentCharacter.VoiceDesignPrompt);
         Assert.Equal("zh-CN", agentCharacter.VoiceLanguage);
         Assert.Equal(2718, agentCharacter.VoiceSeed);
+
+        var legacyDialogueTimeline = $"From 0.0 to 3 seconds, character 达达尼昂 says exactly once in Mandarin Chinese: \"{spokenDialogue}\" Every written character and the final syllable must be complete by 3 seconds. From 3 to 4 seconds there is absolute vocal silence: no omission, paraphrase, extra syllables, repetition, humming, or vocalization. 达达尼昂's lips remain closed after the sentence.";
+        var legacyPrompt = $"integrated_multimodal_description: [Shot 1] Fixed camera. {legacyDialogueTimeline}\n\noverall_soundscape: Room tone.\n\nnon_diegetic_music: N/A";
+        var legacyConfirmResponse = await client.PostAsJsonAsync(
+            $"{route}/prompt/confirm",
+            new { prompt = legacyPrompt, instruction = videoInstruction });
+        legacyConfirmResponse.EnsureSuccessStatusCode();
+        var upgradedLegacyPrompt = await legacyConfirmResponse.Content.ReadFromJsonAsync<StoryboardMediaPromptView>();
+        Assert.NotNull(upgradedLegacyPrompt);
+        Assert.Contains("MINIMAX H3 EXECUTION REQUIREMENTS:", upgradedLegacyPrompt.Prompt);
+        Assert.Contains($"<d>[Chinese] {spokenDialogue}</d>", upgradedLegacyPrompt.Prompt);
+        Assert.DoesNotContain("says exactly once in Mandarin Chinese", upgradedLegacyPrompt.Prompt);
+        Assert.Equal(2, upgradedLegacyPrompt.Prompt.Split(spokenDialogue, StringSplitOptions.None).Length);
 
         var promptResponse = await client.PostAsJsonAsync(
             $"{route}/prompt",
@@ -715,8 +848,10 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.All(first.Shots, shot => Assert.Equal(
             "达达尼昂攥紧推荐信，穿过拥挤的街道，抬头寻找特雷维尔府邸。",
             shot.Action));
-        Assert.Equal("达达尼昂：巴黎，我来了。", first.Shots[0].Dialogue);
-        Assert.Equal("达达尼昂：特雷维尔先生一定会见我。", first.Shots[1].Dialogue);
+        Assert.Equal("达达尼昂", first.Shots[0].DialogueCharacter);
+        Assert.Equal("巴黎，我来了。", first.Shots[0].Dialogue);
+        Assert.Equal("达达尼昂", first.Shots[1].DialogueCharacter);
+        Assert.Equal("特雷维尔先生一定会见我。", first.Shots[1].Dialogue);
         var hooks = first.Shots.SelectMany(item => item.Hooks).ToArray();
         Assert.Equal(["small", "big"], hooks.Select(item => item.Type));
         Assert.Equal(["推荐信不翼而飞", "幕后势力首次现身"], hooks.Select(item => item.Description));
@@ -914,6 +1049,15 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
                     ReviewStatus = "active",
                     CreatedAtUtc = now
                 });
+                dbContext.ResourceStates.Add(new ResourceState
+                {
+                    ProjectId = projectId,
+                    ResourceId = image.ResourceId,
+                    ResourceType = "visual-reference-image",
+                    CurrentAssetId = image.Id,
+                    LifecycleStatus = "active",
+                    UpdatedAtUtc = now
+                });
                 dbContext.AssetDependencies.Add(new AssetDependency
                 {
                     ProjectId = projectId,
@@ -954,6 +1098,16 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(ShotProductionModes.DirectFirstFrame, directPreview.Parameters.ProductionMode);
         Assert.Contains(imageInstruction, directPreview.Prompt);
         Assert.All(directPreview.References, reference => Assert.True(reference.Version > 0));
+        var expectedReferenceNames = selectedAssets
+            .OrderBy(item => item.Kind == "scene" ? 0 : 1)
+            .ThenBy(item => item.Name, StringComparer.Ordinal)
+            .Select(item => item.Name)
+            .ToArray();
+        Assert.Equal(
+            expectedReferenceNames,
+            directPreview.References
+                .Where(reference => reference.Type == "visual-reference-image")
+                .Select(reference => reference.Name));
         var directPromptResponse = await client.PostAsJsonAsync(
             $"{directRoute}/prompt",
             new { instruction = imageInstruction });
@@ -973,6 +1127,8 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal("completed", directProduction.Status);
         Assert.NotNull(directProduction.OutputAssetId);
         Assert.NotNull(directProduction.OutputUrl);
+        var directFrameCall = Assert.Single(factory.ShotFrameCalls);
+        Assert.Equal(expectedReferenceNames, directFrameCall.References.Select(reference => reference.SubjectName));
         var outputBytes = await client.GetByteArrayAsync(directProduction.OutputUrl);
         Assert.Equal([0x89, 0x50, 0x4e, 0x47], outputBytes[..4]);
 

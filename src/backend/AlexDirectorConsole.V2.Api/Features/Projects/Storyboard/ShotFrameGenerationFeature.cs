@@ -10,6 +10,7 @@ using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using SkiaSharp;
 
 namespace AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 
@@ -80,20 +81,24 @@ public sealed class AzureFoundryShotFrameGenerator(
             {
                 throw new ArgumentException("图片尺寸格式无效。", nameof(size));
             }
+            var workflow = ComfyUiConfigurationView.NormalizeImageEditWorkflow(comfyUi.ImageEditWorkflow);
+            var comfyUiReferences = workflow == ComfyUiConfigurationView.QwenImageEditWorkflow
+                ? PrepareQwenReferences(references)
+                : references;
             var generated = await comfyUiImageClient.GenerateAsync(
                 new(
                     comfyUi.BaseUrl,
-                    await comfyUiWorkflowProvider.ReadImageEditAsync(cancellationToken),
+                    await comfyUiWorkflowProvider.ReadImageEditAsync(workflow, cancellationToken),
                     prompt,
                     width,
                     height,
-                    references.Select(item => new ComfyUiImageReference(item.Bytes, item.ContentType)).ToArray()),
+                    comfyUiReferences.Select(item => new ComfyUiImageReference(item.Bytes, item.ContentType)).ToArray()),
                 cancellationToken);
             return new(
                 generated.Bytes,
                 generated.ContentType,
                 ".png",
-                FoundryConfigurationView.ComfyUiImageEditModel,
+                ComfyUiConfigurationView.ImageEditModel(workflow),
                 GptImageOptions.NormalizeQuality(configuration.ImageQuality),
                 null);
         }
@@ -172,6 +177,78 @@ public sealed class AzureFoundryShotFrameGenerator(
                 revisedPrompt);
         }
         throw new InvalidOperationException("gpt-image-2 未返回首帧图片内容。");
+    }
+
+    private static IReadOnlyList<ShotFrameReference> PrepareQwenReferences(
+        IReadOnlyList<ShotFrameReference> references)
+    {
+        const int maxReferences = 3;
+        if (references.Count <= maxReferences) return references;
+
+        var characters = references.Where(item => item.SubjectType == "character").ToArray();
+        if (characters.Length < 2 || references.Count - characters.Length + 1 > maxReferences)
+        {
+            throw new InvalidOperationException(
+                $"Qwen Image Edit 2511 最多支持 {maxReferences} 张参考图，当前参考图无法通过人物组合板安全归并。");
+        }
+
+        var board = CreateCharacterReferenceBoard(characters);
+        var result = new List<ShotFrameReference>(maxReferences);
+        var boardAdded = false;
+        foreach (var reference in references)
+        {
+            if (reference.SubjectType != "character")
+            {
+                result.Add(reference);
+                continue;
+            }
+            if (boardAdded) continue;
+            result.Add(board);
+            boardAdded = true;
+        }
+        return result;
+    }
+
+    private static ShotFrameReference CreateCharacterReferenceBoard(
+        IReadOnlyList<ShotFrameReference> characters)
+    {
+        var bitmaps = characters.Select(item => SKBitmap.Decode(item.Bytes)
+            ?? throw new InvalidOperationException($"人物参考图“{item.SubjectName}”不是有效图片。")).ToArray();
+        try
+        {
+            const int maxBoardSide = 2048;
+            var columns = (int)Math.Ceiling(Math.Sqrt(bitmaps.Length));
+            var rows = (int)Math.Ceiling((double)bitmaps.Length / columns);
+            var cellSize = maxBoardSide / Math.Max(columns, rows);
+            using var board = new SKBitmap(columns * cellSize, rows * cellSize);
+            using var canvas = new SKCanvas(board);
+            canvas.Clear(SKColors.White);
+            for (var index = 0; index < bitmaps.Length; index++)
+            {
+                var left = index % columns * cellSize;
+                var top = index / columns * cellSize;
+                canvas.DrawBitmap(
+                    bitmaps[index],
+                    new SKRect(0, 0, bitmaps[index].Width, bitmaps[index].Height),
+                    new SKRect(left, top, left + cellSize, top + cellSize),
+                    new SKSamplingOptions(SKCubicResampler.Mitchell));
+            }
+            using var image = SKImage.FromBitmap(board);
+            using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+            return new(
+                data.ToArray(),
+                "image/png",
+                "character-reference-board.png",
+                "character-board",
+                string.Join("、", characters.Select(item => item.SubjectName)),
+                characters[0].AssetId,
+                characters[0].ResourceId,
+                characters.Max(item => item.Version));
+        }
+        finally
+        {
+            foreach (var bitmap in bitmaps) bitmap.Dispose();
+        }
     }
 
     private static string ReadError(string responseBody)
@@ -340,9 +417,18 @@ public sealed class ShotFrameService(
             : null;
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
             .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
+        var comfyUi = FoundryConfigurationView.NormalizeImageProvider(configuration?.ImageProvider)
+            == FoundryConfigurationView.ComfyUiImageProvider
+            ? await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken)
+            : null;
+        var imageEditModel = FoundryConfigurationView.ImageEditModel(
+            configuration,
+            comfyUi?.ImageEditWorkflow);
         var prompt = (await promptAgent.GenerateAsync(
             BuildPromptAgentInput(
                 configuration,
+                imageEditModel,
                 settings,
                 shot,
                 references,
@@ -353,12 +439,13 @@ public sealed class ShotFrameService(
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
             settings.OutputWidth,
             settings.OutputHeight,
-            settings.AspectRatio);
+            settings.AspectRatio,
+            configuration?.ImageProvider);
         return new(
             firstFrame is null ? "generate-storyboard-first-frame" : "generate-storyboard-last-frame",
             prompt,
             new(
-                FoundryConfigurationView.ImageEditModel(configuration),
+                imageEditModel,
                 GptImageOptions.NormalizeQuality(configuration?.ImageQuality ?? "medium"),
                 modelSize,
                 "png",
@@ -475,11 +562,11 @@ public sealed class ShotFrameService(
             {
                 throw new InvalidOperationException("生产输入快照包含不存在或不属于当前项目的资产。");
             }
+            var inputAssetsById = inputAssets.ToDictionary(candidate => candidate.Id);
             var shotAsset = inputAssets.Single(candidate => candidate.Id == item.ShotAssetId);
             var settingsAsset = inputAssets.Single(candidate => candidate.Id == run.CreativeSettingsAssetId);
-            var referenceImageAssetIds = inputAssets
-                .Where(candidate => candidate.Type == VisualReferenceService.AssetType)
-                .Select(candidate => candidate.Id)
+            var referenceImageAssetIds = inputAssetIds
+                .Where(inputAssetId => inputAssetsById[inputAssetId].Type == VisualReferenceService.AssetType)
                 .ToArray();
             var props = inputAssets
                 .Where(candidate => candidate.Type == VisualAssetDefaults.AssetType)
@@ -525,10 +612,19 @@ public sealed class ShotFrameService(
             }
             var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
                 .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken);
+            var comfyUi = FoundryConfigurationView.NormalizeImageProvider(configuration?.ImageProvider)
+                == FoundryConfigurationView.ComfyUiImageProvider
+                ? await dbContext.ComfyUiConfigurations.AsNoTracking()
+                    .SingleOrDefaultAsync(candidate => candidate.Id == 1, cancellationToken)
+                : null;
+            var imageEditModel = FoundryConfigurationView.ImageEditModel(
+                configuration,
+                comfyUi?.ImageEditWorkflow);
             var prompt = stage == "last-frame"
                 ? (await promptAgent.GenerateAsync(
                     BuildPromptAgentInput(
                         configuration,
+                        imageEditModel,
                         settings,
                         shot,
                         references,
@@ -540,7 +636,8 @@ public sealed class ShotFrameService(
             var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
                 settings.OutputWidth,
                 settings.OutputHeight,
-                settings.AspectRatio);
+                settings.AspectRatio,
+                configuration?.ImageProvider);
             var generated = await generator.GenerateAsync(
                 prompt,
                 modelSize,
@@ -726,8 +823,12 @@ public sealed class ShotFrameService(
         {
             throw new InvalidOperationException("生产输入快照中的参考图缺少主体版本引用。");
         }
-        return rows.Select(row =>
+        var rowsByImageAssetId = rows
+            .GroupBy(row => row.Image.Id)
+            .ToDictionary(group => group.Key, group => group.Single());
+        return imageAssetIds.Select(imageAssetId =>
         {
+            var row = rowsByImageAssetId[imageAssetId];
             var document = VisualAssetMapper.ReadDocument(row.Subject);
             return new ShotFrameReference(
                 row.Image.BlobContent ?? throw new InvalidOperationException($"参考图文件为空：{document.Name}"),
@@ -779,6 +880,7 @@ public sealed class ShotFrameService(
 
     private static ShotImagePromptAgentInput BuildPromptAgentInput(
         FoundryConfiguration? configuration,
+        string imageEditModel,
         ProjectSettingsDocument settings,
         StoryboardShotDocument shot,
         IReadOnlyList<ShotFrameReference> references,
@@ -789,7 +891,7 @@ public sealed class ShotFrameService(
         var props = propAssets.Select(VisualAssetMapper.ReadDocument).ToArray();
         return new(
             FoundryConfigurationView.NormalizeImageProvider(configuration?.ImageProvider),
-            FoundryConfigurationView.ImageEditModel(configuration),
+            imageEditModel,
             frameStage,
             settings.ProjectName,
             settings.VisualStyle,

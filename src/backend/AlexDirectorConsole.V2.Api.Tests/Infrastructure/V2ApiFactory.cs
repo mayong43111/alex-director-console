@@ -199,6 +199,8 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
     {
         public Task<ComfyUiCapabilities> TestAsync(
             string baseUrl,
+            string imageEditWorkflow,
+            string workflowProfile,
             CancellationToken cancellationToken) => Task.FromResult(
                 new ComfyUiCapabilities(
                     true,
@@ -751,7 +753,7 @@ public sealed class TestComfyUiVideoClient : IComfyUiVideoClient
 
 public sealed class TestComfyUiWorkflowProvider : IComfyUiWorkflowProvider
 {
-        public Task<string> ReadAsync(CancellationToken cancellationToken) => Task.FromResult(
+    public Task<string> ReadAsync(string workflowProfile, CancellationToken cancellationToken) => Task.FromResult(
                 """
                 {
                     "1":{"class_type":"LoadImage","inputs":{"image":"{{FIRST_FRAME}}"}},

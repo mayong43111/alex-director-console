@@ -4,6 +4,7 @@ using System.Text.Json;
 using AlexDirectorConsole.V2.Api.Features.Projects.Generation;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -239,8 +240,14 @@ public sealed class VisualReferenceService(
             cancellationToken);
         var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var comfyUi = useCurrentReference
+            && FoundryConfigurationView.NormalizeImageProvider(configuration?.ImageProvider)
+                == FoundryConfigurationView.ComfyUiImageProvider
+            ? await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken)
+            : null;
         var targetImageModel = useCurrentReference
-            ? FoundryConfigurationView.ImageEditModel(configuration)
+            ? FoundryConfigurationView.ImageEditModel(configuration, comfyUi?.ImageEditWorkflow)
             : FoundryConfigurationView.TextToImageModel(configuration);
         var promptResult = await promptWriter.WriteAsync(
             new(

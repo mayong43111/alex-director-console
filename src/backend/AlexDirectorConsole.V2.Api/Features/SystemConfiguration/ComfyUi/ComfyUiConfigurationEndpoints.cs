@@ -2,7 +2,11 @@ using AlexDirectorConsole.V2.Api.Application.Cqrs;
 
 namespace AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 
-public sealed record UpdateComfyUiConfigurationRequest(string? BaseUrl, bool IsEnabled);
+public sealed record UpdateComfyUiConfigurationRequest(
+    string? BaseUrl,
+    string? ImageEditWorkflow,
+    string? WorkflowProfile,
+    bool IsEnabled);
 
 public static class ComfyUiConfigurationEndpoints
 {
@@ -23,7 +27,11 @@ public static class ComfyUiConfigurationEndpoints
             CancellationToken cancellationToken) =>
         {
             var result = await commandDispatcher.SendAsync(
-                new UpdateComfyUiConfigurationCommand(request.BaseUrl, request.IsEnabled),
+                new UpdateComfyUiConfigurationCommand(
+                    request.BaseUrl,
+                    request.ImageEditWorkflow,
+                    request.WorkflowProfile,
+                    request.IsEnabled),
                 cancellationToken);
             return result.IsSuccess
                 ? Results.Ok(result.Configuration)

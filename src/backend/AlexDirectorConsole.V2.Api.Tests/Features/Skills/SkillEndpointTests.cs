@@ -24,10 +24,11 @@ public sealed class SkillEndpointTests(V2ApiFactory factory)
         Assert.Equal(6, skills.Length);
         var storyboard = Assert.Single(skills, skill => skill.Id == "storyboard-design");
         Assert.Equal("分镜设计", storyboard.Name);
-        Assert.Equal("2.2.0", storyboard.Version);
+        Assert.Equal("2.3.0", storyboard.Version);
         Assert.True(storyboard.IsEnabled);
         Assert.Equal(["generate_storyboard"], storyboard.AllowedTools);
         Assert.Contains("生成结构化镜头", storyboard.Content, StringComparison.Ordinal);
+        Assert.Contains("dialogueCharacter", storyboard.Content, StringComparison.Ordinal);
         Assert.Equal("storyboard-design/skill.yaml", storyboard.SourcePath);
         var firstFrame = Assert.Single(skills, skill => skill.Id == "shot-first-frame");
         Assert.Equal("1.1.0", firstFrame.Version);

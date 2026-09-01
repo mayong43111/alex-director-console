@@ -58,13 +58,26 @@ public static class ProjectImageOutputProcessor
         return new(encoded.ToArray(), source.Width, source.Height, outputWidth, outputHeight);
     }
 
-    public static string ModelSizeFor(int outputWidth, int outputHeight, string aspectRatio)
+    public static string ModelSizeFor(
+        int outputWidth,
+        int outputHeight,
+        string aspectRatio,
+        string? imageProvider = null)
     {
+        if (string.Equals(imageProvider, "comfyui", StringComparison.OrdinalIgnoreCase))
+        {
+            var width = RoundUpToMultiple(outputWidth, 16);
+            var height = RoundUpToMultiple(outputHeight, 16);
+            return $"{width}x{height}";
+        }
         var requestedSize = $"{outputWidth}x{outputHeight}";
         return GptImageOptions.SupportedSizes.Contains(requestedSize)
             ? requestedSize
             : aspectRatio == "9:16" ? "1024x1536" : "1536x1024";
     }
+
+    private static int RoundUpToMultiple(int value, int multiple) =>
+        ((value + multiple - 1) / multiple) * multiple;
 }
 
 public static class GptImageOptions

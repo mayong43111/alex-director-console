@@ -36,12 +36,20 @@ public sealed class ComfyUiConfigurationEndpointTests(V2ApiFactory factory)
         using var client = factory.CreateClient();
         var save = await client.PutAsJsonAsync(
             "/api/v2/system/comfyui-configuration",
-            new { baseUrl = "http://127.0.0.1:8188/", isEnabled = true });
+            new
+            {
+                baseUrl = "http://127.0.0.1:8188/",
+                imageEditWorkflow = "flux2-dev-image-edit-kv-cache",
+                workflowProfile = "ltx-2.3-av-i2v",
+                isEnabled = true
+            });
 
         Assert.Equal(HttpStatusCode.OK, save.StatusCode);
         var configuration = await save.Content.ReadFromJsonAsync<ConfigurationResponse>();
         Assert.NotNull(configuration);
         Assert.Equal("http://127.0.0.1:8188", configuration.BaseUrl);
+        Assert.Equal("flux2-dev-image-edit-kv-cache", configuration.ImageEditWorkflow);
+        Assert.Equal("ltx-2.3-av-i2v", configuration.WorkflowProfile);
         Assert.True(configuration.IsEnabled);
 
         var test = await client.PostAsync(
@@ -74,6 +82,40 @@ public sealed class ComfyUiConfigurationEndpointTests(V2ApiFactory factory)
         var response = await client.PutAsJsonAsync(
             "/api/v2/system/comfyui-configuration",
             new { baseUrl = "file:///tmp/comfyui", isEnabled = true });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Save_rejects_unknown_image_edit_workflow()
+    {
+        using var client = factory.CreateClient();
+
+        var response = await client.PutAsJsonAsync(
+            "/api/v2/system/comfyui-configuration",
+            new
+            {
+                baseUrl = "http://127.0.0.1:8188",
+                imageEditWorkflow = "unknown-workflow",
+                isEnabled = true
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Save_rejects_unknown_video_workflow()
+    {
+        using var client = factory.CreateClient();
+
+        var response = await client.PutAsJsonAsync(
+            "/api/v2/system/comfyui-configuration",
+            new
+            {
+                baseUrl = "http://127.0.0.1:8188",
+                workflowProfile = "unknown-workflow",
+                isEnabled = true
+            });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }

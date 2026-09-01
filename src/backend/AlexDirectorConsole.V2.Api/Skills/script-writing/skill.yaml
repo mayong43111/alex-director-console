@@ -3,12 +3,12 @@ kind: skill
 id: script-writing
 name: 剧本创作
 description: 编写分集故事，并按原分集直接生成可进入生产的正式剧本。
-version: 1.1.0
+version: 1.2.0
 allowedTools:
   - create_story_source
   - generate_source_episode_script
 instructions: |-
-  先从真实来源形成导演要求的分集故事，再转成场次明确、时长可校验的正式剧本。对白使用自然短剧口语，每句只表达一个意图，并为每句对白预留独立镜头。
+  先从真实来源形成导演要求的分集故事，再转成场次明确、时长可校验的正式剧本。对白使用自然短剧口语，每句只表达一个意图，并为每句对白预留独立镜头。dialogues 必须把 character 和 lines 分开，不得把角色名写进台词。逐句按“发音字符数 ÷ 2.5 + 1.0 秒”预算镜头时长，其中发音字符只统计汉字、字母和数字，最后 1.0 秒留给完整句尾后的静默与反应；时长不足时缩短或重写台词，不得假设加速朗读。
   写故事时结合当前项目设定完成内容，再调用 create_story_source 保存；每个 Markdown 一级标题对应一个原分集。
   按原分集生成正式剧本时调用 generate_source_episode_script，传入故事来源 ID 与原分集编号。
   固定使用 source-chapters 模式，不调用素材分析，不重新编排章节，不生成新的创意大纲。

@@ -74,6 +74,10 @@ public sealed record GenerationTaskView(
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CompletedAtUtc);
 
+public sealed record CancelEpisodeVideoGenerationRequest(Guid ProjectId, Guid ProductionEpisodeId);
+
+public sealed record CancelEpisodeVideoGenerationResult(int CancelledTasks, int CancelledRuns);
+
 public interface IGenerationTaskScheduler
 {
     Task<GenerationTaskView> EnqueueAsync(
@@ -635,6 +639,65 @@ public static class GenerationTaskEndpoints
                 }
             }
             return Results.Ok(GenerationTaskScheduler.ToView(task));
+        });
+        group.MapPost("/videos/cancel", async (
+            CancelEpisodeVideoGenerationRequest request,
+            V2DbContext dbContext,
+            IHttpClientFactory httpClientFactory,
+            TimeProvider timeProvider,
+            CancellationToken cancellationToken) =>
+        {
+            var cancelledAt = timeProvider.GetUtcNow();
+            var tasks = await dbContext.AgentTasks
+                .Where(item => item.ProjectId == request.ProjectId
+                    && item.ProductionEpisodeId == request.ProductionEpisodeId
+                    && (item.TaskType == GenerationTaskTypes.StoryboardVideo
+                        || item.TaskType == GenerationTaskTypes.StoryboardVideoBatch)
+                    && (item.Status == "queued" || item.Status == "running"))
+                .ToListAsync(cancellationToken);
+            foreach (var task in tasks)
+            {
+                CancelTask(task, cancelledAt);
+                await SessionAgentTaskJob.AppendEventAsync(
+                    dbContext, task.Id, "status", "cancelled", "用户已停止本集视频生成。", null, cancelledAt, cancellationToken);
+            }
+
+            var runs = await dbContext.ProductionRuns
+                .Where(item => item.ProjectId == request.ProjectId
+                    && item.ProductionEpisodeId == request.ProductionEpisodeId
+                    && item.RunType == ShotVideoService.RunType
+                    && (item.Status == "queued" || item.Status == "running"))
+                .ToListAsync(cancellationToken);
+            foreach (var run in runs)
+            {
+                run.Status = "cancelled";
+                run.CurrentStage = "cancelled";
+                run.LastError = "用户已停止生成";
+                run.CompletedAtUtc = cancelledAt;
+                run.UpdatedAtUtc = cancelledAt;
+                run.LeaseOwner = null;
+                run.LeaseExpiresAtUtc = null;
+            }
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
+                .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            if (configuration is not null && configuration.IsEnabled)
+            {
+                var client = httpClientFactory.CreateClient("ComfyUiVideo");
+                try
+                {
+                    await client.PostAsync($"{configuration.BaseUrl.TrimEnd('/')}/interrupt", null, cancellationToken);
+                    await client.PostAsJsonAsync(
+                        $"{configuration.BaseUrl.TrimEnd('/')}/queue",
+                        new { clear = true },
+                        cancellationToken);
+                }
+                catch (HttpRequestException)
+                {
+                }
+            }
+            return Results.Ok(new CancelEpisodeVideoGenerationResult(tasks.Count, runs.Count));
         });
         group.MapGet("/{taskId:guid}/events", async (
             Guid taskId,

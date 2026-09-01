@@ -46,7 +46,8 @@ public sealed record ShotVideoPromptAgentInput(
     string LastFrameDescription,
     string CutDescription,
     IReadOnlyList<ShotVideoPromptCharacterContext> Characters,
-    string? Instruction);
+    string? Instruction,
+    string DialogueCharacter = "");
 
 public sealed record ShotVideoPromptDraft(
     string VisualMotionPrompt,

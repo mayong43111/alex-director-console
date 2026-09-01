@@ -21,6 +21,8 @@ public sealed record StoryboardMediaPromptView(
 
 public sealed record GenerateStoryboardMediaPromptRequest(string? Instruction);
 
+public sealed record ConfirmStoryboardVideoPromptRequest(string? Prompt, string? Instruction);
+
 public sealed record GenerateStoryboardMediaBatchRequest(IReadOnlyList<Guid>? ShotResourceIds);
 
 public sealed record BatchStoryboardMediaResult(
@@ -58,10 +60,30 @@ public interface IStoryboardMediaPromptService
         string? instruction,
         CancellationToken cancellationToken);
 
+    Task<StoryboardMediaPromptView> ReconfirmImagePromptInputsAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken);
+
     Task<StoryboardMediaPromptView> GenerateVideoPromptAsync(
         Guid projectId,
         Guid productionEpisodeId,
         Guid shotResourceId,
+        string? instruction,
+        CancellationToken cancellationToken);
+
+    Task<StoryboardMediaPromptView> ReconfirmVideoPromptInputsAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken);
+
+    Task<StoryboardMediaPromptView> ConfirmVideoPromptAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        string prompt,
         string? instruction,
         CancellationToken cancellationToken);
 
@@ -178,6 +200,26 @@ public sealed class StoryboardMediaPromptService(
             cancellationToken);
     }
 
+    public async Task<StoryboardMediaPromptView> ReconfirmImagePromptInputsAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken)
+    {
+        var current = await GetCurrentAsync(projectId, shotResourceId, ImageKind, cancellationToken)
+            ?? throw new InvalidOperationException("请先生成并确认图片提示词。");
+        var inputs = await LoadInputsAsync(projectId, productionEpisodeId, shotResourceId, cancellationToken);
+        return await SaveAsync(
+            inputs,
+            ImageKind,
+            current.Prompt,
+            current.Instruction,
+            null,
+            null,
+            null,
+            cancellationToken);
+    }
+
     public async Task<StoryboardMediaPromptView> GenerateVideoPromptAsync(
         Guid projectId,
         Guid productionEpisodeId,
@@ -191,6 +233,54 @@ public sealed class StoryboardMediaPromptService(
             productionEpisodeId,
             shotResourceId,
             instruction,
+            cancellationToken)
+            ?? throw new InvalidOperationException("镜头不存在。");
+        var inputs = await LoadInputsAsync(projectId, productionEpisodeId, shotResourceId, cancellationToken);
+        return await SaveAsync(
+            inputs,
+            VideoKind,
+            preview.Prompt,
+            instruction,
+            preview.PreviewHash,
+            preview.FirstFrameAssetId,
+            preview.LastFrameAssetId,
+            cancellationToken);
+    }
+
+    public async Task<StoryboardMediaPromptView> ReconfirmVideoPromptInputsAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        CancellationToken cancellationToken)
+    {
+        var current = await GetCurrentAsync(projectId, shotResourceId, VideoKind, cancellationToken)
+            ?? throw new InvalidOperationException("请先生成并确认视频提示词。");
+        return await ConfirmVideoPromptAsync(
+            projectId,
+            productionEpisodeId,
+            shotResourceId,
+            current.Prompt,
+            current.Instruction,
+            cancellationToken);
+    }
+
+    public async Task<StoryboardMediaPromptView> ConfirmVideoPromptAsync(
+        Guid projectId,
+        Guid productionEpisodeId,
+        Guid shotResourceId,
+        string prompt,
+        string? instruction,
+        CancellationToken cancellationToken)
+    {
+        prompt = prompt.Trim();
+        if (string.IsNullOrWhiteSpace(prompt))
+            throw new InvalidOperationException("视频提示词不能为空。");
+        instruction = NormalizeInstruction(instruction);
+        var preview = await videoService.PreviewConfirmedAsync(
+            projectId,
+            productionEpisodeId,
+            shotResourceId,
+            prompt,
             cancellationToken)
             ?? throw new InvalidOperationException("镜头不存在。");
         var inputs = await LoadInputsAsync(projectId, productionEpisodeId, shotResourceId, cancellationToken);
@@ -710,6 +800,32 @@ public static class StoryboardMediaEndpoints
                 "生成分镜视频提示词",
                 new(projectId, productionEpisodeId, shotResourceId, request.Instruction),
                 cancellationToken)));
+        app.MapPost($"{route}/shots/{{shotResourceId:guid}}/video/prompt/reconfirm", async (
+            Guid projectId,
+            Guid productionEpisodeId,
+            Guid shotResourceId,
+            IStoryboardMediaPromptService service,
+            CancellationToken cancellationToken) => Results.Ok(
+                await service.ReconfirmVideoPromptInputsAsync(
+                    projectId,
+                    productionEpisodeId,
+                    shotResourceId,
+                    cancellationToken)));
+        app.MapPost($"{route}/shots/{{shotResourceId:guid}}/video/prompt/confirm", async (
+            Guid projectId,
+            Guid productionEpisodeId,
+            Guid shotResourceId,
+            ConfirmStoryboardVideoPromptRequest request,
+            IStoryboardMediaPromptService service,
+            CancellationToken cancellationToken) => string.IsNullOrWhiteSpace(request.Prompt)
+                ? Results.BadRequest(new { error = "视频提示词不能为空。" })
+                : Results.Ok(await service.ConfirmVideoPromptAsync(
+                    projectId,
+                    productionEpisodeId,
+                    shotResourceId,
+                    request.Prompt,
+                    request.Instruction,
+                    cancellationToken)));
         app.MapPost($"{route}/shots/{{shotResourceId:guid}}/video/generate", async (
             Guid projectId,
             Guid productionEpisodeId,

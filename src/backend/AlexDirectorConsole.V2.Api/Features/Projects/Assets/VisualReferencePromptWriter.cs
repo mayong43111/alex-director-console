@@ -107,7 +107,9 @@ public sealed class MafVisualReferencePromptWriter(
     {
         if (string.Equals(targetImageModel, FoundryConfigurationView.ComfyUiTextToImageModel, StringComparison.OrdinalIgnoreCase))
             return "For Krea 2 Turbo, lead with the subject and sheet layout, use compact concrete visual phrases, then style, materials, lighting, and negative constraints. Avoid long prose and conflicting adjectives.";
-        if (string.Equals(targetImageModel, FoundryConfigurationView.ComfyUiImageEditModel, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(targetImageModel, "FLUX.2 dev", StringComparison.OrdinalIgnoreCase))
+            return "For FLUX.2 dev multi-reference editing, identify every reference by its supplied order and role, then state the single coherent target frame. Preserve identity, geometry, costume, materials, colors, and layout unless explicitly changed; prohibit collage, split panels, reference sheets, and duplicated subjects.";
+        if (string.Equals(targetImageModel, "Qwen Image Edit 2511", StringComparison.OrdinalIgnoreCase))
             return "For Qwen Image Edit 2511, state exactly what must change and what must remain identical to the supplied reference. Use direct edit instructions and preserve identity, geometry, costume, materials, colors, and layout unless explicitly changed.";
         return isImageEdit
             ? "For GPT Image, write explicit natural-language edit instructions. Identify preserved reference features first, then requested changes, spatial layout, materials, lighting, and exclusions."

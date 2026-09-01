@@ -19,6 +19,29 @@ namespace AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 
 public sealed record StoryboardHookDraft(string Type, string Description);
 
+public sealed record StoryboardDialogue(string Character, string Text)
+{
+    public const double MaximumCharactersPerSecond = 2.5;
+    public const double TailBufferSeconds = 1.0;
+
+    public static StoryboardDialogue From(string? character, string? text)
+    {
+        var normalizedCharacter = character?.Trim() ?? string.Empty;
+        var normalizedText = text?.Trim() ?? string.Empty;
+        if (normalizedCharacter.Length > 0 || normalizedText.Length == 0) return new(normalizedCharacter, normalizedText);
+        var separator = normalizedText.IndexOfAny(['：', ':']);
+        return separator > 0
+            ? new(normalizedText[..separator].Trim(), normalizedText[(separator + 1)..].Trim())
+            : new(string.Empty, normalizedText);
+    }
+
+    public string Canonical => string.IsNullOrWhiteSpace(Text) ? string.Empty : $"{Character}：{Text}";
+
+    public int SpokenCharacterCount => Text.Count(char.IsLetterOrDigit);
+
+    public double RequiredDurationSeconds => SpokenCharacterCount / MaximumCharactersPerSecond + TailBufferSeconds;
+}
+
 public sealed record StoryboardShotDraft(
     int SceneNumber,
     int ShotNumber,
@@ -39,7 +62,8 @@ public sealed record StoryboardShotDraft(
     string FirstFrameDescription = "",
     string LastFrameDescription = "",
     string CutDescription = "",
-    string Narration = "");
+    string Narration = "",
+    string DialogueCharacter = "");
 
 public sealed record StoryboardDesignResult(
     IReadOnlyList<StoryboardShotDraft> Shots,
@@ -104,7 +128,8 @@ public sealed record StoryboardShotView(
     ShotVideoProductionView? VideoProduction,
     string Status,
     DateTimeOffset UpdatedAtUtc,
-    string Narration = "");
+    string Narration = "",
+    string DialogueCharacter = "");
 
 public sealed record StoryboardView(
     Guid ProductionEpisodeId,
@@ -142,7 +167,8 @@ internal sealed record StoryboardShotDocument(
     string FirstFrameDescription = "",
     string LastFrameDescription = "",
     string CutDescription = "",
-    string Narration = "");
+    string Narration = "",
+    string DialogueCharacter = "");
 
 public interface IStoryboardDesigner
 {
@@ -218,14 +244,19 @@ public sealed record StartShotProductionCommand(
     Guid ShotResourceId,
     string ConfirmedPrompt,
     string? Instruction,
-    bool FirstFrameOnly = false)
+    bool FirstFrameOnly = false,
+    bool ReconfirmPromptInputs = false)
     : ICommand<ShotProductionView?>;
 
 public sealed record UpdateStoryboardShotAssetsRequest(IReadOnlyList<Guid>? AssetResourceIds);
 public sealed record UpdateStoryboardShotModeRequest(bool RequiresLastFrame);
 public sealed record UpdateStoryboardShotTextRequest(string? Value);
 public sealed record RewriteStoryboardShotTextRequest(string? Instruction);
-public sealed record StartShotProductionRequest(string? ConfirmedPrompt, string? Instruction);
+public sealed record StartShotProductionRequest(
+    string? ConfirmedPrompt,
+    string? Instruction,
+    bool FirstFrameOnly = false,
+    bool ReconfirmPromptInputs = false);
 
 public sealed class GetStoryboardQueryHandler(V2DbContext dbContext)
     : IQueryHandler<GetStoryboardQuery, StoryboardView?>
@@ -341,7 +372,8 @@ public sealed class GenerateStoryboardCommandHandler(
                 shot.FirstFrameDescription.Trim(),
                 shot.LastFrameDescription.Trim(),
                 shot.CutDescription.Trim(),
-                shot.Narration.Trim());
+                shot.Narration.Trim(),
+                shot.DialogueCharacter.Trim());
             var documentJson = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
             var shotAsset = new Asset
             {
@@ -483,12 +515,13 @@ public sealed class GenerateStoryboardCommandHandler(
         if (!proposedKeys.SetEquals(plannedShots.Keys))
             throw new InvalidOperationException("分镜镜号必须与正式剧本中的镜头计划完全一致。");
 
-        return proposed
+        var normalized = proposed
             .OrderBy(item => item.SceneNumber)
             .ThenBy(item => item.ShotNumber)
             .Select(item =>
             {
                 var plan = plannedShots[(item.SceneNumber, item.ShotNumber)];
+                var dialogue = StoryboardDialogue.From(item.DialogueCharacter, item.Dialogue);
                 return item with
                 {
                     DurationSeconds = plan.DurationSeconds,
@@ -496,11 +529,32 @@ public sealed class GenerateStoryboardCommandHandler(
                     CameraAngle = plan.CameraAngle,
                     CameraMovement = plan.CameraMovement,
                     Props = NormalizePropNames(item.Props, visualAssets),
-                    Dialogue = item.Dialogue.Trim(),
+                    Dialogue = dialogue.Text,
+                    DialogueCharacter = dialogue.Character,
                     Narration = item.Narration.Trim()
                 };
             })
             .ToArray();
+        ValidateDialogueTiming(normalized);
+        return normalized;
+    }
+
+    internal static void ValidateDialogueTiming(IEnumerable<StoryboardShotDraft> shots)
+    {
+        foreach (var shot in shots)
+        {
+            var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+            if (dialogue.SpokenCharacterCount == 0) continue;
+            if (string.IsNullOrWhiteSpace(dialogue.Character))
+                throw new InvalidOperationException(
+                    $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2} 的对白缺少 dialogueCharacter。");
+            var required = Math.Ceiling(dialogue.RequiredDurationSeconds * 10) / 10;
+            if (shot.DurationSeconds + 0.001 >= required) continue;
+            throw new InvalidOperationException(
+                $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2} 角色“{dialogue.Character}”的对白有 {dialogue.SpokenCharacterCount} 个发音字符，"
+                + $"{shot.DurationSeconds:0.###} 秒镜头无法完整容纳；按 {StoryboardDialogue.MaximumCharactersPerSecond:0.#} 字/秒并保留 "
+                + $"{StoryboardDialogue.TailBufferSeconds:0.#} 秒句尾，至少需要 {required:0.0} 秒。请缩短正式剧本台词或调整 shotPlan 时长。" );
+        }
     }
 
     internal static void ValidateDialogueMapping(
@@ -531,13 +585,19 @@ public sealed class GenerateStoryboardCommandHandler(
         var actualLines = new List<string>();
         foreach (var shot in sceneShots)
         {
-            var lines = shot.Dialogue
+            var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+            var lines = dialogue.Text
                 .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (lines.Length > 1)
                 throw new InvalidOperationException(
                     $"第 {sceneNumber} 场第 {shot.ShotNumber} 镜包含多句对白；每个镜头最多只能有一句对白。");
             if (lines.Length == 1)
-                actualLines.Add(lines[0]);
+            {
+                if (string.IsNullOrWhiteSpace(dialogue.Character))
+                    throw new InvalidOperationException(
+                        $"第 {sceneNumber} 场第 {shot.ShotNumber} 镜的对白缺少 dialogueCharacter。角色与台词必须分字段提供。");
+                actualLines.Add(dialogue.Canonical);
+            }
         }
 
         var expected = Counts(expectedDialogueLines);
@@ -556,7 +616,7 @@ public sealed class GenerateStoryboardCommandHandler(
                     item.Value - (expected.TryGetValue(item.Key, out var count) ? Math.Min(count, item.Value) : 0)))
                 .ToArray();
             throw new InvalidOperationException(
-                $"第 {sceneNumber} 场对白必须逐句且仅一次映射到独立镜头，并保持“角色：台词”原文不变。"
+                $"第 {sceneNumber} 场对白必须逐句且仅一次映射到独立镜头，并保持 dialogueCharacter 与 dialogue 原文不变。"
                 + $"缺失：{string.Join(" | ", missing)}；多余或改写：{string.Join(" | ", unexpected)}。");
         }
     }
@@ -821,6 +881,7 @@ internal static class StoryboardQueries
                 asset.DocumentJson ?? throw new InvalidOperationException("镜头资产缺少文档内容。"),
                 StoryboardDefaults.JsonOptions)
                 ?? throw new InvalidOperationException("镜头资产内容无效。");
+            var dialogue = StoryboardDialogue.From(document.DialogueCharacter, document.Dialogue);
             var linkedAssets = await GetLinkedAssetsAsync(dbContext, definition, cancellationToken);
             var production = await GetProductionAsync(dbContext, definition, cancellationToken);
             var videoProduction = await ShotVideoQueries.GetAsync(
@@ -842,7 +903,7 @@ internal static class StoryboardQueries
                 document.Composition,
                 document.VisualDescription,
                 document.Action,
-                document.Dialogue,
+                dialogue.Text,
                 document.Sound,
                 document.Characters,
                 document.Props,
@@ -864,7 +925,8 @@ internal static class StoryboardQueries
                 videoProduction,
                 state.LifecycleStatus,
                 asset.UpdatedAtUtc,
-                document.Narration));
+                document.Narration,
+                dialogue.Character));
             }
         var firstDocument = JsonSerializer.Deserialize<StoryboardShotDocument>(
             assets[definitions[0].ShotAssetId].DocumentJson!,
@@ -1498,7 +1560,9 @@ public static class StoryboardEndpoints
                         productionEpisodeId,
                         shotResourceId,
                         request.ConfirmedPrompt,
-                        request.Instruction),
+                        request.Instruction,
+                        request.FirstFrameOnly,
+                        request.ReconfirmPromptInputs),
                     cancellationToken);
                 return production is null ? Results.NotFound() : Results.Ok(production);
             }
@@ -1632,7 +1696,7 @@ internal static class StoryboardShotTextFields
     private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
     {
         "visualDescription", "firstFrameDescription",
-        "lastFrameDescription", "cutDescription", "narration", "dialogue", "sound"
+        "lastFrameDescription", "cutDescription", "narration", "dialogueCharacter", "dialogue", "sound"
     };
 
     public static string? Normalize(string? field) =>
@@ -1647,6 +1711,7 @@ internal static class StoryboardShotTextFields
         "lastFrameDescription" => "尾帧描述",
         "cutDescription" => "CUT 执行描述",
         "narration" => "旁白",
+        "dialogueCharacter" => "对白角色",
         "dialogue" => "对白",
         "sound" => "声音",
         _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")
@@ -1655,7 +1720,7 @@ internal static class StoryboardShotTextFields
     public static StoryboardShotDocument Apply(StoryboardShotDocument document, string field, string value)
     {
         var normalized = value.Trim();
-        if (field is not ("narration" or "dialogue" or "sound") && string.IsNullOrWhiteSpace(normalized))
+        if (field is not ("narration" or "dialogueCharacter" or "dialogue" or "sound") && string.IsNullOrWhiteSpace(normalized))
             throw new InvalidOperationException($"{Label(field)}不能为空。");
         return field switch
         {
@@ -1664,6 +1729,7 @@ internal static class StoryboardShotTextFields
             "lastFrameDescription" => document with { LastFrameDescription = normalized },
             "cutDescription" => document with { CutDescription = normalized },
             "narration" => document with { Narration = normalized },
+            "dialogueCharacter" => document with { DialogueCharacter = normalized },
             "dialogue" => document with { Dialogue = normalized },
             "sound" => document with { Sound = normalized },
             _ => throw new InvalidOperationException("不支持编辑这个镜头字段。")
@@ -1701,6 +1767,8 @@ internal static class StoryboardShotVersioning
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        var dialogue = StoryboardDialogue.From(document.DialogueCharacter, document.Dialogue);
+        document = document with { DialogueCharacter = dialogue.Character, Dialogue = dialogue.Text };
         var json = JsonSerializer.Serialize(document, StoryboardDefaults.JsonOptions);
         var asset = new Asset
         {
@@ -1805,7 +1873,8 @@ public sealed class UpdateStoryboardShotAssetsCommandHandler(
 public sealed class StartShotProductionCommandHandler(
     V2DbContext dbContext,
     TimeProvider timeProvider,
-    IShotFrameService frameService)
+    IShotFrameService frameService,
+    IStoryboardMediaPromptService promptService)
     : ICommandHandler<StartShotProductionCommand, ShotProductionView?>
 {
     public async Task<ShotProductionView?> HandleAsync(
@@ -1875,6 +1944,14 @@ public sealed class StartShotProductionCommandHandler(
             throw new InvalidOperationException(preflight.FailureMessage);
         }
 
+        if (command.ReconfirmPromptInputs)
+        {
+            await promptService.ReconfirmImagePromptInputsAsync(
+                command.ProjectId,
+                command.ProductionEpisodeId,
+                command.ShotResourceId,
+                cancellationToken);
+        }
         var currentPrompts = await StoryboardMediaPromptQueries.GetCurrentByShotAsync(
             dbContext,
             command.ProjectId,
@@ -2118,22 +2195,50 @@ internal static class ShotProductionPreflight
                 ]);
         }
 
-        var requiredSubjects = characters.Concat(scenes).ToArray();
+        var requiredSubjects = scenes
+            .Concat(characters)
+            .OrderBy(item => item.Document.Kind == "scene" ? 0 : 1)
+            .ThenBy(item => item.Document.Name, StringComparer.Ordinal)
+            .ThenBy(item => item.Asset.ResourceId)
+            .ToArray();
+        var subjectOrder = requiredSubjects
+            .Select((item, index) => new { item.Asset.ResourceId, Index = index })
+            .ToDictionary(item => item.ResourceId, item => item.Index);
         var subjectResourceIds = requiredSubjects.Select(item => item.Asset.ResourceId).ToArray();
         var referenceCandidates = await (
             from reference in dbContext.VisualReferences.AsNoTracking()
             join image in dbContext.Assets.AsNoTracking() on reference.ImageAssetId equals image.Id
+            join state in dbContext.ResourceStates.AsNoTracking() on image.ResourceId equals state.ResourceId
             where reference.ProjectId == definition.ProjectId
                 && subjectResourceIds.Contains(reference.SubjectResourceId)
+                && reference.Purpose == VisualReferenceService.Purpose
+                && reference.ReviewStatus == "active"
                 && image.ProjectId == definition.ProjectId
+                && image.Type == VisualReferenceService.AssetType
                 && image.BlobContent != null
                 && image.ContentType != null
                 && image.ContentType.StartsWith("image/")
-            select new { reference.SubjectResourceId, reference.ImageAssetId, image.Version })
+                && state.ProjectId == definition.ProjectId
+                && state.ResourceType == VisualReferenceService.AssetType
+                && state.CurrentAssetId == image.Id
+                && state.LifecycleStatus == "active"
+            select new
+            {
+                reference.SubjectResourceId,
+                reference.ImageAssetId,
+                image.Number,
+                image.UpdatedAtUtc
+            })
             .ToListAsync(cancellationToken);
         var references = referenceCandidates
             .GroupBy(item => item.SubjectResourceId)
-            .Select(group => group.OrderByDescending(item => item.Version).First())
+            .Select(group => group
+                .OrderByDescending(item => item.UpdatedAtUtc)
+                .ThenByDescending(item => item.Number)
+                .ThenBy(item => item.ImageAssetId)
+                .First())
+            .OrderBy(item => subjectOrder[item.SubjectResourceId])
+            .ThenBy(item => item.ImageAssetId)
             .ToArray();
         var referencedSubjectIds = references.Select(item => item.SubjectResourceId).ToHashSet();
         var missingCharacters = characters

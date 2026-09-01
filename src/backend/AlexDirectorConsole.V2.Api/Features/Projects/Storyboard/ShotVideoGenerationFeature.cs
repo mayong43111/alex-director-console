@@ -85,22 +85,25 @@ public interface IComfyUiVideoClient
 
 public interface IComfyUiWorkflowProvider
 {
-    Task<string> ReadAsync(CancellationToken cancellationToken);
+    Task<string> ReadAsync(string workflowProfile, CancellationToken cancellationToken);
 }
 
 public sealed class PackagedComfyUiWorkflowProvider : IComfyUiWorkflowProvider
 {
-    public async Task<string> ReadAsync(CancellationToken cancellationToken)
+    public async Task<string> ReadAsync(string workflowProfile, CancellationToken cancellationToken)
     {
+        var normalized = ComfyUiConfigurationView.NormalizeVideoWorkflow(workflowProfile);
         var path = Path.Combine(
             AppContext.BaseDirectory,
             "Skills",
             "video-generation",
             "workflows",
-            "minimax-h3-fl2va-api.json");
+            normalized == ComfyUiConfigurationView.Ltx23VideoWorkflow
+                ? "ltx-2.3-av-i2v-api.json"
+                : "minimax-h3-fl2va-api.json");
         if (!File.Exists(path))
         {
-            throw new FileNotFoundException("内置 MiniMax H3 workflow 不存在。", path);
+            throw new FileNotFoundException($"内置 {ComfyUiConfigurationView.VideoModel(normalized)} workflow 不存在。", path);
         }
         return await File.ReadAllTextAsync(path, cancellationToken);
     }
@@ -134,6 +137,7 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
 
         var workflow = JsonNode.Parse(submission.WorkflowJson)?.AsObject()
             ?? throw new InvalidOperationException("ComfyUI workflow JSON 为空。");
+        var hasLastFrameInput = submission.WorkflowJson.Contains("{{LAST_FRAME}}", StringComparison.Ordinal);
         ReplaceTokens(workflow, new Dictionary<string, JsonNode?>
         {
             ["{{FIRST_FRAME}}"] = firstFrame,
@@ -145,7 +149,7 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
             ["{{FPS}}"] = submission.Fps,
             ["{{OUTPUT_PREFIX}}"] = prefix
         });
-        if (lastFrame is null)
+        if (lastFrame is null && hasLastFrameInput)
         {
             workflow.Remove("2");
             if (workflow["7"]?["inputs"] is JsonObject inputs)
@@ -153,9 +157,13 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
                 inputs.Remove("last_frame");
             }
         }
-        if (workflow["8"]?["inputs"] is JsonObject noiseInputs)
+        foreach (var node in workflow.Select(item => item.Value).OfType<JsonObject>())
         {
-            noiseInputs["noise_seed"] = Random.Shared.NextInt64(0, long.MaxValue);
+            if (node["inputs"] is not JsonObject inputs) continue;
+            if (inputs.ContainsKey("noise_seed"))
+                inputs["noise_seed"] = Random.Shared.NextInt64(0, long.MaxValue);
+            if (inputs.ContainsKey("seed"))
+                inputs["seed"] = Random.Shared.NextInt64(0, long.MaxValue);
         }
         if (workflow.ToJsonString().Contains("{{", StringComparison.Ordinal))
         {
@@ -297,6 +305,7 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
 public interface IShotVideoService
 {
     Task<ShotVideoPreview?> PreviewAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string? instruction, CancellationToken cancellationToken);
+    Task<ShotVideoPreview?> PreviewConfirmedAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, CancellationToken cancellationToken);
     Task<ShotVideoProductionView?> StartAsync(Guid projectId, Guid episodeId, Guid shotResourceId, string prompt, string previewHash, string? instruction, CancellationToken cancellationToken);
     Task<ShotVideoProductionView> WaitForCompletionAsync(
         Guid projectId,
@@ -322,6 +331,8 @@ public sealed class ShotVideoService(
     public const string RunType = "shot-video";
     private const int FramesPerSecond = 24;
     private const int DimensionMultiple = 32;
+    private const string MiniMaxH3ExecutionMarker = "MINIMAX H3 EXECUTION REQUIREMENTS:";
+    private const string MiniMaxH3ContinuousShotRequirement = "This is one uninterrupted continuous shot in one physically continuous space and one continuous timeline. Preserve a single camera trajectory from the supplied first frame to the final frame. No cuts, shot changes, angle changes, reframing jumps, transitions, montage, inserts, split screen, flashbacks, time jumps, location changes, or replacement backgrounds. Do not switch to another character's viewpoint or introduce a second composition.";
 
     public async Task<ShotVideoPreview?> PreviewAsync(
         Guid projectId,
@@ -332,15 +343,40 @@ public sealed class ShotVideoService(
     {
         var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
         if (context is null) return null;
-        var workflow = await workflowProvider.ReadAsync(cancellationToken);
+        var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var workflowProfile = ComfyUiConfigurationView.NormalizeVideoWorkflow(configuration?.WorkflowProfile);
+        var workflow = await workflowProvider.ReadAsync(workflowProfile, cancellationToken);
         var draft = await promptAgent.GenerateAsync(BuildAgentInput(context, instruction), cancellationToken);
         var prompt = BuildPrompt(context.Shot, draft, context.Settings.VideoPromptModel);
-        return BuildPreview(context, prompt, workflow);
+        return BuildPreview(context, prompt, workflow, workflowProfile);
     }
 
-    private static ShotVideoPreview BuildPreview(ShotVideoContext context, string prompt, string workflow)
+    public async Task<ShotVideoPreview?> PreviewConfirmedAsync(
+        Guid projectId,
+        Guid episodeId,
+        Guid shotResourceId,
+        string prompt,
+        CancellationToken cancellationToken)
     {
-        var frameCount = CalculateFrameCount(context.Definition.DurationSeconds, FramesPerSecond);
+        var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
+        if (context is null) return null;
+        var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var workflowProfile = ComfyUiConfigurationView.NormalizeVideoWorkflow(configuration?.WorkflowProfile);
+        var workflow = await workflowProvider.ReadAsync(workflowProfile, cancellationToken);
+        return BuildPreview(context, prompt, workflow, workflowProfile);
+    }
+
+    private static ShotVideoPreview BuildPreview(
+        ShotVideoContext context,
+        string prompt,
+        string workflow,
+        string workflowProfile)
+    {
+        var durationSeconds = CalculateEffectiveDuration(context.Shot, workflowProfile);
+        prompt = ApplyWorkflowPrompt(context.Shot, prompt, workflowProfile, durationSeconds);
+        var frameCount = CalculateFrameCount(durationSeconds, FramesPerSecond, workflowProfile);
         var width = NormalizeDimension(context.Settings.OutputWidth);
         var height = NormalizeDimension(context.Settings.OutputHeight);
         var workflowHash = Hash(workflow);
@@ -366,10 +402,10 @@ public sealed class ShotVideoService(
             height,
             frameCount,
             FramesPerSecond,
-            context.Definition.DurationSeconds,
+            durationSeconds,
             context.FirstFrame.Id,
             context.LastFrame?.Id,
-            ComfyUiConfigurationView.RequiredWorkflowProfile);
+            workflowProfile);
     }
 
     public async Task<ShotVideoProductionView?> StartAsync(
@@ -383,14 +419,15 @@ public sealed class ShotVideoService(
     {
         var context = await ResolveContextAsync(projectId, episodeId, shotResourceId, cancellationToken);
         if (context is null) return null;
-        var workflow = await workflowProvider.ReadAsync(cancellationToken);
-        var preview = BuildPreview(context, prompt, workflow);
+        var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+        var workflowProfile = ComfyUiConfigurationView.NormalizeVideoWorkflow(configuration?.WorkflowProfile);
+        var workflow = await workflowProvider.ReadAsync(workflowProfile, cancellationToken);
+        var preview = BuildPreview(context, prompt, workflow, workflowProfile);
         if (!string.Equals(previewHash, preview.PreviewHash, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("镜头、项目设定、关键帧或 workflow 已变化，请重新预览。");
         }
-        var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         if (configuration is null || !configuration.IsEnabled)
         {
             throw new InvalidOperationException("请先在系统设置中启用本地 ComfyUI。");
@@ -601,7 +638,11 @@ public sealed class ShotVideoService(
         item.Attempt += 1;
         item.StartedAtUtc ??= now;
         await dbContext.SaveChangesAsync(cancellationToken);
-        var capabilities = await connectionTester.TestAsync(configuration.BaseUrl, cancellationToken);
+        var capabilities = await connectionTester.TestAsync(
+            configuration.BaseUrl,
+            configuration.ImageEditWorkflow,
+            configuration.WorkflowProfile,
+            cancellationToken);
         if (!capabilities.IsSuccess)
         {
             throw new InvalidOperationException(capabilities.Message);
@@ -611,7 +652,7 @@ public sealed class ShotVideoService(
         var promptId = await client.SubmitAsync(
             new(
                 configuration.BaseUrl,
-                await workflowProvider.ReadAsync(cancellationToken),
+                await workflowProvider.ReadAsync(spec.WorkflowProfile, cancellationToken),
                 firstFrame.BlobContent ?? throw new InvalidOperationException("首帧文件为空。"),
                 lastFrame?.BlobContent,
                 spec.Prompt,
@@ -887,7 +928,8 @@ public sealed class ShotVideoService(
         context.Shot.LastFrameDescription,
         context.Shot.CutDescription,
         context.Characters,
-        string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim());
+        string.IsNullOrWhiteSpace(instruction) ? null : instruction.Trim(),
+        StoryboardDialogue.From(context.Shot.DialogueCharacter, context.Shot.Dialogue).Character);
 
     private static string BuildPrompt(
         StoryboardShotDocument shot,
@@ -923,21 +965,40 @@ public sealed class ShotVideoService(
         return $$"""
             {{alignment}}
 
-            integrated_multimodal_description: [Shot 1] {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}} The camera preserves the supplied first frame's exact framing and axis. {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}} {{BuildDialogueTimeline(shot)}} Voice performance: {{draft.VoicePerformancePrompt}} The image result is a clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays.
+            integrated_multimodal_description: [Shot 1] {{RemoveVisualControlInstructions(draft.VisualMotionPrompt)}} The camera preserves the supplied first frame's exact framing and axis. {{RemoveWrittenContentInstructions(draft.ContinuityNotes)}} Voice performance: {{draft.VoicePerformancePrompt}} The image result is a clean picture with a completely blank lower third and no readable glyphs anywhere. No titles, logos, watermarks, interface elements, speech bubbles, or written overlays.
 
-            overall_soundscape: {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
+            overall_soundscape: Audio must be present and clearly audible from 0.00 seconds. {{draft.SoundPrompt}} Keep the single voice clear and centered above all other sound.
 
             non_diegetic_music: N/A
             """;
     }
 
+    private static string BuildMiniMaxH3AudioRequirement(StoryboardShotDocument shot)
+    {
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        return string.IsNullOrWhiteSpace(dialogue.Text)
+            ? "Audio is mandatory. Generate clearly audible, non-silent synchronized ambient sound beginning at exactly 0.00 seconds and continuing naturally through the clip. There is no spoken dialogue, but no dialogue does not mean silence."
+            : $"Audio is mandatory. {dialogue.Character}'s clearly audible first spoken syllable begins immediately at exactly 0.00 seconds. Do not delay the voice, begin with silence, or move the dialogue toward the end of the clip.";
+    }
+
+    private static string BuildMiniMaxH3DialogueTimeline(StoryboardShotDocument shot)
+    {
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        if (string.IsNullOrWhiteSpace(dialogue.Text))
+            return "There is no spoken dialogue. Generate the specified synchronized ambient sound throughout the clip.";
+        var speechEnd = shot.DurationSeconds - StoryboardDialogue.TailBufferSeconds;
+        return $"At 0.00 seconds, the on-screen character {dialogue.Character} (S1) begins speaking immediately in Mandarin Chinese: <d>[Chinese] {dialogue.Text}</d> "
+            + $"The complete <d> line and final syllable end no later than {speechEnd:0.#} seconds. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds, {dialogue.Character} (S1) is vocally silent with closed lips while natural ambience remains audible.";
+    }
+
     private static string BuildDialogueTimeline(StoryboardShotDocument shot)
     {
-        if (string.IsNullOrWhiteSpace(shot.Dialogue))
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        if (string.IsNullOrWhiteSpace(dialogue.Text))
             return "No human voice for the entire clip. All faces remain naturally closed-mouth.";
-        var speechEnd = Math.Min(3, Math.Max(2, shot.DurationSeconds * .375));
-        return $"From 0.2 to {speechEnd:0.#} seconds, the host says exactly once in Mandarin Chinese: \"{shot.Dialogue}\" "
-            + $"At {speechEnd:0.#} seconds the sentence is complete. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds there is absolute vocal silence: no extra syllables, words, repetition, humming, or vocalization. The host's lips remain closed after the sentence.";
+        var speechEnd = shot.DurationSeconds - StoryboardDialogue.TailBufferSeconds;
+        return $"From 0.0 to {speechEnd:0.#} seconds, character {dialogue.Character} says exactly once in Mandarin Chinese: \"{dialogue.Text}\" "
+            + $"Every written character and the final syllable must be complete by {speechEnd:0.#} seconds. From {speechEnd:0.#} to {shot.DurationSeconds:0.###} seconds there is absolute vocal silence: no omission, paraphrase, extra syllables, repetition, humming, or vocalization. {dialogue.Character}'s lips remain closed after the sentence.";
     }
 
     private static string RemoveWrittenContentInstructions(string value)
@@ -969,10 +1030,67 @@ public sealed class ShotVideoService(
         return string.IsNullOrWhiteSpace(result) ? fallback : result;
     }
 
-    private static int CalculateFrameCount(double durationSeconds, int fps)
+    private static int CalculateFrameCount(double durationSeconds, int fps, string workflowProfile)
     {
-        var requestedFrames = Math.Max(6, (int)Math.Ceiling(durationSeconds * fps));
+        var requestedFrames = Math.Max(9, (int)Math.Ceiling(durationSeconds * fps));
+        if (ComfyUiConfigurationView.NormalizeVideoWorkflow(workflowProfile)
+            == ComfyUiConfigurationView.Ltx23VideoWorkflow)
+        {
+            return 8 * (int)Math.Ceiling((requestedFrames - 1) / 8d) + 1;
+        }
         return 17 * (int)Math.Ceiling((requestedFrames - 5) / 17d) + 5;
+    }
+
+    private static double CalculateEffectiveDuration(StoryboardShotDocument shot, string workflowProfile)
+    {
+        if (ComfyUiConfigurationView.NormalizeVideoWorkflow(workflowProfile)
+            != ComfyUiConfigurationView.Ltx23VideoWorkflow)
+            return shot.DurationSeconds;
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        var spokenCharacters = dialogue.SpokenCharacterCount;
+        if (spokenCharacters == 0) return shot.DurationSeconds;
+        var required = spokenCharacters / 2.5 + 1.0;
+        return Math.Max(shot.DurationSeconds, Math.Ceiling(required * 10) / 10);
+    }
+
+    private static string ApplyWorkflowPrompt(
+        StoryboardShotDocument shot,
+        string prompt,
+        string workflowProfile,
+        double durationSeconds)
+    {
+        var normalizedWorkflow = ComfyUiConfigurationView.NormalizeVideoWorkflow(workflowProfile);
+        if (normalizedWorkflow == ComfyUiConfigurationView.MinimaxVideoWorkflow)
+            return ApplyMiniMaxH3ExecutionRequirements(shot, prompt);
+        if (normalizedWorkflow != ComfyUiConfigurationView.Ltx23VideoWorkflow) return prompt;
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        if (string.IsNullOrWhiteSpace(dialogue.Text) || prompt.Contains("LTX AUDIO TIMING:", StringComparison.Ordinal))
+            return prompt;
+        var speechEnd = durationSeconds - 1.0;
+        return $"{prompt}\n\nLTX AUDIO TIMING: Character {dialogue.Character} begins speaking immediately at 0.0 seconds. Say exactly once in Mandarin Chinese: \"{dialogue.Text}\" Complete every written character and the final syllable no later than {speechEnd:0.0} seconds. Do not omit, shorten, paraphrase, repeat, or trail off. From {speechEnd:0.0} to {durationSeconds:0.0} seconds, keep the voice silent and retain only natural ambience.";
+    }
+
+    private static string ApplyMiniMaxH3ExecutionRequirements(StoryboardShotDocument shot, string prompt)
+    {
+        if (prompt.Contains(MiniMaxH3ExecutionMarker, StringComparison.Ordinal)) return prompt;
+
+        var dialogue = StoryboardDialogue.From(shot.DialogueCharacter, shot.Dialogue);
+        prompt = prompt
+            .Replace(BuildDialogueTimeline(shot), string.Empty, StringComparison.Ordinal)
+            .Replace(BuildMiniMaxH3DialogueTimeline(shot), string.Empty, StringComparison.Ordinal)
+            .Replace(BuildMiniMaxH3AudioRequirement(shot), string.Empty, StringComparison.Ordinal)
+            .Replace(MiniMaxH3ContinuousShotRequirement, string.Empty, StringComparison.Ordinal);
+        if (!string.IsNullOrWhiteSpace(dialogue.Text))
+        {
+            var legacyTimelinePattern = $"From 0\\.0 to .*?character {Regex.Escape(dialogue.Character)} says exactly once in Mandarin Chinese: \"{Regex.Escape(dialogue.Text)}\".*?{Regex.Escape(dialogue.Character)}'s lips remain closed after the sentence\\.";
+            prompt = Regex.Replace(prompt, legacyTimelinePattern, string.Empty, RegexOptions.Singleline);
+        }
+        var requirements = $"{MiniMaxH3ExecutionMarker} {BuildMiniMaxH3AudioRequirement(shot)} {MiniMaxH3ContinuousShotRequirement} {BuildMiniMaxH3DialogueTimeline(shot)} ";
+        const string shotPrefix = "integrated_multimodal_description: [Shot 1] ";
+        var insertionIndex = prompt.IndexOf(shotPrefix, StringComparison.Ordinal);
+        return insertionIndex < 0
+            ? $"{prompt.Trim()}\n\n{requirements.Trim()}"
+            : prompt.Insert(insertionIndex + shotPrefix.Length, requirements);
     }
 
     private static int NormalizeDimension(int value) =>
@@ -1028,7 +1146,10 @@ internal static class ShotVideoQueries
                 && item.ShotResourceId == shotResourceId
                 && item.ShotAssetId == currentShotAssetId
             select new { Run = run, Item = item }).ToListAsync(cancellationToken);
-        var row = rows.OrderByDescending(candidate => candidate.Run.CreatedAtUtc).FirstOrDefault();
+        var row = rows
+            .OrderByDescending(candidate => candidate.Run.Status is "queued" or "running" ? 2 : candidate.Run.Status == "completed" ? 1 : 0)
+            .ThenByDescending(candidate => candidate.Run.CreatedAtUtc)
+            .FirstOrDefault();
         if (row is null) return null;
         var spec = JsonSerializer.Deserialize<ShotVideoRunSpec>(row.Run.SpecJson, StoryboardDefaults.JsonOptions);
         Asset? output = null;

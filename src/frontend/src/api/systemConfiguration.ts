@@ -36,6 +36,9 @@ export interface ComfyUiConfiguration {
   updatedAtUtc: string | null
 }
 
+export type ComfyUiImageEditWorkflow = 'qwen-image-edit-2511' | 'flux2-dev-image-edit-kv-cache'
+export type ComfyUiVideoWorkflow = 'minimax-h3-fl2va-turbo-4step' | 'ltx-2.3-av-i2v'
+
 export interface ComfyUiCapabilities {
   isSuccess: boolean
   message: string
@@ -107,6 +110,8 @@ export async function getComfyUiConfiguration(signal?: AbortSignal): Promise<Com
 
 export async function updateComfyUiConfiguration(input: {
   baseUrl: string
+  imageEditWorkflow: ComfyUiImageEditWorkflow
+  workflowProfile: ComfyUiVideoWorkflow
   isEnabled: boolean
 }): Promise<ComfyUiConfiguration> {
   const response = await fetch('/api/v2/system/comfyui-configuration', {

@@ -29,6 +29,7 @@ appsettings.Local.json
 Thumbs.db
 docs/*
 !docs/one-prompt-episode-text-validation.md
+!docs/visual-production-implementation-plan.md
 src/local-tts/
 
 # Logs

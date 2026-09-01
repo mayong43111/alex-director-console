@@ -21,18 +21,22 @@ public sealed record ComfyUiConfigurationView(
 {
     public const string ProviderName = "ComfyUI";
     public const string RequiredConnectionMode = "local-http";
-    public const string RequiredWorkflowProfile = "minimax-h3-fl2va-turbo-4step";
+    public const string MinimaxVideoWorkflow = "minimax-h3-fl2va-turbo-4step";
+    public const string Ltx23VideoWorkflow = "ltx-2.3-av-i2v";
+    public const string RequiredWorkflowProfile = MinimaxVideoWorkflow;
     public const string RequiredTextToImageWorkflow = "krea-2-text-to-image";
-    public const string RequiredImageEditWorkflow = "qwen-image-edit-2511";
+    public const string QwenImageEditWorkflow = "qwen-image-edit-2511";
+    public const string Flux2DevImageEditWorkflow = "flux2-dev-image-edit-kv-cache";
+    public const string DefaultImageEditWorkflow = QwenImageEditWorkflow;
     public const string DefaultBaseUrl = "http://127.0.0.1:8188";
 
     public static ComfyUiConfigurationView Empty { get; } = new(
         ProviderName,
         RequiredConnectionMode,
         DefaultBaseUrl,
-        RequiredWorkflowProfile,
+        MinimaxVideoWorkflow,
         RequiredTextToImageWorkflow,
-        RequiredImageEditWorkflow,
+        DefaultImageEditWorkflow,
         1,
         false,
         false,
@@ -42,13 +46,39 @@ public sealed record ComfyUiConfigurationView(
         ProviderName,
         RequiredConnectionMode,
         configuration.BaseUrl,
-        RequiredWorkflowProfile,
+        NormalizeVideoWorkflow(configuration.WorkflowProfile),
         RequiredTextToImageWorkflow,
-        RequiredImageEditWorkflow,
+        NormalizeImageEditWorkflow(configuration.ImageEditWorkflow),
         1,
         configuration.IsEnabled,
         Uri.TryCreate(configuration.BaseUrl, UriKind.Absolute, out _),
         configuration.UpdatedAtUtc);
+
+    public static string NormalizeImageEditWorkflow(string? workflow) => workflow switch
+    {
+        Flux2DevImageEditWorkflow => Flux2DevImageEditWorkflow,
+        _ => QwenImageEditWorkflow
+    };
+
+    public static bool IsSupportedImageEditWorkflow(string? workflow) =>
+        workflow is QwenImageEditWorkflow or Flux2DevImageEditWorkflow;
+
+    public static string NormalizeVideoWorkflow(string? workflow) => workflow switch
+    {
+        Ltx23VideoWorkflow => Ltx23VideoWorkflow,
+        _ => MinimaxVideoWorkflow
+    };
+
+    public static bool IsSupportedVideoWorkflow(string? workflow) =>
+        workflow is MinimaxVideoWorkflow or Ltx23VideoWorkflow;
+
+    public static string VideoModel(string? workflow) =>
+        NormalizeVideoWorkflow(workflow) == Ltx23VideoWorkflow ? "LTX 2.3" : "MiniMax H3";
+
+    public static string ImageEditModel(string? workflow) =>
+        NormalizeImageEditWorkflow(workflow) == Flux2DevImageEditWorkflow
+            ? "FLUX.2 dev"
+            : "Qwen Image Edit 2511";
 }
 
 public sealed record GetComfyUiConfigurationQuery : IQuery<ComfyUiConfigurationView>;
@@ -70,6 +100,8 @@ public sealed class GetComfyUiConfigurationHandler(V2DbContext dbContext)
 
 public sealed record UpdateComfyUiConfigurationCommand(
     string? BaseUrl,
+    string? ImageEditWorkflow,
+    string? WorkflowProfile,
     bool IsEnabled) : ICommand<UpdateComfyUiConfigurationResult>;
 
 public sealed record UpdateComfyUiConfigurationResult(
@@ -99,6 +131,20 @@ public sealed class UpdateComfyUiConfigurationHandler(
                 "baseUrl",
                 "请输入有效的 ComfyUI HTTP(S) 地址。");
         }
+        if (!string.IsNullOrWhiteSpace(command.ImageEditWorkflow)
+            && !ComfyUiConfigurationView.IsSupportedImageEditWorkflow(command.ImageEditWorkflow))
+        {
+            return UpdateComfyUiConfigurationResult.Invalid(
+                "imageEditWorkflow",
+                "请选择受支持的 ComfyUI 图片编辑工作流。");
+        }
+        if (!string.IsNullOrWhiteSpace(command.WorkflowProfile)
+            && !ComfyUiConfigurationView.IsSupportedVideoWorkflow(command.WorkflowProfile))
+        {
+            return UpdateComfyUiConfigurationResult.Invalid(
+                "workflowProfile",
+                "请选择受支持的 ComfyUI 视频工作流。");
+        }
 
         var configuration = await dbContext.ComfyUiConfigurations
             .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
@@ -110,9 +156,13 @@ public sealed class UpdateComfyUiConfigurationHandler(
 
         configuration.ConnectionMode = ComfyUiConfigurationView.RequiredConnectionMode;
         configuration.BaseUrl = baseUrl;
-        configuration.WorkflowProfile = ComfyUiConfigurationView.RequiredWorkflowProfile;
+        configuration.WorkflowProfile = string.IsNullOrWhiteSpace(command.WorkflowProfile)
+            ? ComfyUiConfigurationView.NormalizeVideoWorkflow(configuration.WorkflowProfile)
+            : command.WorkflowProfile;
         configuration.TextToImageWorkflow = ComfyUiConfigurationView.RequiredTextToImageWorkflow;
-        configuration.ImageEditWorkflow = ComfyUiConfigurationView.RequiredImageEditWorkflow;
+        configuration.ImageEditWorkflow = string.IsNullOrWhiteSpace(command.ImageEditWorkflow)
+            ? ComfyUiConfigurationView.NormalizeImageEditWorkflow(configuration.ImageEditWorkflow)
+            : command.ImageEditWorkflow;
         configuration.MaxConcurrentJobs = 1;
         configuration.IsEnabled = command.IsEnabled;
         configuration.UpdatedAtUtc = timeProvider.GetUtcNow();
@@ -132,47 +182,130 @@ public sealed record ComfyUiCapabilities(
 
 public interface IComfyUiConnectionTester
 {
-    Task<ComfyUiCapabilities> TestAsync(string baseUrl, CancellationToken cancellationToken);
+    Task<ComfyUiCapabilities> TestAsync(
+        string baseUrl,
+        string imageEditWorkflow,
+        string workflowProfile,
+        CancellationToken cancellationToken);
 }
 
 public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory)
     : IComfyUiConnectionTester
 {
-    private static readonly string[] RequiredNodes =
+    private static readonly string[] CommonRequiredNodes =
     [
         "LoadImage",
+        "ImageScale",
         "UNETLoader",
         "CLIPLoader",
         "VAELoader",
-        "MiniMaxH3ImageToVideo",
+        "VAEEncode",
+        "SaveImage",
         "BasicScheduler",
         "KSamplerSelect",
         "SamplerCustomAdvanced",
         "VAEDecode",
-        "VAEDecodeAudio",
         "CreateVideo",
         "SaveVideo",
-        "LoraLoaderModelOnly",
+        "LoraLoaderModelOnly"
+    ];
+    private static readonly string[] QwenRequiredNodes =
+    [
+        "FluxKontextImageScale",
+        "TextEncodeQwenImageEditPlus",
+        "FluxKontextMultiReferenceLatentMethod",
+        "ModelSamplingAuraFlow",
+        "CFGNorm",
+        "KSampler"
+    ];
+    private static readonly string[] FluxRequiredNodes =
+    [
+        "ImageScaleToTotalPixels",
+        "ReferenceLatent",
+        "FluxKVCache",
+        "EmptyFlux2LatentImage",
+        "Flux2Scheduler",
+        "RandomNoise",
+        "FluxGuidance",
+        "BasicGuider"
+    ];
+    private static readonly string[] MinimaxVideoRequiredNodes =
+    [
+        "MiniMaxH3ImageToVideo",
+        "VAEDecodeAudio",
         "MiniMaxH3SigmaShift"
     ];
-    private static readonly string[] RequiredModels =
+    private static readonly string[] Ltx23VideoRequiredNodes =
+    [
+        "CheckpointLoaderSimple",
+        "LTXAVTextEncoderLoader",
+        "LTXVAudioVAELoader",
+        "CLIPTextEncode",
+        "LTXVConditioning",
+        "LTXVImgToVideo",
+        "LTXVEmptyLatentAudio",
+        "LTXVConcatAVLatent",
+        "LTXVSeparateAVLatent",
+        "ModelSamplingLTXV",
+        "KSampler",
+        "LTXVAudioVAEDecode"
+    ];
+    private static readonly string[] CommonRequiredModels =
+    [
+        "krea2_turbo_fp8_scaled.safetensors",
+        "qwen3vl_4b_fp8_scaled.safetensors"
+    ];
+    private static readonly string[] QwenRequiredModels =
+    [
+        "qwen_image_edit_2511_bf16.safetensors",
+        "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "qwen_image_vae.safetensors"
+    ];
+    private static readonly string[] FluxRequiredModels =
+    [
+        "flux2_dev_fp8mixed.safetensors",
+        "mistral_3_small_flux2_fp8.safetensors",
+        "flux2-vae.safetensors"
+    ];
+    private static readonly string[] MinimaxVideoRequiredModels =
     [
         "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
         "minimax_h3_video_vae_fp16.safetensors",
         "minimax_h3_audio_vae_fp32.safetensors",
-        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
-        "krea2_turbo_fp8_scaled.safetensors",
-        "qwen3vl_4b_fp8_scaled.safetensors",
-        "qwen_image_edit_2511_bf16.safetensors",
-        "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        "qwen_image_vae.safetensors"
+        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+    ];
+    private static readonly string[] Ltx23VideoRequiredModels =
+    [
+        "ltx-2.3-22b-dev.safetensors",
+        "gemma_3_12B_it_fp4_mixed.safetensors"
     ];
 
     public async Task<ComfyUiCapabilities> TestAsync(
         string baseUrl,
+        string imageEditWorkflow,
+        string workflowProfile,
         CancellationToken cancellationToken)
     {
+        var workflow = ComfyUiConfigurationView.NormalizeImageEditWorkflow(imageEditWorkflow);
+        var videoWorkflow = ComfyUiConfigurationView.NormalizeVideoWorkflow(workflowProfile);
+        var requiredNodes = CommonRequiredNodes
+            .Concat(workflow == ComfyUiConfigurationView.Flux2DevImageEditWorkflow
+                ? FluxRequiredNodes
+                : QwenRequiredNodes)
+            .Concat(videoWorkflow == ComfyUiConfigurationView.Ltx23VideoWorkflow
+                ? Ltx23VideoRequiredNodes
+                : MinimaxVideoRequiredNodes)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var requiredModels = CommonRequiredModels
+            .Concat(workflow == ComfyUiConfigurationView.Flux2DevImageEditWorkflow
+                ? FluxRequiredModels
+                : QwenRequiredModels)
+            .Concat(videoWorkflow == ComfyUiConfigurationView.Ltx23VideoWorkflow
+                ? Ltx23VideoRequiredModels
+                : MinimaxVideoRequiredModels)
+            .ToArray();
         var client = httpClientFactory.CreateClient("ComfyUi");
         var root = new Uri(baseUrl.TrimEnd('/') + "/");
         using var stats = await client.GetAsync(new Uri(root, "system_stats"), cancellationToken);
@@ -180,23 +313,23 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         var objectInfo = await client.GetFromJsonAsync<JsonElement>(
             new Uri(root, "object_info"),
             cancellationToken);
-        var missing = RequiredNodes
+        var missing = requiredNodes
             .Where(node => !objectInfo.TryGetProperty(node, out _))
             .ToArray();
         var objectInfoJson = objectInfo.GetRawText();
-        var missingModels = RequiredModels
+        var missingModels = requiredModels
             .Where(model => !objectInfoJson.Contains(model, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         var isReady = missing.Length == 0 && missingModels.Length == 0;
         return new(
             isReady,
             isReady
-                ? "ComfyUI 连接成功，Krea 2、Qwen Image Edit 2511 和 MiniMax H3 所需节点与模型已就绪。"
+                ? $"ComfyUI 连接成功，Krea 2、{ComfyUiConfigurationView.ImageEditModel(workflow)} 和 {ComfyUiConfigurationView.VideoModel(videoWorkflow)} 所需节点与模型已就绪。"
                 : $"ComfyUI 已连接，但缺少 {missing.Length} 个节点和 {missingModels.Length} 个模型文件。",
-            ComfyUiConfigurationView.RequiredWorkflowProfile,
-            RequiredNodes,
+            videoWorkflow,
+            requiredNodes,
             missing,
-            RequiredModels,
+            requiredModels,
             missingModels);
     }
 }
@@ -220,7 +353,7 @@ public sealed class TestComfyUiConnectionHandler(
             return new(
                 false,
                 "请先保存并启用本地 ComfyUI。",
-                ComfyUiConfigurationView.RequiredWorkflowProfile,
+                ComfyUiConfigurationView.MinimaxVideoWorkflow,
                 [],
                 [],
                 [],
@@ -229,7 +362,23 @@ public sealed class TestComfyUiConnectionHandler(
 
         try
         {
-            return await connectionTester.TestAsync(configuration.BaseUrl, cancellationToken);
+            return await connectionTester.TestAsync(
+                configuration.BaseUrl,
+                configuration.ImageEditWorkflow,
+                configuration.WorkflowProfile,
+                cancellationToken);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(error, "ComfyUI connection test timed out for {BaseUrl}.", configuration.BaseUrl);
+            return new(
+                false,
+                "ComfyUI 能力检测超时，请检查远端服务负载或网络连接。",
+                configuration.WorkflowProfile,
+                [],
+                [],
+                [],
+                []);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {

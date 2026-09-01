@@ -63,3 +63,21 @@ export async function cancelGenerationTask(taskId: string): Promise<GenerationTa
   if (!response.ok) throw new Error('停止生成任务失败。')
   return response.json() as Promise<GenerationTask>
 }
+
+export interface CancelEpisodeVideoGenerationResult {
+  cancelledTasks: number
+  cancelledRuns: number
+}
+
+export async function cancelEpisodeVideoGeneration(
+  projectId: string,
+  productionEpisodeId: string,
+): Promise<CancelEpisodeVideoGenerationResult> {
+  const response = await fetch('/api/v2/tasks/videos/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, productionEpisodeId }),
+  })
+  if (!response.ok) throw new Error('停止本集视频生成失败。')
+  return response.json() as Promise<CancelEpisodeVideoGenerationResult>
+}

@@ -16,6 +16,7 @@ export interface StoryboardShot {
   visualDescription: string
   action: string
   narration: string
+  dialogueCharacter: string
   dialogue: string
   sound: string
   characters: string[]
@@ -53,6 +54,7 @@ export type StoryboardShotTextField =
   | 'lastFrameDescription'
   | 'cutDescription'
   | 'narration'
+  | 'dialogueCharacter'
   | 'dialogue'
   | 'sound'
 
@@ -228,13 +230,15 @@ export async function startShotProduction(
   shotResourceId: string,
   confirmedPrompt: string,
   instruction?: string,
+  firstFrameOnly = false,
+  reconfirmPromptInputs = false,
 ): Promise<ShotProduction> {
   const response = await fetch(
     `/api/v2/projects/${projectId}/production-episodes/${productionEpisodeId}/storyboard/shots/${shotResourceId}/production/start`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirmedPrompt, instruction }),
+      body: JSON.stringify({ confirmedPrompt, instruction, firstFrameOnly, reconfirmPromptInputs }),
     },
   )
   if (!response.ok) throw await readError(response, '镜头开始制作失败。')

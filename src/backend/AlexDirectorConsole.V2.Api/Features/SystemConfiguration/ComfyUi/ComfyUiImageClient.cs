@@ -25,7 +25,7 @@ public interface IComfyUiImageClient
 public interface IComfyUiImageWorkflowProvider
 {
     Task<string> ReadTextToImageAsync(CancellationToken cancellationToken);
-    Task<string> ReadImageEditAsync(CancellationToken cancellationToken);
+    Task<string> ReadImageEditAsync(string workflow, CancellationToken cancellationToken);
 }
 
 public sealed class PackagedComfyUiImageWorkflowProvider : IComfyUiImageWorkflowProvider
@@ -33,8 +33,12 @@ public sealed class PackagedComfyUiImageWorkflowProvider : IComfyUiImageWorkflow
     public Task<string> ReadTextToImageAsync(CancellationToken cancellationToken) =>
         ReadAsync("krea-2-text-to-image-api.json", cancellationToken);
 
-    public Task<string> ReadImageEditAsync(CancellationToken cancellationToken) =>
-        ReadAsync("qwen-image-edit-2511-api.json", cancellationToken);
+    public Task<string> ReadImageEditAsync(string workflow, CancellationToken cancellationToken) =>
+        ReadAsync(ComfyUiConfigurationView.NormalizeImageEditWorkflow(workflow) switch
+        {
+            ComfyUiConfigurationView.Flux2DevImageEditWorkflow => "flux2-dev-image-edit-api.json",
+            _ => "qwen-image-edit-2511-api.json"
+        }, cancellationToken);
 
     private static async Task<string> ReadAsync(
         string fileName,
@@ -56,18 +60,24 @@ public sealed class PackagedComfyUiImageWorkflowProvider : IComfyUiImageWorkflow
 
 public sealed class ComfyUiImageClient(IHttpClientFactory httpClientFactory) : IComfyUiImageClient
 {
-    private const int MaxReferences = 3;
     private static readonly byte[] PngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
 
     public async Task<ComfyUiGeneratedImage> GenerateAsync(
         ComfyUiImageRequest request,
         CancellationToken cancellationToken)
     {
+        var isFlux = request.WorkflowJson.Contains("\"ReferenceLatent\"", StringComparison.Ordinal);
+        var maxReferences = isFlux ? 8 : 3;
+        if (request.References.Count > maxReferences)
+        {
+            throw new InvalidOperationException(
+            $"{(isFlux ? "FLUX.2 dev" : "Qwen Image Edit 2511")} 最多支持 {maxReferences} 张参考图，当前收到 {request.References.Count} 张。");
+        }
         var client = httpClientFactory.CreateClient("ComfyUiImage");
         var root = new Uri(request.BaseUrl.TrimEnd('/') + "/");
         var outputPrefix = $"alex-v2-image-{Guid.NewGuid():N}";
         var uploadedReferences = new List<string>();
-        foreach (var reference in request.References.Take(MaxReferences))
+        foreach (var reference in request.References)
         {
             uploadedReferences.Add(await UploadImageAsync(
                 client,
@@ -88,7 +98,12 @@ public sealed class ComfyUiImageClient(IHttpClientFactory httpClientFactory) : I
             ["{{OUTPUT_PREFIX}}"] = outputPrefix,
             ["{{REFERENCE_1}}"] = uploadedReferences.ElementAtOrDefault(0),
             ["{{REFERENCE_2}}"] = uploadedReferences.ElementAtOrDefault(1),
-            ["{{REFERENCE_3}}"] = uploadedReferences.ElementAtOrDefault(2)
+            ["{{REFERENCE_3}}"] = uploadedReferences.ElementAtOrDefault(2),
+            ["{{REFERENCE_4}}"] = uploadedReferences.ElementAtOrDefault(3),
+            ["{{REFERENCE_5}}"] = uploadedReferences.ElementAtOrDefault(4),
+            ["{{REFERENCE_6}}"] = uploadedReferences.ElementAtOrDefault(5),
+            ["{{REFERENCE_7}}"] = uploadedReferences.ElementAtOrDefault(6),
+            ["{{REFERENCE_8}}"] = uploadedReferences.ElementAtOrDefault(7)
         });
         RemoveMissingOptionalReferences(workflow, uploadedReferences.Count);
         if (workflow.ToJsonString().Contains("{{", StringComparison.Ordinal))
@@ -200,7 +215,19 @@ public sealed class ComfyUiImageClient(IHttpClientFactory httpClientFactory) : I
 
     private static void RemoveMissingOptionalReferences(JsonObject workflow, int referenceCount)
     {
-        if (workflow["8"]?["inputs"] is not JsonObject positive
+        if (workflow.Select(item => item.Value).OfType<JsonObject>().Any(node => string.Equals(
+                node["class_type"]?.GetValue<string>(),
+                "ReferenceLatent",
+                StringComparison.Ordinal)))
+        {
+            RemoveMissingFluxReferences(workflow);
+            return;
+        }
+        if (!string.Equals(
+                workflow["8"]?["class_type"]?.GetValue<string>(),
+                "TextEncodeQwenImageEditPlus",
+                StringComparison.Ordinal)
+            || workflow["8"]?["inputs"] is not JsonObject positive
             || workflow["9"]?["inputs"] is not JsonObject negative)
         {
             return;
@@ -221,6 +248,39 @@ public sealed class ComfyUiImageClient(IHttpClientFactory httpClientFactory) : I
         {
             throw new InvalidOperationException("Qwen Image Edit 2511 至少需要一张参考图。");
         }
+    }
+
+    private static void RemoveMissingFluxReferences(JsonObject workflow)
+    {
+        JsonArray conditioning = ["4", 0];
+        var referenceNodes = workflow
+            .Where(item => item.Value?["class_type"]?.GetValue<string>() == "ReferenceLatent")
+            .OrderBy(item => int.Parse(item.Key, System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
+        foreach (var referenceNode in referenceNodes)
+        {
+            var referenceInputs = referenceNode.Value!["inputs"]!.AsObject();
+            var encodeId = referenceInputs["latent"]![0]!.GetValue<string>();
+            var encodeInputs = workflow[encodeId]!["inputs"]!.AsObject();
+            var scaleId = encodeInputs["pixels"]![0]!.GetValue<string>();
+            var scaleInputs = workflow[scaleId]!["inputs"]!.AsObject();
+            var loadId = scaleInputs["image"]![0]!.GetValue<string>();
+            var image = workflow[loadId]?["inputs"]?["image"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(image))
+            {
+                workflow.Remove(loadId);
+                workflow.Remove(scaleId);
+                workflow.Remove(encodeId);
+                workflow.Remove(referenceNode.Key);
+                continue;
+            }
+            referenceInputs["conditioning"] = conditioning.DeepClone();
+            conditioning = [referenceNode.Key, 0];
+        }
+        var guidance = workflow.Select(item => item.Value)
+            .OfType<JsonObject>()
+            .Single(node => node["class_type"]?.GetValue<string>() == "FluxGuidance");
+        guidance["inputs"]!["conditioning"] = conditioning.DeepClone();
     }
 
     private static void ReplaceTokens(JsonNode node, IReadOnlyDictionary<string, JsonNode?> replacements)

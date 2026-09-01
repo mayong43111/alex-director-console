@@ -34,6 +34,8 @@ import {
   updateComfyUiConfiguration,
   updateFoundryConfiguration,
   type ComfyUiConfiguration,
+  type ComfyUiImageEditWorkflow,
+  type ComfyUiVideoWorkflow,
   type FoundryConfiguration,
 } from "../api/systemConfiguration";
 import {
@@ -1194,7 +1196,7 @@ export function ServicesPage() {
             <small>
               {llmProvider === "vllm" ? vllmModel : "GPT-5.4"}
               {" · "}
-              {imageProvider === "comfyui" ? "Krea 2 / Qwen Image Edit 2511" : "gpt-image-2"}
+              {imageProvider === "comfyui" ? "Krea 2 / 可配置图片编辑模型" : "gpt-image-2"}
             </small>
           </span>
           <span className={`connection-state ${configured ? "online" : "offline"}`}>
@@ -1312,7 +1314,7 @@ export function ServicesPage() {
           <div className="span-2 section-heading second">
             <div>
               <h2>图像生成</h2>
-              <p>{imageProvider === "comfyui" ? "文生图使用 Krea 2，图片修改使用 Qwen Image Edit 2511。" : "留空 Endpoint 或 API Key 时复用上方 Azure 配置。"}</p>
+              <p>{imageProvider === "comfyui" ? "文生图使用 Krea 2，图片编辑模型在本地 ComfyUI 配置中选择。" : "留空 Endpoint 或 API Key 时复用上方 Azure 配置。"}</p>
             </div>
             {configuration?.imageConfigured && <span className="saved-state"><Check size={13} />图片服务已配置</span>}
           </div>
@@ -1330,7 +1332,7 @@ export function ServicesPage() {
           {imageProvider === "comfyui" ? (
             <label>
               <span>模型组合</span>
-              <input value="Krea 2 · Qwen Image Edit 2511" readOnly />
+              <input value="Krea 2 · 使用 ComfyUI 当前图片编辑配置" readOnly />
             </label>
           ) : (
             <>
@@ -1412,6 +1414,8 @@ export function ServicesPage() {
 function ComfyUiConfigurationPanel() {
   const [configuration, setConfiguration] = useState<ComfyUiConfiguration | null>(null);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8188");
+  const [imageEditWorkflow, setImageEditWorkflow] = useState<ComfyUiImageEditWorkflow>("qwen-image-edit-2511");
+  const [videoWorkflow, setVideoWorkflow] = useState<ComfyUiVideoWorkflow>("minimax-h3-fl2va-turbo-4step");
   const [isEnabled, setIsEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"saving" | "testing" | null>(null);
@@ -1424,6 +1428,8 @@ function ComfyUiConfigurationPanel() {
       .then((loaded) => {
         setConfiguration(loaded);
         setBaseUrl(loaded.baseUrl);
+        setImageEditWorkflow(loaded.imageEditWorkflow as ComfyUiImageEditWorkflow);
+        setVideoWorkflow(loaded.workflowProfile as ComfyUiVideoWorkflow);
         setIsEnabled(loaded.isEnabled);
       })
       .catch((loadError: unknown) => {
@@ -1443,9 +1449,11 @@ function ComfyUiConfigurationPanel() {
     setError(null);
     setMessage(null);
     try {
-      const saved = await updateComfyUiConfiguration({ baseUrl, isEnabled });
+      const saved = await updateComfyUiConfiguration({ baseUrl, imageEditWorkflow, workflowProfile: videoWorkflow, isEnabled });
       setConfiguration(saved);
       setBaseUrl(saved.baseUrl);
+      setImageEditWorkflow(saved.imageEditWorkflow as ComfyUiImageEditWorkflow);
+      setVideoWorkflow(saved.workflowProfile as ComfyUiVideoWorkflow);
       setIsEnabled(saved.isEnabled);
       setMessage("本地 ComfyUI 配置已保存。");
     } catch (saveError) {
@@ -1475,7 +1483,7 @@ function ComfyUiConfigurationPanel() {
       <section className="service-list panel comfyui-service-summary">
         <div className="service-row">
           <span className="service-icon"><Server size={18} /></span>
-          <span><strong>本地 ComfyUI</strong><small>MiniMax H3 · Turbo 4-step LoRA</small></span>
+          <span><strong>本地 ComfyUI</strong><small>{imageEditWorkflow === "flux2-dev-image-edit-kv-cache" ? "FLUX.2 dev · KV Cache" : "Qwen Image Edit 2511"} · {videoWorkflow === "ltx-2.3-av-i2v" ? "LTX 2.3 原生音画" : "MiniMax H3"}</small></span>
           <span className={`connection-state ${configuration?.isEnabled ? "online" : "offline"}`}>
             <i />
             {loading ? "loading" : configuration?.isEnabled ? "enabled" : "disabled"}
@@ -1503,7 +1511,28 @@ function ComfyUiConfigurationPanel() {
             />
           </label>
           <label><span>连接模式</span><input value="local-http" readOnly /></label>
-          <label><span>Workflow</span><input value="minimax-h3-fl2va-turbo-4step" readOnly /></label>
+          <label>
+            <span>图片编辑模型</span>
+            <select
+              value={imageEditWorkflow}
+              onChange={(event) => setImageEditWorkflow(event.target.value as ComfyUiImageEditWorkflow)}
+              disabled={loading || Boolean(busy)}
+            >
+              <option value="qwen-image-edit-2511">Qwen Image Edit 2511</option>
+              <option value="flux2-dev-image-edit-kv-cache">FLUX.2 dev（KV Cache）</option>
+            </select>
+          </label>
+          <label>
+            <span>视频模型</span>
+            <select
+              value={videoWorkflow}
+              onChange={(event) => setVideoWorkflow(event.target.value as ComfyUiVideoWorkflow)}
+              disabled={loading || Boolean(busy)}
+            >
+              <option value="minimax-h3-fl2va-turbo-4step">MiniMax H3 Turbo</option>
+              <option value="ltx-2.3-av-i2v">LTX 2.3（原生音画）</option>
+            </select>
+          </label>
           <label><span>最大并发</span><input value="1" readOnly /></label>
           <label className="check-field span-2">
             <input
@@ -1512,7 +1541,7 @@ function ComfyUiConfigurationPanel() {
               onChange={(event) => setIsEnabled(event.target.checked)}
               disabled={loading || Boolean(busy)}
             />
-            <span>启用本地 ComfyUI 视频生成</span>
+            <span>启用本地 ComfyUI 图像与视频生成</span>
           </label>
         </div>
         {(message || error) && <p className={`settings-feedback ${error ? "error" : "success"}`}>{error || message}</p>}

@@ -484,12 +484,13 @@ public sealed class ProjectCoverService(
             settingsAsset.DocumentJson ?? "{}",
             ProjectSettingsDefaults.JsonOptions)
             ?? throw new InvalidOperationException("当前项目设定无法读取。");
+        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
         var modelSize = ProjectImageOutputProcessor.ModelSizeFor(
             settings.OutputWidth,
             settings.OutputHeight,
-            settings.AspectRatio);
-        var configuration = await dbContext.FoundryConfigurations.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
+            settings.AspectRatio,
+            configuration?.ImageProvider);
         var previousMetadata = await dbContext.Assets.AsNoTracking()
             .Where(item => item.ProjectId == projectId && item.Type == ProjectCoverQueries.AssetType)
             .OrderByDescending(item => item.Version)

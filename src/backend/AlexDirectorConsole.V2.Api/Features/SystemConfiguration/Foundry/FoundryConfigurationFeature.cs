@@ -1,5 +1,6 @@
 using AlexDirectorConsole.V2.Api.Application.Cqrs;
 using AlexDirectorConsole.V2.Api.Features.Projects.Settings;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
 using Microsoft.AspNetCore.DataProtection;
@@ -33,7 +34,6 @@ public sealed record FoundryConfigurationView(
     public const string DefaultVllmBaseUrl = "http://127.0.0.1:8000/v1";
     public const string RequiredImageDeployment = "gpt-image-2";
     public const string ComfyUiTextToImageModel = "Krea 2 Turbo";
-    public const string ComfyUiImageEditModel = "Qwen Image Edit 2511";
 
     public static FoundryConfigurationView Empty { get; } = new(
         ProviderName,
@@ -92,9 +92,11 @@ public sealed record FoundryConfigurationView(
             ? ComfyUiTextToImageModel
             : RequiredImageDeployment;
 
-    public static string ImageEditModel(FoundryConfiguration? configuration) =>
+    public static string ImageEditModel(
+        FoundryConfiguration? configuration,
+        string? comfyUiImageEditWorkflow = null) =>
         NormalizeImageProvider(configuration?.ImageProvider) == ComfyUiImageProvider
-            ? ComfyUiImageEditModel
+            ? ComfyUiConfigurationView.ImageEditModel(comfyUiImageEditWorkflow)
             : RequiredImageDeployment;
 }
 
