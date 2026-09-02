@@ -12,6 +12,7 @@ using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.VoicePackages;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -30,6 +31,10 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
     private readonly string databasePath = Path.Combine(
         Path.GetTempPath(),
         $"alex-director-v2-tests-{Guid.NewGuid():N}.db");
+    private readonly TestGptSoVitsDialogueClient gptSoVitsDialogueClient = new();
+
+    public GptSoVitsDialogueRequest? LastGptSoVitsDialogueRequest =>
+        gptSoVitsDialogueClient.LastRequest;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -41,7 +46,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IFoundryConnectionTester>();
             services.RemoveAll<IComfyUiConnectionTester>();
             services.RemoveAll<IComfyUiVideoClient>();
-            services.RemoveAll<IComfyUiDialogueClient>();
+            services.RemoveAll<IGptSoVitsDialogueClient>();
             services.RemoveAll<IComfyUiWorkflowProvider>();
             services.RemoveAll<IHostedService>();
             services.RemoveAll<ISessionAgent>();
@@ -65,7 +70,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestComfyUiVideoClient>();
             services.AddSingleton<IComfyUiVideoClient>(provider =>
                 provider.GetRequiredService<TestComfyUiVideoClient>());
-            services.AddSingleton<IComfyUiDialogueClient, TestComfyUiDialogueClient>();
+            services.AddSingleton<IGptSoVitsDialogueClient>(gptSoVitsDialogueClient);
             services.AddSingleton<IComfyUiWorkflowProvider, TestComfyUiWorkflowProvider>();
             services.AddScoped<ISessionAgent, TestSessionAgent>();
             services.AddSingleton<IProjectCoverGenerator, TestProjectCoverGenerator>();
@@ -106,12 +111,15 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
         await dbContext.Database.MigrateAsync();
         Services.GetRequiredService<TestComfyUiVideoClient>().Reset();
         Services.GetRequiredService<TestShotFrameGenerator>().Reset();
+        gptSoVitsDialogueClient.Reset();
         Services.GetRequiredService<TestProjectSettingsAssistant>().Reset();
         Services.GetRequiredService<TestProjectCoverPromptWriter>().Reset();
         Services.GetRequiredService<TestVisualReferencePromptWriter>().Reset();
         Services.GetRequiredService<TestAgentTextInvoker>().Reset();
         Services.GetRequiredService<TestShotImagePromptAgent>().Reset();
         Services.GetRequiredService<TestShotVideoPromptAgent>().Reset();
+        var voicePackageSynchronizer = scope.ServiceProvider.GetRequiredService<IDefaultVoicePackageSynchronizer>();
+        await voicePackageSynchronizer.SynchronizeAsync();
         var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
         await skillSynchronizer.SynchronizeAsync();
     }
@@ -358,7 +366,7 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                     0));
     }
 
-    private sealed class TestComfyUiDialogueClient : IComfyUiDialogueClient
+    private sealed class TestGptSoVitsDialogueClient : IGptSoVitsDialogueClient
     {
         private static readonly byte[] WavBytes =
         [
@@ -370,10 +378,17 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
             0x00, 0x00, 0x00, 0x00
         ];
 
+        public GptSoVitsDialogueRequest? LastRequest { get; private set; }
+
         public Task<GeneratedDialogueAudio> GenerateAsync(
-            ComfyUiDialogueRequest request,
-            CancellationToken cancellationToken) => Task.FromResult(
-                new GeneratedDialogueAudio(WavBytes, 48000, 0));
+            GptSoVitsDialogueRequest request,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(new GeneratedDialogueAudio(WavBytes, 48000, 0));
+        }
+
+        public void Reset() => LastRequest = null;
     }
 
     private sealed class TestStoryMaterialAnalyzer : IStoryMaterialAnalyzer

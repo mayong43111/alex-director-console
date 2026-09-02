@@ -322,6 +322,33 @@ public sealed class ComfyUiConfiguration
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }
 
+public sealed class VoicePackage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ResourceId { get; set; } = Guid.NewGuid();
+    public int Version { get; set; } = 1;
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string Engine { get; set; } = "gpt-sovits";
+    public string BaseModelVersion { get; set; } = "v2ProPlus";
+    public string GptWeightsPath { get; set; } = string.Empty;
+    public string SoVitsWeightsPath { get; set; } = string.Empty;
+    public string ReferenceAudioFileName { get; set; } = string.Empty;
+    public string ReferenceAudioContentType { get; set; } = "audio/wav";
+    public byte[] ReferenceAudioContent { get; set; } = [];
+    public string ReferenceText { get; set; } = string.Empty;
+    public string Language { get; set; } = "zh";
+    public string Dialect { get; set; } = "普通话";
+    public string SpeakingStyle { get; set; } = string.Empty;
+    public double DefaultSpeed { get; set; } = 1;
+    public string License { get; set; } = string.Empty;
+    public string? SourceUrl { get; set; }
+    public bool IsEnabled { get; set; } = true;
+    public bool IsCurrent { get; set; } = true;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
 public sealed class SkillDefinition
 {
     public string Id { get; set; } = string.Empty;

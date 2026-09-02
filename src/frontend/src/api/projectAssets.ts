@@ -84,12 +84,29 @@ export interface VoiceReference {
   createdAtUtc: string
 }
 
+export interface VoicePackageBinding {
+  id: string
+  resourceId: string
+  version: number
+  name: string
+  engine: 'gpt-sovits' | 'cosyvoice'
+  baseModelVersion: string
+  language: string
+  dialect: string
+  speakingStyle: string
+  defaultSpeed: number
+  license: string
+  referenceAudioUrl: string
+}
+
 export interface VoiceProfile {
   assetId: string
   resourceId: string
   characterResourceId: string
   version: number
   name: string
+  voicePackageId: string | null
+  voicePackage: VoicePackageBinding | null
   designPrompt: string
   sampleText: string
   language: string
@@ -100,11 +117,8 @@ export interface VoiceProfile {
 }
 
 export interface SaveVoiceProfileInput {
-  name: string
-  designPrompt: string
-  sampleText: string
+  voicePackageId: string
   language: string
-  seed: number | null
 }
 
 export interface AudioMaterial {

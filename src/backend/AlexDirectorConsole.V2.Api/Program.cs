@@ -17,6 +17,7 @@ using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.VoicePackages;
 using AlexDirectorConsole.V2.Database.Data;
 using Azure.Core;
 using Azure.Identity;
@@ -106,7 +107,21 @@ builder.Services.AddHttpClient<ILocalVoiceDesigner, LocalQwenVoiceDesigner>((pro
 });
 builder.Services.AddSingleton<IComfyUiConnectionTester, ComfyUiConnectionTester>();
 builder.Services.AddSingleton<IComfyUiVideoClient, ComfyUiVideoClient>();
-builder.Services.AddSingleton<IComfyUiDialogueClient, ComfyUiDialogueClient>();
+builder.Services.AddHttpClient<IGptSoVitsDialogueClient, GptSoVitsDialogueClient>((provider, client) =>
+{
+    var baseUrl = provider.GetRequiredService<IConfiguration>()["GptSoVits:BaseUrl"]
+        ?? "http://127.0.0.1:9880";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromMinutes(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddHttpClient<ICosyVoiceDialogueClient, CosyVoiceDialogueClient>((provider, client) =>
+{
+    var baseUrl = provider.GetRequiredService<IConfiguration>()["CosyVoice:BaseUrl"]
+        ?? "http://127.0.0.1:50000";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromMinutes(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddScoped<IVoicePackageDialogueGenerator, VoicePackageDialogueGenerator>();
 builder.Services.AddSingleton<IComfyUiWorkflowProvider, PackagedComfyUiWorkflowProvider>();
 builder.Services.AddSingleton<IComfyUiImageClient, ComfyUiImageClient>();
 builder.Services.AddSingleton<IComfyUiImageWorkflowProvider, PackagedComfyUiImageWorkflowProvider>();
@@ -123,6 +138,7 @@ if (!builder.Environment.IsEnvironment("Testing"))
 builder.Services.AddSingleton<ISkillCatalog, SkillCatalog>();
 builder.Services.AddSingleton<IAgentCatalog, AgentCatalog>();
 builder.Services.AddScoped<ISkillCatalogSynchronizer, SkillCatalogSynchronizer>();
+builder.Services.AddScoped<IDefaultVoicePackageSynchronizer, DefaultVoicePackageSynchronizer>();
 builder.Services.AddScoped<ISessionAgent, MafSessionAgent>();
 builder.Services.AddSingleton<SessionAgentTaskCancellation>();
 builder.Services.AddSingleton<SessionAgentExecutionContext>();
@@ -254,6 +270,8 @@ await using (var scope = app.Services.CreateAsyncScope())
     {
         await dbContext.Database.MigrateAsync();
     }
+    var voicePackageSynchronizer = scope.ServiceProvider.GetRequiredService<IDefaultVoicePackageSynchronizer>();
+    await voicePackageSynchronizer.SynchronizeAsync();
     var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
     await skillSynchronizer.SynchronizeAsync();
 }
@@ -261,6 +279,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 app.UseExceptionHandler();
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.MapGet("/api/v2/health", () => Results.Ok(new { status = "ok" }));
 app.MapCreateProject();
 app.MapProjectManagement();
 app.MapProjectQueries();
@@ -279,6 +298,7 @@ app.MapShotVideos();
 app.MapProduction();
 app.MapFoundryConfiguration();
 app.MapComfyUiConfiguration();
+app.MapVoicePackages();
 app.MapSkills();
 app.MapAgents();
 app.MapGenerationTasks();

@@ -36,7 +36,7 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Character_voice_profile_generates_a_versioned_local_wav_reference()
+    public async Task Character_voice_profile_binds_a_global_gpt_sovits_package()
     {
         using var client = factory.CreateClient();
         var projectId = await CreateProjectAsync(client);
@@ -55,16 +55,13 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         characterResponse.EnsureSuccessStatusCode();
         var character = await characterResponse.Content.ReadFromJsonAsync<VisualAssetView>();
         Assert.NotNull(character);
+        var voicePackage = await VoicePackageTestData.CreateAsync(factory);
 
         var saveResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile",
             new
             {
-                name = "达达尼昂标准音色",
-                designPrompt = "二十岁左右的年轻男性，中音，清亮但略带粗粝，勇敢而冲动。",
-                sampleText = "巴黎，我来了。特雷维尔先生一定会见我。",
-                language = "Chinese",
-                seed = 1701
+                voicePackageId = voicePackage.Id
             });
         var saveContent = await saveResponse.Content.ReadAsStringAsync();
         Assert.True(
@@ -76,7 +73,9 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         Assert.NotNull(profile);
         Assert.Equal(character.ResourceId, profile.CharacterResourceId);
         Assert.Equal(1, profile.Version);
-        Assert.Null(profile.Reference);
+        Assert.Equal(voicePackage.Id, profile.VoicePackageId);
+        Assert.Equal("普通话", profile.VoicePackage?.Dialect);
+        Assert.NotNull(profile.Reference);
 
         var generateResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile/generate",
@@ -84,8 +83,8 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         generateResponse.EnsureSuccessStatusCode();
         var generated = await factory.CompleteGenerationTaskAsync<VoiceProfileView>(generateResponse);
         Assert.NotNull(generated?.Reference);
-        Assert.Equal("qwen3-tts-1.7b-voice-design-test", generated.Reference.Model);
-        Assert.Equal("cpu", generated.Reference.Device);
+        Assert.Equal("GPT-SoVITS v2ProPlus", generated.Reference.Model);
+        Assert.Equal("server", generated.Reference.Device);
 
         var content = await client.GetByteArrayAsync(generated.Reference.ContentUrl);
         Assert.True(content.Length >= 44);
@@ -94,23 +93,12 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
 
         await using var scope = factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
-        var reference = await dbContext.Assets.SingleAsync(item => item.Id == generated.Reference.AssetId);
-        Assert.Equal("voice-reference", reference.Type);
-        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
-            item.ConsumerAssetId == reference.Id
-            && item.SourceAssetId == generated.AssetId
-            && item.Role == "uses-voice-profile"));
-        Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
-            item.ConsumerAssetId == reference.Id
-            && item.SourceAssetId == character.AssetId
-            && item.Role == "voices-character"));
+        Assert.True(await dbContext.VoicePackages.AnyAsync(item => item.Id == generated.Reference.AssetId));
+        Assert.False(await dbContext.Assets.AnyAsync(item => item.Type == "voice-reference"));
 
         var audioAssets = await client.GetFromJsonAsync<AudioMaterialView[]>(
             $"/api/v2/projects/{projectId}/audio-assets");
-        var voiceMaterial = Assert.Single(audioAssets!);
-        Assert.Equal(generated.Reference.AssetId, voiceMaterial.AssetId);
-        Assert.Equal("voice-reference", voiceMaterial.Kind);
-        Assert.Equal("角色参考音", voiceMaterial.Source);
+        Assert.Empty(audioAssets!);
     }
 
     [Fact]

@@ -49,7 +49,6 @@ import {
   createVisualAsset,
   generateMissingVisualReferenceImages,
   generateMissingVisualReferencePrompts,
-  generateVoiceReference,
   generateVisualReferenceImage,
   generateVisualReferencePrompt,
   getVoiceProfile,
@@ -70,6 +69,7 @@ import {
   type VisualAssetKind,
   type VoiceProfile,
 } from "../api/projectAssets";
+import { listVoicePackages, type VoicePackage } from "../api/systemConfiguration";
 import {
   listProductionEpisodes,
   type ProductionEpisodeRecord,
@@ -2620,35 +2620,22 @@ function splitAssetLines(value: string): string[] {
 
 function CharacterVoicePanel({ projectId, character }: { projectId: string; character: VisualAsset }) {
   const [profile, setProfile] = useState<VoiceProfile | null>(null);
-  const [editor, setEditor] = useState<SaveVoiceProfileInput>({
-    name: `${character.name}标准音色`,
-    designPrompt: "",
-    sampleText: "",
-    language: "Chinese",
-    seed: null,
-  });
+  const [packages, setPackages] = useState<VoicePackage[]>([]);
+  const [editor, setEditor] = useState<SaveVoiceProfileInput>({ voicePackageId: "", language: "zh" });
   const [loading, setLoading] = useState(true);
-  const [working, setWorking] = useState<"save" | "generate" | null>(null);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    getVoiceProfile(projectId, character.resourceId, controller.signal)
-      .then((loaded) => {
+    Promise.all([
+      getVoiceProfile(projectId, character.resourceId, controller.signal),
+      listVoicePackages(controller.signal),
+    ])
+      .then(([loaded, availablePackages]) => {
         setProfile(loaded);
-        setEditor(loaded ? {
-          name: loaded.name,
-          designPrompt: loaded.designPrompt,
-          sampleText: loaded.sampleText,
-          language: loaded.language,
-          seed: loaded.seed,
-        } : {
-          name: `${character.name}标准音色`,
-          designPrompt: "",
-          sampleText: "",
-          language: "Chinese",
-          seed: null,
-        });
+        setPackages(availablePackages);
+        setEditor({ voicePackageId: loaded?.voicePackageId ?? "", language: loaded?.language ?? "zh" });
       })
       .catch((loadError: unknown) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
@@ -2660,7 +2647,7 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setWorking("save");
+    setWorking(true);
     setError("");
     try {
       const saved = await saveVoiceProfile(projectId, character.resourceId, editor);
@@ -2668,21 +2655,11 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "音色配置保存失败。");
     } finally {
-      setWorking(null);
+      setWorking(false);
     }
   };
 
-  const generate = async () => {
-    setWorking("generate");
-    setError("");
-    try {
-      setProfile(await generateVoiceReference(projectId, character.resourceId));
-    } catch (generateError) {
-      setError(generateError instanceof Error ? generateError.message : "参考音生成失败。");
-    } finally {
-      setWorking(null);
-    }
-  };
+  const selectedPackage = packages.find((item) => item.id === editor.voicePackageId) ?? null;
 
   return (
     <section className="character-voice-workbench">
@@ -2690,49 +2667,48 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
         <div>
           <span className="eyebrow">VOICE DESIGN</span>
           <strong>角色音色</strong>
-          <p>{profile ? `音色配置 v${profile.version}` : loading ? "正在读取配置" : "尚未建立音色配置"}</p>
-          <p>一致性由固定参考音、提示词与种子维持；当前无需训练 LoRA。</p>
+          <p>{profile?.voicePackage ? `已固定绑定 ${profile.voicePackage.name} v${profile.voicePackage.version}` : loading ? "正在读取配置" : "尚未绑定语音包"}</p>
+          <p>全局语音包可跨项目复用，角色绑定后不会随语音包升级漂移。</p>
         </div>
-        {profile && (
-          <button className="primary-button" onClick={generate} disabled={working !== null}>
-            <AudioLines size={14} />
-            {working === "generate" ? "正在生成" : profile.reference ? "重新生成参考音" : "生成参考音"}
-          </button>
-        )}
       </header>
       {error && <div className="settings-error voice-profile-error">{error}</div>}
       <form className="voice-profile-form" onSubmit={save}>
         <label>
-          <span>音色名称</span>
-          <input required maxLength={100} value={editor.name} onChange={(event) => setEditor((current) => ({ ...current, name: event.target.value }))} />
-        </label>
-        <label className="voice-prompt-field">
-          <span>音色设计描述</span>
-          <textarea required minLength={10} maxLength={2000} rows={4} value={editor.designPrompt} onChange={(event) => setEditor((current) => ({ ...current, designPrompt: event.target.value }))} placeholder="年龄、性别、音高、质感、语速、气质与情绪边界" />
-        </label>
-        <label className="voice-sample-field">
-          <span>试音文本</span>
-          <textarea required maxLength={1000} rows={3} value={editor.sampleText} onChange={(event) => setEditor((current) => ({ ...current, sampleText: event.target.value }))} />
-        </label>
-        <label>
-          <span>语言</span>
-          <select value={editor.language} onChange={(event) => setEditor((current) => ({ ...current, language: event.target.value }))}>
-            <option value="Chinese">中文</option>
-            <option value="English">英文</option>
+          <span>全局语音包</span>
+          <select required value={editor.voicePackageId} onChange={(event) => setEditor((current) => ({ ...current, voicePackageId: event.target.value }))}>
+            <option value="">选择全局语音包</option>
+            {packages.map((voicePackage) => (
+              <option key={voicePackage.id} value={voicePackage.id}>
+                {voicePackage.name} · {voicePackage.dialect} · v{voicePackage.version}
+              </option>
+            ))}
           </select>
         </label>
         <label>
-          <span>随机种子</span>
-          <input type="number" value={editor.seed ?? ""} onChange={(event) => setEditor((current) => ({ ...current, seed: event.target.value === "" ? null : Number(event.target.value) }))} placeholder="自动" />
+          <span>对白语言</span>
+          <select required value={editor.language} onChange={(event) => setEditor((current) => ({ ...current, language: event.target.value }))}>
+            <option value="zh">中文</option>
+            <option value="en">英语</option>
+            <option value="ja">日语</option>
+            <option value="yue">粤语</option>
+            <option value="ko">韩语</option>
+          </select>
         </label>
+        {selectedPackage && (
+          <div className="voice-package-binding-detail">
+            <span><b>{selectedPackage.dialect}</b>{selectedPackage.language} · {selectedPackage.baseModelVersion} · {selectedPackage.defaultSpeed.toFixed(2)}x</span>
+            <p>{selectedPackage.speakingStyle || selectedPackage.description}</p>
+            <small>{selectedPackage.license}</small>
+          </div>
+        )}
         <footer>
-          <button className="secondary-button" type="submit" disabled={working !== null || loading}>
-            <Save size={14} />{working === "save" ? "保存中" : profile ? "保存新版本" : "保存音色配置"}
+          <button className="secondary-button" type="submit" disabled={working || loading || !editor.voicePackageId}>
+            <Save size={14} />{working ? "保存中" : profile ? "更新固定绑定" : "绑定语音包"}
           </button>
-          {profile?.reference && (
+          {selectedPackage && (
             <div className="voice-reference-player">
-              <audio controls preload="metadata" src={profile.reference.contentUrl} key={profile.reference.assetId} />
-              <span>{profile.reference.model} · {profile.reference.device} · v{profile.reference.version}</span>
+              <audio controls preload="metadata" src={selectedPackage.referenceAudioUrl} key={selectedPackage.id} />
+              <span>{selectedPackage.name} · {selectedPackage.engine === "cosyvoice" ? "CosyVoice" : "GPT-SoVITS"} {selectedPackage.baseModelVersion}</span>
             </div>
           )}
         </footer>

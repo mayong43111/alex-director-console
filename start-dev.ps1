@@ -64,6 +64,7 @@ function Wait-HttpReady(
             $response = Invoke-WebRequest `
                 -Uri $Url `
                 -UseBasicParsing `
+                -NoProxy `
                 -TimeoutSec 1
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
                 return
@@ -108,15 +109,15 @@ try {
         -NoNewWindow `
         -PassThru
 
-    Write-Host "Waiting for API to become ready..." -ForegroundColor DarkGray
-    Wait-HttpReady "http://127.0.0.1:$apiPort/api/v2/projects" $apiProcess
-
     Write-Host "Starting frontend HMR: http://127.0.0.1:$webPort" -ForegroundColor Cyan
     $webProcess = Start-Process node `
         -ArgumentList @($vitePath, "--host", "127.0.0.1", "--port", $webPort, "--strictPort") `
         -WorkingDirectory $webPath `
         -NoNewWindow `
         -PassThru
+
+    Write-Host "Waiting for API to become ready..." -ForegroundColor DarkGray
+    Wait-HttpReady "http://127.0.0.1:$apiPort/api/v2/health" $apiProcess
 
     Write-Host "Development services are running. Press Ctrl+C to stop both." -ForegroundColor Green
 

@@ -3,6 +3,7 @@ import { AppShell } from './app/AppShell'
 import { ApplicationLayout } from './layouts'
 import { AgentsPage, DemoPage, ProjectCenterPage, ServicesPage, SkillsPage } from './pages/SupplementaryPages'
 import { SessionsPage } from './pages/SessionsPage'
+import { VoicePackagesPage } from './pages/VoicePackagesPage'
 import {
   AssetsPage,
   ProductionPage,
@@ -42,10 +43,12 @@ export default function App() {
       <Route element={<ApplicationLayout />}>
         <Route path="/" element={<ProjectCenterPage />} />
         <Route path="/settings/services" element={<ServicesPage />} />
+        <Route path="/settings/voices" element={<VoicePackagesPage />} />
         <Route path="/settings/agents" element={<AgentsPage />} />
         <Route path="/settings/skills" element={<SkillsPage />} />
         <Route path="/settings/sessions" element={<SessionsPage />} />
         <Route path="/projects/:projectId/settings/services" element={<ServicesPage />} />
+        <Route path="/projects/:projectId/settings/voices" element={<VoicePackagesPage />} />
         <Route path="/projects/:projectId/settings/agents" element={<AgentsPage />} />
         <Route path="/projects/:projectId/settings/skills" element={<SkillsPage />} />
         <Route path="/projects/:projectId/settings/sessions" element={<SessionsPage />} />

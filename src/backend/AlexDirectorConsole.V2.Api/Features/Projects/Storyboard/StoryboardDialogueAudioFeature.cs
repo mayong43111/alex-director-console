@@ -1,6 +1,6 @@
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Database.Data;
@@ -19,104 +19,225 @@ public sealed record StoryboardDialogueAudioView(
     double DurationSeconds,
     DateTimeOffset CreatedAtUtc);
 
-public sealed record ComfyUiDialogueRequest(
-    string BaseUrl,
+public sealed record GptSoVitsDialogueRequest(
+    Guid VoicePackageId,
     string Text,
-    string DesignPrompt,
-    string Language,
-    int Seed,
-    string OutputPrefix);
+    string GptWeightsPath,
+    string SoVitsWeightsPath,
+    byte[] ReferenceAudio,
+    string ReferenceAudioFileName,
+    string ReferenceText,
+    string ReferenceLanguage,
+    string TargetLanguage,
+    double Speed);
 
 public sealed record GeneratedDialogueAudio(byte[] Bytes, int SampleRate, double DurationSeconds);
 
-public interface IComfyUiDialogueClient
+public sealed record VoicePackageDialogueRequest(
+    Guid VoicePackageId,
+    string Engine,
+    string Text,
+    string BaseModelVersion,
+    string GptWeightsPath,
+    string SoVitsWeightsPath,
+    byte[] ReferenceAudio,
+    string ReferenceAudioFileName,
+    string ReferenceText,
+    string ReferenceLanguage,
+    string TargetLanguage,
+    double Speed);
+
+public interface IGptSoVitsDialogueClient
 {
     Task<GeneratedDialogueAudio> GenerateAsync(
-        ComfyUiDialogueRequest request,
+        GptSoVitsDialogueRequest request,
         CancellationToken cancellationToken);
 }
 
-public sealed class ComfyUiDialogueClient(IHttpClientFactory httpClientFactory) : IComfyUiDialogueClient
+public sealed record CosyVoiceDialogueRequest(
+    Guid VoicePackageId,
+    string Text,
+    string Model,
+    byte[] ReferenceAudio,
+    string ReferenceAudioFileName,
+    string ReferenceText);
+
+public interface ICosyVoiceDialogueClient
 {
+    Task<GeneratedDialogueAudio> GenerateAsync(
+        CosyVoiceDialogueRequest request,
+        CancellationToken cancellationToken);
+}
+
+public sealed class CosyVoiceDialogueClient(HttpClient httpClient) : ICosyVoiceDialogueClient
+{
+    private const int SampleRate = 22050;
+
     public async Task<GeneratedDialogueAudio> GenerateAsync(
-        ComfyUiDialogueRequest request,
+        CosyVoiceDialogueRequest request,
         CancellationToken cancellationToken)
     {
-        var client = httpClientFactory.CreateClient("ComfyUiVideo");
-        var root = new Uri(request.BaseUrl.TrimEnd('/') + "/");
-        var workflow = new JsonObject
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(request.Text), "tts_text");
+        content.Add(new StringContent(request.ReferenceText), "prompt_text");
+        var promptAudio = new ByteArrayContent(request.ReferenceAudio);
+        promptAudio.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(promptAudio, "prompt_wav", request.ReferenceAudioFileName);
+        using var message = new HttpRequestMessage(HttpMethod.Get, "inference_zero_shot")
         {
-            ["1"] = new JsonObject
-            {
-                ["class_type"] = "AlexQwen3TTS",
-                ["inputs"] = new JsonObject
-                {
-                    ["text"] = request.Text,
-                    ["design_prompt"] = request.DesignPrompt,
-                    ["language"] = request.Language,
-                    ["seed"] = request.Seed
-                }
-            },
-            ["2"] = new JsonObject
-            {
-                ["class_type"] = "AlexSaveAudioWav",
-                ["inputs"] = new JsonObject
-                {
-                    ["audio"] = new JsonArray("1", 0),
-                    ["filename_prefix"] = request.OutputPrefix
-                }
-            }
+            Content = content
         };
-        using var response = await client.PostAsJsonAsync(
-            new Uri(root, "prompt"),
-            new { prompt = workflow },
+        using var response = await httpClient.SendAsync(
+            message,
+            HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
-        var responseBody = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"ComfyUI 拒绝 TTS workflow：{responseBody}");
-        var promptId = responseBody?["prompt_id"]?.GetValue<string>()
-            ?? throw new InvalidOperationException("ComfyUI 未返回 TTS prompt_id。");
-
-        var deadline = DateTimeOffset.UtcNow.AddMinutes(30);
-        while (DateTimeOffset.UtcNow < deadline)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var history = await client.GetFromJsonAsync<JsonObject>(
-                new Uri(root, $"history/{Uri.EscapeDataString(promptId)}"),
-                cancellationToken);
-            if (history?[promptId] is JsonObject record)
-            {
-                if (FindAudioOutput(record["outputs"]) is { } output)
-                {
-                    var path = $"view?filename={Uri.EscapeDataString(output.FileName)}"
-                        + $"&subfolder={Uri.EscapeDataString(output.Subfolder)}"
-                        + $"&type={Uri.EscapeDataString(output.Type)}";
-                    var bytes = await client.GetByteArrayAsync(new Uri(root, path), cancellationToken);
-                    VoiceWave.Validate(bytes);
-                    return new(bytes, VoiceWave.ReadSampleRate(bytes), VoiceWave.ReadDurationSeconds(bytes));
-                }
-                if (string.Equals(record["status"]?["status_str"]?.GetValue<string>(), "error", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"ComfyUI TTS 执行失败：{record["status"]}");
-            }
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new InvalidOperationException(
+                $"CosyVoice 生成对白失败（{(int)response.StatusCode}）：{detail}");
         }
-        throw new TimeoutException("等待 ComfyUI TTS 结果超时。");
+
+        var responseBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var wavBytes = responseBytes.AsSpan().StartsWith("RIFF"u8)
+            ? responseBytes
+            : VoiceWave.FromPcm16Mono(responseBytes, SampleRate);
+        VoiceWave.Validate(wavBytes);
+        return new(
+            wavBytes,
+            VoiceWave.ReadSampleRate(wavBytes),
+            VoiceWave.ReadDurationSeconds(wavBytes));
+    }
+}
+
+public interface IVoicePackageDialogueGenerator
+{
+    Task<GeneratedDialogueAudio> GenerateAsync(
+        VoicePackageDialogueRequest request,
+        CancellationToken cancellationToken);
+}
+
+public sealed class VoicePackageDialogueGenerator(
+    IGptSoVitsDialogueClient gptSoVitsClient,
+    ICosyVoiceDialogueClient cosyVoiceClient) : IVoicePackageDialogueGenerator
+{
+    public Task<GeneratedDialogueAudio> GenerateAsync(
+        VoicePackageDialogueRequest request,
+        CancellationToken cancellationToken) => request.Engine.ToLowerInvariant() switch
+    {
+        "gpt-sovits" => gptSoVitsClient.GenerateAsync(
+            new(
+                request.VoicePackageId,
+                request.Text,
+                request.GptWeightsPath,
+                request.SoVitsWeightsPath,
+                request.ReferenceAudio,
+                request.ReferenceAudioFileName,
+                request.ReferenceText,
+                request.ReferenceLanguage,
+                request.TargetLanguage,
+                request.Speed),
+            cancellationToken),
+        "cosyvoice" => cosyVoiceClient.GenerateAsync(
+            new(
+                request.VoicePackageId,
+                request.Text,
+                request.BaseModelVersion,
+                request.ReferenceAudio,
+                request.ReferenceAudioFileName,
+                request.ReferenceText),
+            cancellationToken),
+        _ => throw new InvalidOperationException($"语音包使用了不支持的 TTS 引擎：{request.Engine}。")
+    };
+}
+
+public sealed class GptSoVitsDialogueClient(
+    HttpClient httpClient,
+    IConfiguration configuration,
+    IHostEnvironment hostEnvironment) : IGptSoVitsDialogueClient
+{
+    private static readonly SemaphoreSlim ModelSwitchLock = new(1, 1);
+
+    public async Task<GeneratedDialogueAudio> GenerateAsync(
+        GptSoVitsDialogueRequest request,
+        CancellationToken cancellationToken)
+    {
+        await ModelSwitchLock.WaitAsync(cancellationToken);
+        try
+        {
+            var referencePath = await MaterializeReferenceAsync(request, cancellationToken);
+            await EnsureSuccessAsync(
+                await httpClient.GetAsync(
+                    $"set_gpt_weights?weights_path={Uri.EscapeDataString(request.GptWeightsPath)}",
+                    cancellationToken),
+                "加载 GPT 权重",
+                cancellationToken);
+            await EnsureSuccessAsync(
+                await httpClient.GetAsync(
+                    $"set_sovits_weights?weights_path={Uri.EscapeDataString(request.SoVitsWeightsPath)}",
+                    cancellationToken),
+                "加载 SoVITS 权重",
+                cancellationToken);
+            using var response = await httpClient.PostAsJsonAsync(
+                "tts",
+                new
+                {
+                    text = request.Text,
+                    text_lang = request.TargetLanguage,
+                    ref_audio_path = referencePath,
+                    prompt_text = request.ReferenceText,
+                    prompt_lang = request.ReferenceLanguage,
+                    speed_factor = request.Speed,
+                    media_type = "wav",
+                    streaming_mode = false
+                },
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    $"GPT-SoVITS 生成对白失败（{(int)response.StatusCode}）：{detail}");
+            }
+            var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            VoiceWave.Validate(bytes);
+            return new(bytes, VoiceWave.ReadSampleRate(bytes), VoiceWave.ReadDurationSeconds(bytes));
+        }
+        finally
+        {
+            ModelSwitchLock.Release();
+        }
     }
 
-    private static ComfyUiVideoOutput? FindAudioOutput(JsonNode? outputs)
+    private async Task<string> MaterializeReferenceAsync(
+        GptSoVitsDialogueRequest request,
+        CancellationToken cancellationToken)
     {
-        if (outputs is not JsonObject nodes) return null;
-        foreach (var output in nodes.Select(item => item.Value).OfType<JsonObject>())
+        var sharedDirectory = configuration["GptSoVits:SharedVoiceDirectory"];
+        if (string.IsNullOrWhiteSpace(sharedDirectory))
+            sharedDirectory = Path.Combine(hostEnvironment.ContentRootPath, "App_Data", "GptSoVitsVoices");
+        sharedDirectory = Path.GetFullPath(sharedDirectory);
+        Directory.CreateDirectory(sharedDirectory);
+        var fileName = $"{request.VoicePackageId:N}.wav";
+        var storagePath = Path.Combine(sharedDirectory, fileName);
+        await File.WriteAllBytesAsync(storagePath, request.ReferenceAudio, cancellationToken);
+        var runtimeDirectory = configuration["GptSoVits:RuntimeVoiceDirectory"];
+        return string.IsNullOrWhiteSpace(runtimeDirectory)
+            ? storagePath
+            : Path.Combine(runtimeDirectory, fileName);
+    }
+
+    private static async Task EnsureSuccessAsync(
+        HttpResponseMessage response,
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        using (response)
         {
-            if (output["audio"] is not JsonArray files) continue;
-            foreach (var file in files.OfType<JsonObject>())
-            {
-                var fileName = file["filename"]?.GetValue<string>();
-                if (fileName?.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) != true) continue;
-                return new(fileName, file["subfolder"]?.GetValue<string>() ?? string.Empty, file["type"]?.GetValue<string>() ?? "output");
-            }
+            if (response.IsSuccessStatusCode) return;
+            var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new InvalidOperationException(
+                $"GPT-SoVITS {operation}失败（{(int)response.StatusCode}）：{detail}");
         }
-        return null;
     }
 }
 
@@ -157,7 +278,7 @@ internal static class StoryboardDialogueAudioQueries
 public sealed class StoryboardDialogueAudioService(
     V2DbContext dbContext,
     IVoiceProfileService voiceProfileService,
-    IComfyUiDialogueClient comfyUiClient,
+    IVoicePackageDialogueGenerator dialogueGenerator,
     TimeProvider timeProvider) : IStoryboardDialogueAudioService
 {
     public const string AssetType = "storyboard-dialogue-audio";
@@ -198,17 +319,27 @@ public sealed class StoryboardDialogueAudioService(
         {
             throw new InvalidOperationException($"角色“{character.Name}”没有音色设定。");
         }
-        var configuration = await dbContext.ComfyUiConfigurations.AsNoTracking().SingleOrDefaultAsync(item => item.Id == 1, cancellationToken);
-        if (configuration is null || !configuration.IsEnabled) throw new InvalidOperationException("请先启用 ComfyUI。");
+        if (voice.VoicePackageId is null)
+            throw new InvalidOperationException($"角色“{character.Name}”仍使用旧音色设计，请绑定全局语音包。");
+        var voicePackage = await dbContext.VoicePackages.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == voice.VoicePackageId,
+            cancellationToken)
+            ?? throw new InvalidOperationException($"角色“{character.Name}”绑定的语音包版本不存在。");
 
-        var generated = await comfyUiClient.GenerateAsync(
+        var generated = await dialogueGenerator.GenerateAsync(
             new(
-                configuration.BaseUrl,
+                voicePackage.Id,
+            voicePackage.Engine,
                 dialogue.Text,
-                voice.DesignPrompt,
+            voicePackage.BaseModelVersion,
+                voicePackage.GptWeightsPath,
+                voicePackage.SoVitsWeightsPath,
+                voicePackage.ReferenceAudioContent,
+                voicePackage.ReferenceAudioFileName,
+                voicePackage.ReferenceText,
+                voicePackage.Language,
                 voice.Language,
-                voice.Seed,
-                $"alex-dialogue/{projectId:N}/S{shot.SceneNumber:D2}-{shot.ShotNumber:D2}"),
+                voicePackage.DefaultSpeed),
             cancellationToken);
         var previous = await FindCurrentAssetAsync(projectId, shotResourceId, cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -228,14 +359,16 @@ public sealed class StoryboardDialogueAudioService(
             SizeBytes = generated.Bytes.LongLength,
             GenerationMetadataJson = JsonSerializer.Serialize(new
             {
-                operation = "comfyui-qwen3-tts-dialogue",
+                operation = $"{voicePackage.Engine}-dialogue",
+                voicePackage.Engine,
                 character = dialogue.Character,
                 text = dialogue.Text,
                 shotAssetId = shotAsset.Id,
                 voiceProfileAssetId = voice.AssetId,
+                voicePackageId = voicePackage.Id,
                 voice.Name,
                 voice.Language,
-                voice.Seed,
+                voicePackage.BaseModelVersion,
                 generated.SampleRate,
                 generated.DurationSeconds
             }, StoryboardDefaults.JsonOptions),

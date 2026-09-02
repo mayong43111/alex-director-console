@@ -11,11 +11,26 @@ using Microsoft.EntityFrameworkCore;
 namespace AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 
 public sealed record SaveVoiceProfileRequest(
-    string Name,
-    string DesignPrompt,
-    string SampleText,
+    string? Name,
+    string? DesignPrompt,
+    string? SampleText,
     string? Language,
-    int? Seed);
+    int? Seed,
+    Guid? VoicePackageId);
+
+public sealed record VoicePackageBindingView(
+    Guid Id,
+    Guid ResourceId,
+    int Version,
+    string Name,
+    string Engine,
+    string BaseModelVersion,
+    string Language,
+    string Dialect,
+    string SpeakingStyle,
+    double DefaultSpeed,
+    string License,
+    string ReferenceAudioUrl);
 
 public sealed record VoiceReferenceView(
     Guid AssetId,
@@ -33,6 +48,8 @@ public sealed record VoiceProfileView(
     Guid CharacterResourceId,
     int Version,
     string Name,
+    Guid? VoicePackageId,
+    VoicePackageBindingView? VoicePackage,
     string DesignPrompt,
     string SampleText,
     string Language,
@@ -49,7 +66,8 @@ internal sealed record VoiceProfileDocument(
     string Language,
     int Seed,
     string Provider,
-    string Model);
+    string Model,
+    Guid? VoicePackageId = null);
 
 public sealed record LocalVoiceDesignRequest(
     string Text,
@@ -145,26 +163,30 @@ public sealed class VoiceProfileService(
     {
         var character = await FindCharacterAsync(projectId, characterResourceId, cancellationToken)
             ?? throw new KeyNotFoundException("角色资产不存在或已退休。");
-        var name = request.Name.Trim();
-        var prompt = request.DesignPrompt.Trim();
-        var sampleText = request.SampleText.Trim();
-        var language = string.IsNullOrWhiteSpace(request.Language) ? "Chinese" : request.Language.Trim();
-        if (name.Length is < 1 or > 100) throw new ArgumentException("音色名称必须为 1 至 100 个字符。");
-        if (prompt.Length is < 10 or > 2000) throw new ArgumentException("音色设计描述必须为 10 至 2000 个字符。");
-        if (sampleText.Length is < 1 or > 1000) throw new ArgumentException("试音文本必须为 1 至 1000 个字符。");
-        if (language.Length > 40) throw new ArgumentException("语言名称不能超过 40 个字符。");
+        if (request.VoicePackageId is null)
+            throw new ArgumentException("请选择一个全局语音包。");
+        var voicePackage = await dbContext.VoicePackages.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == request.VoicePackageId && item.IsCurrent && item.IsEnabled,
+            cancellationToken)
+            ?? throw new ArgumentException("所选语音包不存在、已停用或不是当前版本。");
+        var language = string.IsNullOrWhiteSpace(request.Language)
+            ? voicePackage.Language
+            : request.Language.Trim();
+        if (language is not ("zh" or "en" or "ja" or "yue" or "ko"))
+            throw new ArgumentException("对白语言仅支持 zh、en、ja、yue 或 ko。");
 
         var previous = await FindCurrentProfileAsync(projectId, characterResourceId, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var document = new VoiceProfileDocument(
             characterResourceId,
-            name,
-            prompt,
-            sampleText,
+            voicePackage.Name,
+            voicePackage.SpeakingStyle,
+            voicePackage.ReferenceText,
             language,
-            request.Seed ?? Random.Shared.Next(),
-            "local-qwen3-tts",
-            Model);
+            0,
+            voicePackage.Engine,
+            voicePackage.BaseModelVersion,
+            voicePackage.Id);
         var documentJson = JsonSerializer.Serialize(document, JsonOptions);
         var asset = new Asset
         {
@@ -173,7 +195,7 @@ public sealed class VoiceProfileService(
             Version = (previous?.Asset.Version ?? 0) + 1,
             Number = previous?.Asset.Number ?? await NextNumberAsync(projectId, cancellationToken),
             Type = ProfileAssetType,
-            Name = name,
+            Name = voicePackage.Name,
             DocumentJson = documentJson,
             ContentType = "application/json",
             SizeBytes = Encoding.UTF8.GetByteCount(documentJson),
@@ -226,6 +248,8 @@ public sealed class VoiceProfileService(
         var character = await FindCharacterAsync(projectId, characterResourceId, cancellationToken)
             ?? throw new KeyNotFoundException("角色资产不存在或已退休。");
         var document = ReadDocument(current.Asset);
+        if (document.VoicePackageId is not null)
+            return await ToViewAsync(current.Asset, current.State, cancellationToken);
         var generated = await designer.GenerateAsync(
             new(document.SampleText, document.DesignPrompt, document.Language, document.Seed),
             cancellationToken);
@@ -316,19 +340,26 @@ public sealed class VoiceProfileService(
     {
         var document = ReadDocument(asset);
         var reference = await FindCurrentReferenceAsync(asset.ProjectId, asset.ResourceId, cancellationToken);
+        var voicePackage = document.VoicePackageId is null
+            ? null
+            : await dbContext.VoicePackages.AsNoTracking().SingleOrDefaultAsync(
+                item => item.Id == document.VoicePackageId,
+                cancellationToken);
         return new(
             asset.Id,
             asset.ResourceId,
             document.CharacterResourceId,
             asset.Version,
             document.Name,
+            document.VoicePackageId,
+            voicePackage is null ? null : ToBindingView(voicePackage),
             document.DesignPrompt,
             document.SampleText,
             document.Language,
             document.Seed,
             state.LifecycleStatus,
             asset.UpdatedAtUtc,
-            reference is null ? null : ToReferenceView(reference));
+            voicePackage is not null ? ToReferenceView(voicePackage) : reference is null ? null : ToReferenceView(reference));
     }
 
     private async Task<(Asset Asset, ResourceState State)?> FindCurrentProfileAsync(
@@ -407,6 +438,30 @@ public sealed class VoiceProfileService(
             root.TryGetProperty("durationSeconds", out var duration) ? duration.GetDouble() : 0,
             asset.CreatedAtUtc);
     }
+
+    private static VoicePackageBindingView ToBindingView(VoicePackage package) => new(
+        package.Id,
+        package.ResourceId,
+        package.Version,
+        package.Name,
+        package.Engine,
+        package.BaseModelVersion,
+        package.Language,
+        package.Dialect,
+        package.SpeakingStyle,
+        package.DefaultSpeed,
+        package.License,
+        $"/api/v2/system/voice-packages/{package.Id}/reference-audio");
+
+    private static VoiceReferenceView ToReferenceView(VoicePackage package) => new(
+        package.Id,
+        package.Version,
+        package.ReferenceAudioContentType,
+        $"/api/v2/system/voice-packages/{package.Id}/reference-audio",
+        $"{(package.Engine == "cosyvoice" ? "CosyVoice" : "GPT-SoVITS")} {package.BaseModelVersion}",
+        "server",
+        VoiceWave.ReadDurationSeconds(package.ReferenceAudioContent),
+        package.CreatedAtUtc);
 }
 
 internal static class VoiceWave
@@ -422,6 +477,27 @@ internal static class VoiceWave
     }
 
     public static int ReadSampleRate(byte[] bytes) => BitConverter.ToInt32(bytes, 24);
+
+    public static byte[] FromPcm16Mono(byte[] pcmBytes, int sampleRate)
+    {
+        if (pcmBytes.Length == 0 || pcmBytes.Length % 2 != 0)
+            throw new InvalidOperationException("TTS 返回的 PCM 音频为空或不完整。");
+        var bytes = new byte[44 + pcmBytes.Length];
+        "RIFF"u8.CopyTo(bytes);
+        BitConverter.GetBytes(bytes.Length - 8).CopyTo(bytes, 4);
+        "WAVEfmt "u8.CopyTo(bytes.AsSpan(8));
+        BitConverter.GetBytes(16).CopyTo(bytes, 16);
+        BitConverter.GetBytes((short)1).CopyTo(bytes, 20);
+        BitConverter.GetBytes((short)1).CopyTo(bytes, 22);
+        BitConverter.GetBytes(sampleRate).CopyTo(bytes, 24);
+        BitConverter.GetBytes(sampleRate * 2).CopyTo(bytes, 28);
+        BitConverter.GetBytes((short)2).CopyTo(bytes, 32);
+        BitConverter.GetBytes((short)16).CopyTo(bytes, 34);
+        "data"u8.CopyTo(bytes.AsSpan(36));
+        BitConverter.GetBytes(pcmBytes.Length).CopyTo(bytes, 40);
+        pcmBytes.CopyTo(bytes, 44);
+        return bytes;
+    }
 
     public static double ReadDurationSeconds(byte[] bytes)
     {

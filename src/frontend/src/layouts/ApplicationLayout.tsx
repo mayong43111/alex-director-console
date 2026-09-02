@@ -1,6 +1,6 @@
 import { Button, Tooltip } from "antd";
 import { useEffect, useState } from "react";
-import { Bot, MessageSquareText, Plus, Server, Sparkles } from "lucide-react";
+import { AudioLines, Bot, MessageSquareText, Plus, Server, Sparkles } from "lucide-react";
 import { Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { assistantDirectorAgent } from "../api/sessions";
 import { AssistantDirectorPanel } from "../components/AssistantDirectorPanel";
@@ -23,6 +23,8 @@ export function ApplicationLayout() {
     ? "Agent 管理"
     : location.pathname.endsWith("/skills")
       ? "技能目录"
+      : location.pathname.endsWith("/voices")
+        ? "语音包库"
       : inSettings ? "服务器连接" : "项目";
   const workspaceDescription = location.pathname.endsWith("/sessions")
     ? "查看不同 Agent 与业务 scope 下独立保存的消息历史"
@@ -30,6 +32,8 @@ export function ApplicationLayout() {
     ? "维护 Agent 名称、系统提示词与关联技能"
     : location.pathname.endsWith("/skills")
       ? "管理技能版本、工具权限与项目副本"
+      : location.pathname.endsWith("/voices")
+        ? "跨项目维护角色可绑定的多引擎固定声音"
       : inSettings
         ? "项目只引用服务能力，不在项目内保存密钥"
         : "从创意设定到分集交付的全部制作空间";
@@ -77,6 +81,11 @@ export function ApplicationLayout() {
               label: "服务器连接",
               to: `${settingsBase}/services`,
               icon: <Server size={16} />,
+            },
+            {
+              label: "语音包库",
+              to: `${settingsBase}/voices`,
+              icon: <AudioLines size={16} />,
             },
             {
               label: "Agent 管理",

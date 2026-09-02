@@ -25,6 +25,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<ProductionRunItem> ProductionRunItems => Set<ProductionRunItem>();
     public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
     public DbSet<ComfyUiConfiguration> ComfyUiConfigurations => Set<ComfyUiConfiguration>();
+    public DbSet<VoicePackage> VoicePackages => Set<VoicePackage>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<AgentDefinition> AgentDefinitions => Set<AgentDefinition>();
     public DbSet<AgentSkill> AgentSkills => Set<AgentSkill>();
@@ -392,6 +393,33 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.WorkflowProfile).HasMaxLength(100).IsRequired();
             entity.Property(item => item.TextToImageWorkflow).HasMaxLength(100).IsRequired();
             entity.Property(item => item.ImageEditWorkflow).HasMaxLength(100).IsRequired();
+        });
+
+        modelBuilder.Entity<VoicePackage>(entity =>
+        {
+            entity.ToTable("VoicePackages", table =>
+            {
+                table.HasCheckConstraint("CK_VoicePackages_Version", "Version > 0");
+                table.HasCheckConstraint("CK_VoicePackages_DefaultSpeed", "DefaultSpeed >= 0.5 AND DefaultSpeed <= 2.0");
+            });
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.ResourceId, item.Version }).IsUnique();
+            entity.HasIndex(item => new { item.IsCurrent, item.IsEnabled, item.Name });
+            entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.Description).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.Engine).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.BaseModelVersion).HasMaxLength(50).IsRequired();
+            entity.Property(item => item.GptWeightsPath).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.SoVitsWeightsPath).HasMaxLength(1000).IsRequired();
+            entity.Property(item => item.ReferenceAudioFileName).HasMaxLength(260).IsRequired();
+            entity.Property(item => item.ReferenceAudioContentType).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.ReferenceAudioContent).IsRequired();
+            entity.Property(item => item.ReferenceText).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.Language).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Dialect).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.SpeakingStyle).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.License).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.SourceUrl).HasMaxLength(2000);
         });
 
         modelBuilder.Entity<SkillDefinition>(entity =>

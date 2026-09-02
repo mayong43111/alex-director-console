@@ -49,6 +49,46 @@ export interface ComfyUiCapabilities {
   missingModels: string[]
 }
 
+export interface VoicePackage {
+  id: string
+  resourceId: string
+  version: number
+  name: string
+  description: string
+  engine: 'gpt-sovits' | 'cosyvoice'
+  baseModelVersion: string
+  gptWeightsPath: string
+  soVitsWeightsPath: string
+  referenceAudioFileName: string
+  referenceAudioUrl: string
+  referenceText: string
+  language: string
+  dialect: string
+  speakingStyle: string
+  defaultSpeed: number
+  license: string
+  sourceUrl: string | null
+  isEnabled: boolean
+  updatedAtUtc: string
+}
+
+export interface SaveVoicePackageInput {
+  name: string
+  description: string
+  engine: 'gpt-sovits' | 'cosyvoice'
+  baseModelVersion: string
+  gptWeightsPath: string
+  soVitsWeightsPath: string
+  referenceText: string
+  language: string
+  dialect: string
+  speakingStyle: string
+  defaultSpeed: number
+  license: string
+  sourceUrl: string
+  referenceAudio?: File | null
+}
+
 interface ValidationProblem {
   title?: string
   detail?: string
@@ -129,4 +169,55 @@ export async function testComfyUiConnection(): Promise<ComfyUiCapabilities> {
   if (!response.ok) throw new Error(result?.message || 'ComfyUI 连接测试失败。')
   if (!result) throw new Error('ComfyUI 连接测试未返回结果。')
   return result
+}
+
+export async function listVoicePackages(signal?: AbortSignal): Promise<VoicePackage[]> {
+  const response = await fetch('/api/v2/system/voice-packages', { signal })
+  if (!response.ok) throw await readError(response, '语音包加载失败。')
+  return response.json() as Promise<VoicePackage[]>
+}
+
+export async function createVoicePackage(input: SaveVoicePackageInput): Promise<VoicePackage> {
+  const response = await fetch('/api/v2/system/voice-packages', {
+    method: 'POST',
+    body: toVoicePackageFormData(input),
+  })
+  if (!response.ok) throw await readError(response, '语音包创建失败。')
+  return response.json() as Promise<VoicePackage>
+}
+
+export async function updateVoicePackage(
+  resourceId: string,
+  input: SaveVoicePackageInput,
+): Promise<VoicePackage> {
+  const response = await fetch(`/api/v2/system/voice-packages/${resourceId}`, {
+    method: 'PUT',
+    body: toVoicePackageFormData(input),
+  })
+  if (!response.ok) throw await readError(response, '语音包更新失败。')
+  return response.json() as Promise<VoicePackage>
+}
+
+export async function archiveVoicePackage(resourceId: string): Promise<void> {
+  const response = await fetch(`/api/v2/system/voice-packages/${resourceId}`, { method: 'DELETE' })
+  if (!response.ok) throw await readError(response, '语音包停用失败。')
+}
+
+function toVoicePackageFormData(input: SaveVoicePackageInput): FormData {
+  const form = new FormData()
+  form.append('name', input.name)
+  form.append('description', input.description)
+  form.append('engine', input.engine)
+  form.append('baseModelVersion', input.baseModelVersion)
+  form.append('gptWeightsPath', input.gptWeightsPath)
+  form.append('soVitsWeightsPath', input.soVitsWeightsPath)
+  form.append('referenceText', input.referenceText)
+  form.append('language', input.language)
+  form.append('dialect', input.dialect)
+  form.append('speakingStyle', input.speakingStyle)
+  form.append('defaultSpeed', String(input.defaultSpeed))
+  form.append('license', input.license)
+  form.append('sourceUrl', input.sourceUrl)
+  if (input.referenceAudio) form.append('referenceAudio', input.referenceAudio)
+  return form
 }

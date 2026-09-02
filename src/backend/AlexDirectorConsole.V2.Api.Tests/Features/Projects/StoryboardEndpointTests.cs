@@ -277,7 +277,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
-    public async Task Dialogue_audio_is_generated_by_comfyui_and_saved_as_a_versioned_asset()
+    public async Task Dialogue_audio_is_generated_by_gpt_sovits_and_saved_as_a_versioned_asset()
     {
         using var client = factory.CreateClient();
         var (projectId, productionEpisodeId) = await CreateFormalScriptAsync(client);
@@ -287,20 +287,21 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         importResponse.EnsureSuccessStatusCode();
         var visualAssets = await importResponse.Content.ReadFromJsonAsync<VisualAssetView[]>();
         var character = Assert.Single(visualAssets!, asset => asset.Kind == "character");
+        VoicePackage voicePackage;
+        await using (var voicePackageScope = factory.Services.CreateAsyncScope())
+        {
+            voicePackage = await voicePackageScope.ServiceProvider.GetRequiredService<V2DbContext>()
+                .VoicePackages.AsNoTracking()
+                .SingleAsync(item => item.Name == "开放女声·LJSpeech" && item.IsCurrent);
+        }
         var voiceResponse = await client.PutAsJsonAsync(
             $"/api/v2/projects/{projectId}/visual-assets/{character.ResourceId}/voice-profile",
             new
             {
-                name = "测试角色普通话",
-                designPrompt = "清晰自然的青年普通话声线，语速中等，情绪克制。",
-                sampleText = "巴黎，我来了。",
-                language = "Chinese",
-                seed = 2718
+                voicePackageId = voicePackage.Id,
+                language = "zh"
             });
         voiceResponse.EnsureSuccessStatusCode();
-        (await client.PutAsJsonAsync(
-            "/api/v2/system/comfyui-configuration",
-            new { baseUrl = "http://127.0.0.1:8188", isEnabled = true })).EnsureSuccessStatusCode();
         var storyboardResponse = await client.PostAsync(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard/generate",
             null);
@@ -315,6 +316,8 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(2, result?.Generated);
         Assert.Equal(0, result?.Skipped);
         Assert.Equal(0, result?.Failed);
+        Assert.Equal("en", factory.LastGptSoVitsDialogueRequest?.ReferenceLanguage);
+        Assert.Equal("zh", factory.LastGptSoVitsDialogueRequest?.TargetLanguage);
 
         var withAudio = await client.GetFromJsonAsync<StoryboardView>(
             $"/api/v2/projects/{projectId}/production-episodes/{productionEpisodeId}/storyboard");
@@ -332,6 +335,9 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         var audio = audioAssets[0];
         Assert.Equal("audio/wav", audio.ContentType);
         Assert.NotNull(audio.BlobContent);
+        using var metadata = JsonDocument.Parse(audio.GenerationMetadataJson!);
+        Assert.Equal("gpt-sovits-dialogue", metadata.RootElement.GetProperty("operation").GetString());
+        Assert.Equal(voicePackage.Id, metadata.RootElement.GetProperty("voicePackageId").GetGuid());
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
             item.ConsumerAssetId == audio.Id && item.Role == "dialogue-for-shot"));
         Assert.True(await dbContext.AssetDependencies.AnyAsync(item =>
