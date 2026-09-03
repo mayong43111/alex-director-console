@@ -18,6 +18,7 @@ using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.Foundry;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.VoicePackages;
+using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.VoiceTraining;
 using AlexDirectorConsole.V2.Database.Data;
 using Azure.Core;
 using Azure.Identity;
@@ -114,10 +115,24 @@ builder.Services.AddHttpClient<IGptSoVitsDialogueClient, GptSoVitsDialogueClient
     client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
     client.Timeout = TimeSpan.FromMinutes(30);
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddHttpClient("GptSoVitsReferenceUpload", (provider, client) =>
+{
+    var baseUrl = provider.GetRequiredService<IConfiguration>()["GptSoVits:ReferenceUploadBaseUrl"]
+        ?? "http://127.0.0.1:50010";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromMinutes(5);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
 builder.Services.AddHttpClient<ICosyVoiceDialogueClient, CosyVoiceDialogueClient>((provider, client) =>
 {
     var baseUrl = provider.GetRequiredService<IConfiguration>()["CosyVoice:BaseUrl"]
         ?? "http://127.0.0.1:50000";
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromMinutes(30);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
+builder.Services.AddHttpClient<IVoiceTrainingWorkerClient, VoiceTrainingWorkerClient>((provider, client) =>
+{
+    var baseUrl = provider.GetRequiredService<IConfiguration>()["VoiceTraining:BaseUrl"]
+        ?? "http://127.0.0.1:50010";
     client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
     client.Timeout = TimeSpan.FromMinutes(30);
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseProxy = false });
@@ -299,6 +314,7 @@ app.MapProduction();
 app.MapFoundryConfiguration();
 app.MapComfyUiConfiguration();
 app.MapVoicePackages();
+app.MapVoiceTraining();
 app.MapSkills();
 app.MapAgents();
 app.MapGenerationTasks();

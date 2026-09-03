@@ -126,7 +126,7 @@ export interface AudioMaterial {
   resourceId: string
   version: number
   name: string
-  kind: 'upload' | 'voice-reference'
+  kind: 'upload' | 'voice-reference' | 'trained-dialogue'
   contentType: string
   contentUrl: string
   fileName: string

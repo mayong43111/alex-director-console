@@ -153,6 +153,7 @@ public sealed class VoicePackageDialogueGenerator(
 
 public sealed class GptSoVitsDialogueClient(
     HttpClient httpClient,
+    IHttpClientFactory httpClientFactory,
     IConfiguration configuration,
     IHostEnvironment hostEnvironment) : IGptSoVitsDialogueClient
 {
@@ -183,10 +184,10 @@ public sealed class GptSoVitsDialogueClient(
                 new
                 {
                     text = request.Text,
-                    text_lang = request.TargetLanguage,
+                    text_lang = NormalizeLanguage(request.TargetLanguage),
                     ref_audio_path = referencePath,
                     prompt_text = request.ReferenceText,
-                    prompt_lang = request.ReferenceLanguage,
+                    prompt_lang = NormalizeLanguage(request.ReferenceLanguage),
                     speed_factor = request.Speed,
                     media_type = "wav",
                     streaming_mode = false
@@ -208,10 +209,37 @@ public sealed class GptSoVitsDialogueClient(
         }
     }
 
+    private static string NormalizeLanguage(string language)
+    {
+        var normalized = language.Trim().ToLowerInvariant();
+        return normalized.StartsWith("zh-", StringComparison.Ordinal) ? "zh" : normalized;
+    }
+
     private async Task<string> MaterializeReferenceAsync(
         GptSoVitsDialogueRequest request,
         CancellationToken cancellationToken)
     {
+        var uploadBaseUrl = configuration["GptSoVits:ReferenceUploadBaseUrl"];
+        if (!string.IsNullOrWhiteSpace(uploadBaseUrl))
+        {
+            var referenceFileName = $"{request.VoicePackageId:N}.wav";
+            using var audio = new ByteArrayContent(request.ReferenceAudio);
+            audio.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+            using var response = await httpClientFactory.CreateClient("GptSoVitsReferenceUpload").PutAsync(
+                $"v1/reference-audio/{referenceFileName}",
+                audio,
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new InvalidOperationException(
+                    $"GPT-SoVITS 上传参考音失败（{(int)response.StatusCode}）：{detail}");
+            }
+            var result = await response.Content.ReadFromJsonAsync<ReferenceAudioUploadResult>(
+                cancellationToken: cancellationToken);
+            return result?.RuntimePath
+                ?? throw new InvalidOperationException("GPT-SoVITS 参考音上传响应缺少 runtimePath。");
+        }
         var sharedDirectory = configuration["GptSoVits:SharedVoiceDirectory"];
         if (string.IsNullOrWhiteSpace(sharedDirectory))
             sharedDirectory = Path.Combine(hostEnvironment.ContentRootPath, "App_Data", "GptSoVitsVoices");
@@ -225,6 +253,8 @@ public sealed class GptSoVitsDialogueClient(
             ? storagePath
             : Path.Combine(runtimeDirectory, fileName);
     }
+
+            private sealed record ReferenceAudioUploadResult(string RuntimePath);
 
     private static async Task EnsureSuccessAsync(
         HttpResponseMessage response,

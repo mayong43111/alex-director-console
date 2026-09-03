@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Database.Data;
 using AlexDirectorConsole.V2.Database.Models;
@@ -140,7 +141,8 @@ public static class AudioMaterialEndpoints
                 item => item.Id == assetId
                     && item.ProjectId == projectId
                     && (item.Type == AudioMaterialDefaults.AssetType
-                        || item.Type == VoiceProfileService.ReferenceAssetType),
+                        || item.Type == VoiceProfileService.ReferenceAssetType
+                        || item.Type == StoryboardDialogueAudioService.AssetType),
                 cancellationToken);
             return audio?.BlobContent is null
                 ? Results.NotFound()
@@ -164,9 +166,11 @@ public static class AudioMaterialEndpoints
             where state.ProjectId == projectId
                 && state.LifecycleStatus != "retired"
                 && (state.ResourceType == AudioMaterialDefaults.AssetType
-                    || state.ResourceType == VoiceProfileService.ReferenceAssetType)
+                    || state.ResourceType == VoiceProfileService.ReferenceAssetType
+                    || state.ResourceType == StoryboardDialogueAudioService.AssetType)
                 && (asset.Type == AudioMaterialDefaults.AssetType
-                    || asset.Type == VoiceProfileService.ReferenceAssetType)
+                    || asset.Type == VoiceProfileService.ReferenceAssetType
+                    || asset.Type == StoryboardDialogueAudioService.AssetType)
             select asset)
             .ToArrayAsync(cancellationToken);
         return rows
@@ -182,19 +186,25 @@ public static class AudioMaterialEndpoints
         var duration = root.TryGetProperty("durationSeconds", out var durationElement)
             ? durationElement.GetDouble()
             : 0;
-        var generated = asset.Type == VoiceProfileService.ReferenceAssetType;
+        var voiceReference = asset.Type == VoiceProfileService.ReferenceAssetType;
+        var trainedDialogue = asset.Type == StoryboardDialogueAudioService.AssetType;
+        var character = root.TryGetProperty("character", out var characterElement)
+            ? characterElement.GetString()
+            : null;
         return new(
             asset.Id,
             asset.ResourceId,
             asset.Version,
             asset.Name,
-            generated ? "voice-reference" : "upload",
+            trainedDialogue ? "trained-dialogue" : voiceReference ? "voice-reference" : "upload",
             asset.ContentType ?? "application/octet-stream",
             $"/api/v2/projects/{asset.ProjectId}/audio-assets/{asset.Id}/content",
             asset.FileName ?? asset.Name,
             asset.SizeBytes,
             duration,
-            generated ? "角色参考音" : "上传",
+            trainedDialogue
+                ? $"训练后对白{(string.IsNullOrWhiteSpace(character) ? string.Empty : $" · {character}")}"
+                : voiceReference ? "角色参考音" : "上传",
             asset.UpdatedAtUtc);
     }
 

@@ -2679,7 +2679,7 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
             <option value="">选择全局语音包</option>
             {packages.map((voicePackage) => (
               <option key={voicePackage.id} value={voicePackage.id}>
-                {voicePackage.name} · {voicePackage.dialect} · v{voicePackage.version}
+                {voicePackage.name} · {voicePackage.dialect} · v{voicePackage.version}{voicePackage.canExport ? "" : " · 仅练习"}
               </option>
             ))}
           </select>
@@ -2698,7 +2698,7 @@ function CharacterVoicePanel({ projectId, character }: { projectId: string; char
           <div className="voice-package-binding-detail">
             <span><b>{selectedPackage.dialect}</b>{selectedPackage.language} · {selectedPackage.baseModelVersion} · {selectedPackage.defaultSpeed.toFixed(2)}x</span>
             <p>{selectedPackage.speakingStyle || selectedPackage.description}</p>
-            <small>{selectedPackage.license}</small>
+            <small>{selectedPackage.voiceTrainingJobId ? "训练生成 · " : ""}{selectedPackage.license}{selectedPackage.canExport ? "" : " · 仅限练习，禁止导出发布"}</small>
           </div>
         )}
         <footer>
@@ -2856,7 +2856,7 @@ function AudioAssetsPage({ projectId }: { projectId: string }) {
               <div><dt>格式</dt><dd>{selected.contentType}</dd></div>
               <div><dt>时长</dt><dd>{formatAudioDuration(selected.durationSeconds)}</dd></div>
               <div><dt>文件大小</dt><dd>{formatAudioSize(selected.sizeBytes)}</dd></div>
-              <div><dt>用途</dt><dd>{selected.kind === "voice-reference" ? "角色音色基准与后续克隆参考" : "对白、环境声、音乐或制作参考"}</dd></div>
+              <div><dt>用途</dt><dd>{selected.kind === "trained-dialogue" ? "角色专属训练模型生成的对白" : selected.kind === "voice-reference" ? "角色音色基准与后续克隆参考" : "对白、环境声、音乐或制作参考"}</dd></div>
               <div><dt>更新时间</dt><dd>{new Date(selected.updatedAtUtc).toLocaleString()}</dd></div>
             </dl>
             </section>

@@ -68,6 +68,9 @@ export interface VoicePackage {
   defaultSpeed: number
   license: string
   sourceUrl: string | null
+  voiceTrainingJobId: string | null
+  usagePolicy: 'licensed' | 'practice-only'
+  canExport: boolean
   isEnabled: boolean
   updatedAtUtc: string
 }
@@ -87,6 +90,55 @@ export interface SaveVoicePackageInput {
   license: string
   sourceUrl: string
   referenceAudio?: File | null
+}
+
+export interface VoiceTrainingSample {
+  id: string
+  fileName: string
+  transcript: string
+  durationSeconds: number
+  sortOrder: number
+  contentUrl: string
+  createdAtUtc: string
+}
+
+export interface VoiceTrainingJob {
+  id: string
+  name: string
+  trainingMode: 'original' | 'replica'
+  engine: 'gpt-sovits'
+  baseModelVersion: string
+  language: string
+  dialect: string
+  speakingStyle: string
+  defaultSpeed: number
+  sourceDescription: string
+  usagePolicy: 'licensed' | 'practice-only'
+  canExport: boolean
+  rightsConfirmed: boolean
+  status: 'draft' | 'queued' | 'running' | 'completed' | 'failed'
+  progressPercent: number
+  externalJobId: string | null
+  error: string | null
+  voicePackageId: string | null
+  sampleCount: number
+  totalDurationSeconds: number
+  canStart: boolean
+  samples: VoiceTrainingSample[]
+  createdAtUtc: string
+  updatedAtUtc: string
+}
+
+export interface CreateVoiceTrainingJobInput {
+  name: string
+  trainingMode: 'original' | 'replica'
+  baseModelVersion: string
+  language: string
+  dialect: string
+  speakingStyle: string
+  defaultSpeed: number
+  sourceDescription: string
+  rightsConfirmed: boolean
 }
 
 interface ValidationProblem {
@@ -221,3 +273,52 @@ function toVoicePackageFormData(input: SaveVoicePackageInput): FormData {
   if (input.referenceAudio) form.append('referenceAudio', input.referenceAudio)
   return form
 }
+
+export async function listVoiceTrainingJobs(signal?: AbortSignal): Promise<VoiceTrainingJob[]> {
+  const response = await fetch('/api/v2/system/voice-training-jobs', { signal })
+  if (!response.ok) throw await readError(response, '音色训练任务加载失败。')
+  return response.json() as Promise<VoiceTrainingJob[]>
+}
+
+export async function createVoiceTrainingJob(input: CreateVoiceTrainingJobInput): Promise<VoiceTrainingJob> {
+  const response = await fetch('/api/v2/system/voice-training-jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) throw await readError(response, '音色训练任务创建失败。')
+  return response.json() as Promise<VoiceTrainingJob>
+}
+
+export async function uploadVoiceTrainingSample(
+  jobId: string,
+  file: File,
+  transcript: string,
+): Promise<VoiceTrainingSample> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('transcript', transcript)
+  const response = await fetch(`/api/v2/system/voice-training-jobs/${jobId}/samples`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) throw await readError(response, '训练样本上传失败。')
+  return response.json() as Promise<VoiceTrainingSample>
+}
+
+export async function deleteVoiceTrainingSample(jobId: string, sampleId: string): Promise<void> {
+  const response = await fetch(`/api/v2/system/voice-training-jobs/${jobId}/samples/${sampleId}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw await readError(response, '训练样本删除失败。')
+}
+
+async function runVoiceTrainingAction(jobId: string, action: 'start' | 'sync' | 'register-package'): Promise<VoiceTrainingJob> {
+  const response = await fetch(`/api/v2/system/voice-training-jobs/${jobId}/${action}`, { method: 'POST' })
+  if (!response.ok) throw await readError(response, '音色训练操作失败。')
+  return response.json() as Promise<VoiceTrainingJob>
+}
+
+export const startVoiceTraining = (jobId: string) => runVoiceTrainingAction(jobId, 'start')
+export const syncVoiceTraining = (jobId: string) => runVoiceTrainingAction(jobId, 'sync')
+export const registerTrainedVoicePackage = (jobId: string) => runVoiceTrainingAction(jobId, 'register-package')

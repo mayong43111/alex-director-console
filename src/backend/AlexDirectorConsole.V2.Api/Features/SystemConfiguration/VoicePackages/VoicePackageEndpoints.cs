@@ -24,6 +24,9 @@ public sealed record VoicePackageView(
     double DefaultSpeed,
     string License,
     string? SourceUrl,
+    Guid? VoiceTrainingJobId,
+    string UsagePolicy,
+    bool CanExport,
     bool IsEnabled,
     DateTimeOffset UpdatedAtUtc);
 
@@ -310,6 +313,9 @@ public static class VoicePackageEndpoints
         package.DefaultSpeed,
         package.License,
         package.SourceUrl,
+        package.VoiceTrainingJobId,
+        package.UsagePolicy,
+        package.CanExport,
         package.IsEnabled,
         package.UpdatedAtUtc);
 

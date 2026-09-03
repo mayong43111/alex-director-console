@@ -26,6 +26,8 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
     public DbSet<FoundryConfiguration> FoundryConfigurations => Set<FoundryConfiguration>();
     public DbSet<ComfyUiConfiguration> ComfyUiConfigurations => Set<ComfyUiConfiguration>();
     public DbSet<VoicePackage> VoicePackages => Set<VoicePackage>();
+    public DbSet<VoiceTrainingJob> VoiceTrainingJobs => Set<VoiceTrainingJob>();
+    public DbSet<VoiceTrainingSample> VoiceTrainingSamples => Set<VoiceTrainingSample>();
     public DbSet<SkillDefinition> SkillDefinitions => Set<SkillDefinition>();
     public DbSet<AgentDefinition> AgentDefinitions => Set<AgentDefinition>();
     public DbSet<AgentSkill> AgentSkills => Set<AgentSkill>();
@@ -420,6 +422,49 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.SpeakingStyle).HasMaxLength(2000).IsRequired();
             entity.Property(item => item.License).HasMaxLength(200).IsRequired();
             entity.Property(item => item.SourceUrl).HasMaxLength(2000);
+            entity.Property(item => item.UsagePolicy).HasMaxLength(40).IsRequired();
+            entity.HasIndex(item => item.VoiceTrainingJobId);
+            entity.HasOne<VoiceTrainingJob>().WithMany().HasForeignKey(item => item.VoiceTrainingJobId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<VoiceTrainingJob>(entity =>
+        {
+            entity.ToTable("VoiceTrainingJobs", table =>
+            {
+                table.HasCheckConstraint("CK_VoiceTrainingJobs_DefaultSpeed", "DefaultSpeed >= 0.5 AND DefaultSpeed <= 2.0");
+                table.HasCheckConstraint("CK_VoiceTrainingJobs_ProgressPercent", "ProgressPercent >= 0 AND ProgressPercent <= 100");
+            });
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.Status, item.UpdatedAtUtc });
+            entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.TrainingMode).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Engine).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.BaseModelVersion).HasMaxLength(50).IsRequired();
+            entity.Property(item => item.Language).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Dialect).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.SpeakingStyle).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.SourceDescription).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.UsagePolicy).HasMaxLength(40).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.ExternalJobId).HasMaxLength(200);
+            entity.Property(item => item.GptWeightsPath).HasMaxLength(1000);
+            entity.Property(item => item.SoVitsWeightsPath).HasMaxLength(1000);
+            entity.Property(item => item.Error).HasMaxLength(4000);
+        });
+
+        modelBuilder.Entity<VoiceTrainingSample>(entity =>
+        {
+            entity.ToTable("VoiceTrainingSamples", table =>
+                table.HasCheckConstraint("CK_VoiceTrainingSamples_DurationSeconds", "DurationSeconds > 0"));
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.VoiceTrainingJobId, item.SortOrder }).IsUnique();
+            entity.Property(item => item.FileName).HasMaxLength(260).IsRequired();
+            entity.Property(item => item.ContentType).HasMaxLength(100).IsRequired();
+            entity.Property(item => item.AudioContent).IsRequired();
+            entity.Property(item => item.Transcript).HasMaxLength(2000).IsRequired();
+            entity.HasOne<VoiceTrainingJob>().WithMany().HasForeignKey(item => item.VoiceTrainingJobId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<SkillDefinition>(entity =>

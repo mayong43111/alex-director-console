@@ -1,0 +1,16 @@
+[Unit]
+Description=Alex GPT-SoVITS inference API
+After=network-online.target
+
+[Service]
+Type=simple
+User=azureuser
+WorkingDirectory=/opt/alex-data/GPT-SoVITS
+Environment=is_half=True
+Environment=version=v2
+ExecStart=/opt/alex-data/envs/gpt-sovits/bin/python -s api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

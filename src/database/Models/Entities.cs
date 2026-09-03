@@ -343,10 +343,51 @@ public sealed class VoicePackage
     public double DefaultSpeed { get; set; } = 1;
     public string License { get; set; } = string.Empty;
     public string? SourceUrl { get; set; }
+    public Guid? VoiceTrainingJobId { get; set; }
+    public string UsagePolicy { get; set; } = "licensed";
+    public bool CanExport { get; set; } = true;
     public bool IsEnabled { get; set; } = true;
     public bool IsCurrent { get; set; } = true;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class VoiceTrainingJob
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = string.Empty;
+    public string TrainingMode { get; set; } = "replica";
+    public string Engine { get; set; } = "gpt-sovits";
+    public string BaseModelVersion { get; set; } = "v2ProPlus";
+    public string Language { get; set; } = "zh";
+    public string Dialect { get; set; } = "普通话";
+    public string SpeakingStyle { get; set; } = string.Empty;
+    public double DefaultSpeed { get; set; } = 1;
+    public string SourceDescription { get; set; } = string.Empty;
+    public string UsagePolicy { get; set; } = "practice-only";
+    public bool CanExport { get; set; }
+    public bool RightsConfirmed { get; set; }
+    public string Status { get; set; } = "draft";
+    public int ProgressPercent { get; set; }
+    public string? ExternalJobId { get; set; }
+    public string? GptWeightsPath { get; set; }
+    public string? SoVitsWeightsPath { get; set; }
+    public string? Error { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class VoiceTrainingSample
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid VoiceTrainingJobId { get; set; }
+    public string FileName { get; set; } = string.Empty;
+    public string ContentType { get; set; } = "audio/wav";
+    public byte[] AudioContent { get; set; } = [];
+    public string Transcript { get; set; } = string.Empty;
+    public double DurationSeconds { get; set; }
+    public int SortOrder { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
 }
 
 public sealed class SkillDefinition

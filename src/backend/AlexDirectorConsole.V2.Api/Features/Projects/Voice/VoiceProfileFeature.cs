@@ -501,8 +501,21 @@ internal static class VoiceWave
 
     public static double ReadDurationSeconds(byte[] bytes)
     {
-        var byteRate = BitConverter.ToInt32(bytes, 28);
-        var dataSize = BitConverter.ToInt32(bytes, 40);
+        Validate(bytes);
+        var byteRate = 0;
+        var dataSize = 0;
+        for (var offset = 12; offset + 8 <= bytes.Length;)
+        {
+            var chunkSize = BitConverter.ToInt32(bytes, offset + 4);
+            var contentOffset = offset + 8;
+            if (chunkSize < 0 || contentOffset + chunkSize > bytes.Length) break;
+            if (bytes.AsSpan(offset, 4).SequenceEqual("fmt "u8) && chunkSize >= 12)
+                byteRate = BitConverter.ToInt32(bytes, contentOffset + 8);
+            else if (bytes.AsSpan(offset, 4).SequenceEqual("data"u8))
+                dataSize = chunkSize;
+            if (byteRate > 0 && dataSize > 0) break;
+            offset = contentOffset + chunkSize + (chunkSize & 1);
+        }
         return byteRate > 0 ? (double)dataSize / byteRate : 0;
     }
 }

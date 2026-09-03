@@ -5,6 +5,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects;
 using AlexDirectorConsole.V2.Api.Features.Projects.Assets;
 using AlexDirectorConsole.V2.Api.Features.Projects.CreateProject;
 using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
+using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
 using AlexDirectorConsole.V2.Api.Tests.Infrastructure;
 using AlexDirectorConsole.V2.Database.Data;
@@ -133,6 +134,57 @@ public sealed class VisualAssetEndpointTests(V2ApiFactory factory)
         var material = Assert.Single(listed!);
         Assert.Equal(uploaded.AssetId, material.AssetId);
         Assert.Equal(wave, await client.GetByteArrayAsync(material.ContentUrl));
+    }
+
+    [Fact]
+    public async Task Trained_dialogue_is_listed_as_audio_material_and_streamed()
+    {
+        using var client = factory.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var wave = new byte[44];
+        "RIFF"u8.CopyTo(wave);
+        "WAVE"u8.CopyTo(wave.AsSpan(8));
+        BitConverter.GetBytes(24000).CopyTo(wave, 24);
+        BitConverter.GetBytes(48000).CopyTo(wave, 28);
+        BitConverter.GetBytes(0).CopyTo(wave, 40);
+        var asset = new Asset
+        {
+            ProjectId = projectId,
+            ResourceId = Guid.NewGuid(),
+            Version = 1,
+            Number = 1,
+            Type = StoryboardDialogueAudioService.AssetType,
+            Name = "S01-04 对白配音",
+            BlobContent = wave,
+            FileName = "dialogue.wav",
+            ContentType = "audio/wav",
+            SizeBytes = wave.Length,
+            GenerationMetadataJson = """{"character":"沈照璃","durationSeconds":0}""",
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<V2DbContext>();
+            dbContext.Assets.Add(asset);
+            dbContext.ResourceStates.Add(new ResourceState
+            {
+                ProjectId = projectId,
+                ResourceId = asset.ResourceId,
+                ResourceType = StoryboardDialogueAudioService.AssetType,
+                CurrentAssetId = asset.Id,
+                LifecycleStatus = "active",
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var listed = await client.GetFromJsonAsync<AudioMaterialView[]>(
+            $"/api/v2/projects/{projectId}/audio-assets");
+        var dialogue = Assert.Single(listed!);
+        Assert.Equal("trained-dialogue", dialogue.Kind);
+        Assert.Equal("训练后对白 · 沈照璃", dialogue.Source);
+        Assert.Equal(wave, await client.GetByteArrayAsync(dialogue.ContentUrl));
     }
 
     [Fact]

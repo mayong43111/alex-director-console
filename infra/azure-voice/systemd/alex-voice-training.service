@@ -1,0 +1,19 @@
+[Unit]
+Description=Alex GPT-SoVITS voice training worker
+After=network-online.target
+
+[Service]
+Type=simple
+User=azureuser
+WorkingDirectory=/opt/alex-data/alex-voice-worker
+Environment=GPT_SOVITS_ROOT=/opt/alex-data/GPT-SoVITS
+Environment=VOICE_TRAINING_DATA_ROOT=/opt/alex-data/voice-training
+Environment=VOICE_REFERENCE_ROOT=/opt/alex-data/reference-audio
+Environment=VOICE_REFERENCE_RUNTIME_ROOT=/opt/alex-data/reference-audio
+Environment=VOICE_TRAINING_RUNNER=/opt/alex-data/alex-voice-worker/run-training
+ExecStart=/opt/alex-data/envs/gpt-sovits/bin/uvicorn app:app --host 127.0.0.1 --port 50010
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Button, Modal, Popconfirm } from 'antd'
-import { AudioLines, ExternalLink, Pencil, Plus, Save, Trash2, Upload } from 'lucide-react'
+import { Button, Modal, Popconfirm, Tag } from 'antd'
+import { AudioLines, ExternalLink, GraduationCap, Pencil, Plus, Save, ShieldAlert, Trash2, Upload } from 'lucide-react'
 import {
   archiveVoicePackage,
   createVoicePackage,
@@ -9,6 +9,7 @@ import {
   type SaveVoicePackageInput,
   type VoicePackage,
 } from '../api/systemConfiguration'
+import { VoiceTrainingPanel } from './VoiceTrainingPanel'
 
 const cosyVoice3Model = 'FunAudioLLM/Fun-CosyVoice3-0.5B-2512'
 
@@ -49,6 +50,7 @@ function toEditor(voicePackage: VoicePackage): SaveVoicePackageInput {
 }
 
 export function VoicePackagesPage() {
+  const [activeView, setActiveView] = useState<'packages' | 'training'>('packages')
   const [packages, setPackages] = useState<VoicePackage[]>([])
   const [editing, setEditing] = useState<VoicePackage | null>(null)
   const [editor, setEditor] = useState<SaveVoicePackageInput>(emptyEditor)
@@ -146,13 +148,19 @@ export function VoicePackagesPage() {
       <header className="voice-packages-toolbar">
         <div>
           <span className="eyebrow">TTS VOICE LIBRARY</span>
-          <strong>{packages.length} 个可用语音包</strong>
+          <strong>{activeView === 'packages' ? `${packages.length} 个可用语音包` : '训练专属音色与说话习惯'}</strong>
         </div>
-        <Button type="primary" icon={<Plus size={15} />} onClick={openCreate}>添加语音包</Button>
+        {activeView === 'packages' && <Button type="primary" icon={<Plus size={15} />} onClick={openCreate}>添加语音包</Button>}
       </header>
 
-      {error && !dialogOpen && <div className="settings-error">{error}</div>}
-      <section className="voice-package-list" aria-busy={loading}>
+      <nav className="voice-library-switch" aria-label="语音资源模式">
+        <button type="button" className={activeView === 'packages' ? 'active' : ''} onClick={() => setActiveView('packages')}><AudioLines size={15} />语音包</button>
+        <button type="button" className={activeView === 'training' ? 'active' : ''} onClick={() => setActiveView('training')}><GraduationCap size={15} />音色训练</button>
+      </nav>
+
+      {activeView === 'training' ? <VoiceTrainingPanel /> : <>
+        {error && !dialogOpen && <div className="settings-error">{error}</div>}
+        <section className="voice-package-list" aria-busy={loading}>
         {loading ? (
           <div className="settings-empty">正在加载语音包</div>
         ) : packages.length === 0 ? (
@@ -167,6 +175,10 @@ export function VoicePackagesPage() {
               <strong>{voicePackage.name}</strong>
               <span>{voicePackage.engine === 'cosyvoice' ? 'CosyVoice' : 'GPT-SoVITS'} · {voicePackage.language} · {voicePackage.dialect} · {voicePackage.baseModelVersion}</span>
               <small>{voicePackage.speakingStyle || voicePackage.description}</small>
+              <div className="voice-package-policy">
+                {voicePackage.voiceTrainingJobId && <Tag color="processing">训练生成</Tag>}
+                {!voicePackage.canExport && <Tag color="warning" icon={<ShieldAlert size={11} />}>仅练习 · 禁止导出</Tag>}
+              </div>
             </div>
             <div className="voice-package-license">
               <span>v{voicePackage.version}</span>
@@ -184,7 +196,8 @@ export function VoicePackagesPage() {
             </div>
           </article>
         ))}
-      </section>
+        </section>
+      </>}
 
       <Modal
         open={dialogOpen}
