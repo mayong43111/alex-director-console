@@ -58,6 +58,20 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
     }
 
     [Fact]
+    public void Narration_timing_rejects_text_that_cannot_finish_before_the_tail_buffer()
+    {
+        var shot = new StoryboardShotDraft(
+            1, 1, 3, "全景", "平视", "固定", "人物居中", "晨光照进内室", "人物惊醒",
+            string.Empty, "环境声", [], [], Narration: "她回到了同一声通报和同一束晨光里。");
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            GenerateStoryboardCommandHandler.ValidateDialogueTiming([shot]));
+
+        Assert.Contains("旁白", error.Message);
+        Assert.Contains("无法完整容纳", error.Message);
+    }
+
+    [Fact]
     public void Dialogue_mapping_rejects_multiple_lines_in_one_shot()
     {
         var shot = new StoryboardShotDraft(
@@ -839,7 +853,7 @@ public sealed class StoryboardEndpointTests(V2ApiFactory factory)
         Assert.Equal(first.TargetSeconds, first.TotalDurationSeconds);
         Assert.All(first.Shots, shot => Assert.Equal(1, shot.Version));
         Assert.Equal([1, 2], first.Shots.Select(item => item.ShotNumber));
-        Assert.Equal([40d, 60d], first.Shots.Select(item => item.DurationSeconds));
+        Assert.Equal([39.6d, 60.4d], first.Shots.Select(item => item.DurationSeconds));
         Assert.Equal(["全景", "中景"], first.Shots.Select(item => item.ShotSize));
         Assert.Equal(["平视", "平视"], first.Shots.Select(item => item.CameraAngle));
         Assert.Equal(["固定", "缓慢推进"], first.Shots.Select(item => item.CameraMovement));

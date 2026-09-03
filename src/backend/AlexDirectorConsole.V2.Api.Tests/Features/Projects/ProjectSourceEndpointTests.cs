@@ -19,6 +19,91 @@ public sealed class ProjectSourceEndpointTests(V2ApiFactory factory)
     public Task DisposeAsync() => Task.CompletedTask;
 
     [Fact]
+    public void Production_script_rejects_narration_that_cannot_fit_any_shot()
+    {
+        var outline = new AdaptationEpisodeDraft(
+            1,
+            "死局重启",
+            "沈照璃发现死亡重置。",
+            10,
+            [1],
+            [new AdaptationSceneDraft(1, "内景", "重置", [], [], "揭示规则", "简短")]);
+        var script = new ProductionScriptEpisodeDraft(
+            outline.Title,
+            outline.Logline,
+            outline.TargetSeconds,
+            [new ProductionScriptSceneDraft(
+                1,
+                "内景 沈照璃内室 日",
+                "沈照璃醒来。",
+                "沈照璃猛然睁眼，意识到自己回到了死亡之前。",
+                [],
+                ["沈照璃"],
+                [],
+                "揭示死亡重置",
+                10,
+                "骤停后加快",
+                "死亡黑场对比晨光",
+                [
+                    new AdaptationShotPlanDraft(1, 5, "近景", "平视", "固定", "醒来", Narration: "她回到了同一声通报和同一束晨光里，死亡让时间重新开始。"),
+                    new AdaptationShotPlanDraft(2, 5, "特写", "平视", "微推", "确认重置")
+                ],
+                Narrations: ["她回到了同一声通报和同一束晨光里，死亡让时间重新开始。"] )],
+            [],
+            []);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ConfirmAdaptationScriptCommandHandler.NormalizeProductionScript(outline, script));
+
+        Assert.Contains("旁白", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("最低需要", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("超过 10 秒目标", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Production_script_rebalances_shots_to_fit_narration_within_episode_budget()
+    {
+        var outline = new AdaptationEpisodeDraft(
+            1,
+            "死局重启",
+            "沈照璃发现死亡重置。",
+            20,
+            [1],
+            [new AdaptationSceneDraft(1, "内景", "重置", [], [], "揭示规则", "简短")]);
+        var narration = "她回到了同一声通报和同一束晨光里，死亡让时间重新开始。";
+        var script = new ProductionScriptEpisodeDraft(
+            outline.Title,
+            outline.Logline,
+            outline.TargetSeconds,
+            [new ProductionScriptSceneDraft(
+                1,
+                "内景 沈照璃内室 日",
+                "沈照璃醒来。",
+                "沈照璃猛然睁眼，意识到自己回到了死亡之前。",
+                [],
+                ["沈照璃"],
+                [],
+                "揭示死亡重置",
+                20,
+                "骤停后加快",
+                "死亡黑场对比晨光",
+                [
+                    new AdaptationShotPlanDraft(1, 10, "近景", "平视", "固定", "醒来", Narration: narration),
+                    new AdaptationShotPlanDraft(2, 10, "特写", "平视", "微推", "确认重置")
+                ],
+                Narrations: [narration])],
+            [],
+            []);
+
+        var normalized = ConfirmAdaptationScriptCommandHandler.NormalizeProductionScript(outline, script);
+        var longestShot = normalized.Scenes[0].ShotPlan.Max(shot => shot.DurationSeconds);
+        var requiredSeconds = narration.Count(char.IsLetterOrDigit) / 2.5 + 1.0;
+
+        Assert.True(longestShot >= requiredSeconds);
+        Assert.Equal(20, normalized.Scenes[0].ShotPlan.Sum(shot => shot.DurationSeconds));
+    }
+
+    [Fact]
     public async Task New_project_has_no_sources_or_production_episodes()
     {
         using var client = factory.CreateClient();

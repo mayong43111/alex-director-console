@@ -501,8 +501,6 @@ public sealed class GenerateStoryboardCommandHandler(
             && string.IsNullOrWhiteSpace(item.LastFrameDescription)))
             throw new InvalidOperationException("首尾帧镜头必须包含明确的尾帧描述。");
 
-        ValidateDialogueMapping(proposed, scriptPackage);
-        ValidateNarrationMapping(proposed, scriptPackage);
         ValidateHooks(proposed, scriptPackage);
 
         if (scriptPackage.Episode.Scenes.Any(scene => scene.ShotPlan is not { Count: > 0 }))
@@ -521,7 +519,11 @@ public sealed class GenerateStoryboardCommandHandler(
             .Select(item =>
             {
                 var plan = plannedShots[(item.SceneNumber, item.ShotNumber)];
-                var dialogue = StoryboardDialogue.From(item.DialogueCharacter, item.Dialogue);
+                var planHasAudio = !string.IsNullOrWhiteSpace(plan.Dialogue)
+                    || !string.IsNullOrWhiteSpace(plan.Narration);
+                var dialogue = planHasAudio
+                    ? StoryboardDialogue.From(plan.DialogueCharacter, plan.Dialogue)
+                    : StoryboardDialogue.From(item.DialogueCharacter, item.Dialogue);
                 return item with
                 {
                     DurationSeconds = plan.DurationSeconds,
@@ -531,10 +533,12 @@ public sealed class GenerateStoryboardCommandHandler(
                     Props = NormalizePropNames(item.Props, visualAssets),
                     Dialogue = dialogue.Text,
                     DialogueCharacter = dialogue.Character,
-                    Narration = item.Narration.Trim()
+                    Narration = planHasAudio ? plan.Narration.Trim() : item.Narration.Trim()
                 };
             })
             .ToArray();
+        ValidateDialogueMapping(normalized, scriptPackage);
+        ValidateNarrationMapping(normalized, scriptPackage);
         ValidateDialogueTiming(normalized);
         return normalized;
     }
@@ -554,6 +558,18 @@ public sealed class GenerateStoryboardCommandHandler(
                 $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2} 角色“{dialogue.Character}”的对白有 {dialogue.SpokenCharacterCount} 个发音字符，"
                 + $"{shot.DurationSeconds:0.###} 秒镜头无法完整容纳；按 {StoryboardDialogue.MaximumCharactersPerSecond:0.#} 字/秒并保留 "
                 + $"{StoryboardDialogue.TailBufferSeconds:0.#} 秒句尾，至少需要 {required:0.0} 秒。请缩短正式剧本台词或调整 shotPlan 时长。" );
+        }
+
+        foreach (var shot in shots.Where(shot => !string.IsNullOrWhiteSpace(shot.Narration)))
+        {
+            var spokenCharacterCount = shot.Narration.Count(char.IsLetterOrDigit);
+            var required = Math.Ceiling(
+                (spokenCharacterCount / StoryboardDialogue.MaximumCharactersPerSecond
+                    + StoryboardDialogue.TailBufferSeconds) * 10) / 10;
+            if (shot.DurationSeconds + 0.001 >= required) continue;
+            throw new InvalidOperationException(
+                $"S{shot.SceneNumber:D2}-{shot.ShotNumber:D2} 的旁白有 {spokenCharacterCount} 个发音字符，"
+                + $"{shot.DurationSeconds:0.###} 秒镜头无法完整容纳；至少需要 {required:0.0} 秒。请缩短正式剧本旁白或调整 shotPlan 时长。");
         }
     }
 

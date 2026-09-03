@@ -27,7 +27,10 @@ public sealed record AdaptationShotPlanDraft(
     string ShotSize,
     string CameraAngle,
     string CameraMovement,
-    string Purpose);
+    string Purpose,
+    string DialogueCharacter = "",
+    string Dialogue = "",
+    string Narration = "");
 
 public sealed record AdaptationSceneDraft(
     int SceneNumber,
@@ -1269,7 +1272,10 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 ShotSize = shot.ShotSize.Trim(),
                 CameraAngle = shot.CameraAngle.Trim(),
                 CameraMovement = shot.CameraMovement.Trim(),
-                Purpose = shot.Purpose.Trim()
+                Purpose = shot.Purpose.Trim(),
+                DialogueCharacter = shot.DialogueCharacter?.Trim() ?? string.Empty,
+                Dialogue = shot.Dialogue?.Trim() ?? string.Empty,
+                Narration = shot.Narration?.Trim() ?? string.Empty
             }).ToArray();
             var normalizedDialogues = (scene.Dialogues ?? [])
                 .Where(dialogue => !string.IsNullOrWhiteSpace(dialogue.Character))
@@ -1314,6 +1320,11 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
                 ShotPlan = normalizedShots
             };
         }).ToArray();
+        ValidateShotAudioMapping(normalizedScenes, outline.ProposalNumber);
+        normalizedScenes = RebalanceShotDurationsForSpokenCapacity(
+            normalizedScenes,
+            outline.TargetSeconds,
+            outline.ProposalNumber);
         ValidateDialogueShotCapacity(normalizedScenes, outline.ProposalNumber);
         return script with
         {
@@ -1326,6 +1337,117 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
         };
     }
 
+    private static void ValidateShotAudioMapping(
+        IReadOnlyList<ProductionScriptSceneDraft> scenes,
+        int episodeNumber)
+    {
+        var failures = new List<string>();
+        foreach (var scene in scenes)
+        {
+            var expected = scene.Dialogues
+                .SelectMany(dialogue => dialogue.Lines.Select(line =>
+                    $"dialogue\0{dialogue.Character}\0{line}"))
+                .Concat((scene.Narrations ?? []).Select(line => $"narration\0\0{line}"))
+                .ToList();
+            foreach (var shot in scene.ShotPlan)
+            {
+                var hasDialogue = !string.IsNullOrWhiteSpace(shot.Dialogue);
+                var hasNarration = !string.IsNullOrWhiteSpace(shot.Narration);
+                if (hasDialogue && hasNarration)
+                {
+                    failures.Add($"第 {scene.SceneNumber} 场第 {shot.ShotNumber} 镜不能同时承载对白和旁白");
+                    continue;
+                }
+                if (!hasDialogue && !hasNarration) continue;
+                if (hasDialogue && string.IsNullOrWhiteSpace(shot.DialogueCharacter))
+                {
+                    failures.Add($"第 {scene.SceneNumber} 场第 {shot.ShotNumber} 镜的对白缺少 dialogueCharacter");
+                    continue;
+                }
+
+                var actual = hasDialogue
+                    ? $"dialogue\0{shot.DialogueCharacter}\0{shot.Dialogue}"
+                    : $"narration\0\0{shot.Narration}";
+                if (!expected.Remove(actual))
+                    failures.Add($"第 {scene.SceneNumber} 场第 {shot.ShotNumber} 镜包含不属于正式剧本的有声文本");
+            }
+
+            if (expected.Count > 0)
+                failures.Add($"第 {scene.SceneNumber} 场还有 {expected.Count} 句对白或旁白未映射到 shotPlan");
+        }
+
+        if (failures.Count > 0)
+            throw new InvalidOperationException(
+                $"第 {episodeNumber} 集镜头音频映射未通过：{string.Join("；", failures)}。请为每句对白和每段旁白填写唯一镜头的 dialogueCharacter/dialogue/narration。");
+    }
+
+    private static ProductionScriptSceneDraft[] RebalanceShotDurationsForSpokenCapacity(
+        IReadOnlyList<ProductionScriptSceneDraft> scenes,
+        int targetSeconds,
+        int episodeNumber)
+    {
+        const int minimumShotUnits = 5;
+        var minimumUnits = scenes
+            .Select(scene => Enumerable.Repeat(minimumShotUnits, scene.ShotPlan.Count).ToArray())
+            .ToArray();
+        for (var sceneIndex = 0; sceneIndex < scenes.Count; sceneIndex++)
+        {
+            var scene = scenes[sceneIndex];
+            for (var shotIndex = 0; shotIndex < scene.ShotPlan.Count; shotIndex++)
+            {
+                var shot = scene.ShotPlan[shotIndex];
+                var spokenText = !string.IsNullOrWhiteSpace(shot.Narration)
+                    ? shot.Narration
+                    : shot.Dialogue;
+                if (string.IsNullOrWhiteSpace(spokenText)) continue;
+                minimumUnits[sceneIndex][shotIndex] = Math.Max(
+                    minimumShotUnits,
+                    (int)Math.Ceiling(
+                        (spokenText.Count(char.IsLetterOrDigit) / 2.5 + 1.0) * 10));
+            }
+        }
+
+        var targetUnits = targetSeconds * 10;
+        var minimumTotal = minimumUnits.Sum(scene => scene.Sum());
+        if (minimumTotal > targetUnits)
+            throw new InvalidOperationException(
+                $"第 {episodeNumber} 集对白与旁白最低需要 {minimumTotal / 10d:0.0} 秒，超过 {targetSeconds} 秒目标；请缩短有声文本或减少镜头。");
+
+        var entries = scenes.SelectMany((scene, sceneIndex) =>
+            scene.ShotPlan.Select((shot, shotIndex) => new
+            {
+                SceneIndex = sceneIndex,
+                ShotIndex = shotIndex,
+                Weight = Math.Max(shot.DurationSeconds, 0.1)
+            })).ToArray();
+        var remainingUnits = targetUnits - minimumTotal;
+        var totalWeight = entries.Sum(entry => entry.Weight);
+        var shares = entries.Select(entry => remainingUnits * entry.Weight / totalWeight).ToArray();
+        var extraUnits = shares.Select(share => (int)Math.Floor(share)).ToArray();
+        var undistributed = remainingUnits - extraUnits.Sum();
+        foreach (var index in shares
+            .Select((share, index) => new { index, fraction = share - Math.Floor(share) })
+            .OrderByDescending(item => item.fraction)
+            .ThenBy(item => item.index)
+            .Take(undistributed)
+            .Select(item => item.index))
+        {
+            extraUnits[index]++;
+        }
+
+        var entryIndex = 0;
+        return scenes.Select((scene, sceneIndex) => scene with
+        {
+            ShotPlan = scene.ShotPlan.Select((shot, shotIndex) => shot with
+            {
+                DurationSeconds = (minimumUnits[sceneIndex][shotIndex] + extraUnits[entryIndex++]) / 10d
+            }).ToArray()
+        }).Select(scene => scene with
+        {
+            TargetSeconds = Math.Round(scene.ShotPlan.Sum(shot => shot.DurationSeconds), 1)
+        }).ToArray();
+    }
+
     private static void ValidateDialogueShotCapacity(
         IReadOnlyList<ProductionScriptSceneDraft> scenes,
         int episodeNumber)
@@ -1333,16 +1455,26 @@ public sealed class ConfirmAdaptationScriptCommandHandler(
         var failures = new List<string>();
         foreach (var scene in scenes)
         {
-            var spokenLineCount = scene.Dialogues.Sum(dialogue => dialogue.Lines.Count)
-                + (scene.Narrations?.Count ?? 0);
-            if (scene.ShotPlan!.Count < spokenLineCount)
+            foreach (var shot in scene.ShotPlan)
+            {
+                var spokenText = !string.IsNullOrWhiteSpace(shot.Narration)
+                    ? shot.Narration
+                    : shot.Dialogue;
+                if (string.IsNullOrWhiteSpace(spokenText)) continue;
+                var requiredSeconds = Math.Ceiling(
+                    (spokenText.Count(char.IsLetterOrDigit) / 2.5 + 1.0) * 10) / 10;
+                if (shot.DurationSeconds + 0.001 >= requiredSeconds) continue;
+                var label = !string.IsNullOrWhiteSpace(shot.Narration)
+                    ? $"旁白“{shot.Narration}”"
+                    : $"角色“{shot.DialogueCharacter}”的对白“{shot.Dialogue}”";
                 failures.Add(
-                    $"第 {scene.SceneNumber} 场有 {spokenLineCount} 句对白或旁白，但只有 {scene.ShotPlan.Count} 个镜头；每句有声文本必须有独立镜头");
+                    $"第 {scene.SceneNumber} 场第 {shot.ShotNumber} 镜{label}至少需要 {requiredSeconds:0.0} 秒，但镜头只有 {shot.DurationSeconds:0.###} 秒");
+            }
         }
 
         if (failures.Count > 0)
             throw new InvalidOperationException(
-                $"第 {episodeNumber} 集对白未通过：{string.Join("；", failures)}。请一次修正全部场次。");
+                $"第 {episodeNumber} 集有声文本未通过：{string.Join("；", failures)}。请缩短文本或调整 shotPlan 时长，并一次修正全部场次。");
     }
 
     private static double[] NormalizeShotDurations(

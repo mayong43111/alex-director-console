@@ -496,14 +496,18 @@ public sealed class V2ApiFactory : WebApplicationFactory<Program>
                                 "全景",
                                 "平视",
                                 "固定",
-                                "建立巴黎街道与人物位置"),
+                                "建立巴黎街道与人物位置",
+                                "达达尼昂",
+                                "巴黎，我来了。"),
                             new AdaptationShotPlanDraft(
                                 2,
                                 outline.TargetSeconds * .6,
                                 "中景",
                                 "平视",
                                 "缓慢推进",
-                                "呈现人物行动与对白")
+                                "呈现人物行动与对白",
+                                "达达尼昂",
+                                "特雷维尔先生一定会见我。")
                             ])],
                     outline.SmallHooks ?? [],
                     outline.BigHooks ?? []));
