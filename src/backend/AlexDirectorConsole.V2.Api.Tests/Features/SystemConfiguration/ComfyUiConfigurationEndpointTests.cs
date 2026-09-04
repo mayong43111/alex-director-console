@@ -23,7 +23,7 @@ public sealed class ComfyUiConfigurationEndpointTests(V2ApiFactory factory)
         Assert.NotNull(configuration);
         Assert.Equal("local-http", configuration.ConnectionMode);
         Assert.Equal("http://127.0.0.1:8188", configuration.BaseUrl);
-        Assert.Equal("minimax-h3-fl2va-turbo-4step", configuration.WorkflowProfile);
+        Assert.Equal("minimax-h3-fl2va-native", configuration.WorkflowProfile);
         Assert.Equal("krea-2-text-to-image", configuration.TextToImageWorkflow);
         Assert.Equal("qwen-image-edit-2511", configuration.ImageEditWorkflow);
         Assert.Equal(1, configuration.MaxConcurrentJobs);

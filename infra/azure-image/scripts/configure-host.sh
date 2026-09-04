@@ -39,9 +39,12 @@ fi
 if [[ -d "$BUNDLE_ROOT/app/workflows" ]]; then
   replace_directory "$BUNDLE_ROOT/app/workflows" /opt/alex/app/workflows
 fi
+if [[ -d "$BUNDLE_ROOT/comfyui-custom-nodes/alex_audio_upload" ]]; then
+  replace_directory "$BUNDLE_ROOT/comfyui-custom-nodes/alex_audio_upload" /opt/comfyui/custom_nodes/alex_audio_upload
+fi
 
 chmod 0755 /opt/alex/app/api/AlexDirectorConsole.V2.Api
-chown -R alex:alex /opt/alex/app /opt/alex/config /opt/alex/tls /opt/alex-data /opt/comfyui/extra_model_paths.yaml
+chown -R alex:alex /opt/alex/app /opt/alex/config /opt/alex/tls /opt/alex-data /opt/comfyui/extra_model_paths.yaml /opt/comfyui/custom_nodes/alex_audio_upload
 chmod 0750 /etc/alex
 systemctl daemon-reload
 systemctl restart docker consul nomad

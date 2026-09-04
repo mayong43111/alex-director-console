@@ -21,7 +21,8 @@ public sealed record ComfyUiConfigurationView(
 {
     public const string ProviderName = "ComfyUI";
     public const string RequiredConnectionMode = "local-http";
-    public const string MinimaxVideoWorkflow = "minimax-h3-fl2va-turbo-4step";
+    public const string MinimaxVideoWorkflow = "minimax-h3-fl2va-native";
+    public const string MinimaxReferenceVideoWorkflow = "minimax-h3-ref2va-native";
     public const string Ltx23VideoWorkflow = "ltx-2.3-av-i2v";
     public const string RequiredWorkflowProfile = MinimaxVideoWorkflow;
     public const string RequiredTextToImageWorkflow = "krea-2-text-to-image";
@@ -66,11 +67,12 @@ public sealed record ComfyUiConfigurationView(
     public static string NormalizeVideoWorkflow(string? workflow) => workflow switch
     {
         Ltx23VideoWorkflow => Ltx23VideoWorkflow,
+        MinimaxReferenceVideoWorkflow => MinimaxReferenceVideoWorkflow,
         _ => MinimaxVideoWorkflow
     };
 
     public static bool IsSupportedVideoWorkflow(string? workflow) =>
-        workflow is MinimaxVideoWorkflow or Ltx23VideoWorkflow;
+        workflow is MinimaxVideoWorkflow or MinimaxReferenceVideoWorkflow or Ltx23VideoWorkflow;
 
     public static string VideoModel(string? workflow) =>
         NormalizeVideoWorkflow(workflow) == Ltx23VideoWorkflow ? "LTX 2.3" : "MiniMax H3";
@@ -206,8 +208,7 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         "SamplerCustomAdvanced",
         "VAEDecode",
         "CreateVideo",
-        "SaveVideo",
-        "LoraLoaderModelOnly"
+        "SaveVideo"
     ];
     private static readonly string[] QwenRequiredNodes =
     [
@@ -234,6 +235,11 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         "MiniMaxH3ImageToVideo",
         "VAEDecodeAudio",
         "MiniMaxH3SigmaShift"
+    ];
+    private static readonly string[] MinimaxReferenceVideoRequiredNodes =
+    [
+        "MiniMaxH3ReferenceToVideo",
+        "VAEDecodeAudio"
     ];
     private static readonly string[] Ltx23VideoRequiredNodes =
     [
@@ -272,8 +278,14 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
         "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
         "minimax_h3_video_vae_fp16.safetensors",
-        "minimax_h3_audio_vae_fp32.safetensors",
-        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+        "minimax_h3_audio_vae_fp32.safetensors"
+    ];
+    private static readonly string[] MinimaxReferenceVideoRequiredModels =
+    [
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "minimax_h3_video_vae_fp16.safetensors",
+        "minimax_h3_audio_vae_fp32.safetensors"
     ];
     private static readonly string[] Ltx23VideoRequiredModels =
     [
@@ -295,7 +307,9 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
                 : QwenRequiredNodes)
             .Concat(videoWorkflow == ComfyUiConfigurationView.Ltx23VideoWorkflow
                 ? Ltx23VideoRequiredNodes
-                : MinimaxVideoRequiredNodes)
+                : videoWorkflow == ComfyUiConfigurationView.MinimaxReferenceVideoWorkflow
+                    ? MinimaxReferenceVideoRequiredNodes
+                    : MinimaxVideoRequiredNodes)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         var requiredModels = CommonRequiredModels
@@ -304,7 +318,9 @@ public sealed class ComfyUiConnectionTester(IHttpClientFactory httpClientFactory
                 : QwenRequiredModels)
             .Concat(videoWorkflow == ComfyUiConfigurationView.Ltx23VideoWorkflow
                 ? Ltx23VideoRequiredModels
-                : MinimaxVideoRequiredModels)
+                : videoWorkflow == ComfyUiConfigurationView.MinimaxReferenceVideoWorkflow
+                    ? MinimaxReferenceVideoRequiredModels
+                    : MinimaxVideoRequiredModels)
             .ToArray();
         var client = httpClientFactory.CreateClient("ComfyUi");
         var root = new Uri(baseUrl.TrimEnd('/') + "/");

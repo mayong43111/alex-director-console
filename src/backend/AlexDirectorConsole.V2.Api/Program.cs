@@ -13,6 +13,7 @@ using AlexDirectorConsole.V2.Api.Features.Projects.Sources;
 using AlexDirectorConsole.V2.Api.Features.Projects.Storyboard;
 using AlexDirectorConsole.V2.Api.Features.Projects.Versions;
 using AlexDirectorConsole.V2.Api.Features.Projects.Voice;
+using AlexDirectorConsole.V2.Api.Features.Projects.DigitalPresenters;
 using AlexDirectorConsole.V2.Api.Features.Sessions;
 using AlexDirectorConsole.V2.Api.Features.Skills;
 using AlexDirectorConsole.V2.Api.Features.SystemConfiguration.ComfyUi;
@@ -26,6 +27,7 @@ using Hangfire;
 using Hangfire.InMemory;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using AlexDirectorConsole.V2.Database.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("V2Database")
@@ -285,6 +287,21 @@ await using (var scope = app.Services.CreateAsyncScope())
     {
         await dbContext.Database.MigrateAsync();
     }
+    const string digitalPresenterProjectId = "00000000-0000-0000-0000-000000000001";
+    if (!await dbContext.Projects.AnyAsync(item => item.Id == Guid.Parse(digitalPresenterProjectId)))
+    {
+        var now = app.Services.GetRequiredService<TimeProvider>().GetUtcNow();
+        dbContext.Projects.Add(new Project
+        {
+            Id = Guid.Parse(digitalPresenterProjectId),
+            Type = "digital-presenter",
+            Name = "数字人工作室",
+            Description = "数字人资产与剧集工作区",
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now
+        });
+        await dbContext.SaveChangesAsync();
+    }
     var voicePackageSynchronizer = scope.ServiceProvider.GetRequiredService<IDefaultVoicePackageSynchronizer>();
     await voicePackageSynchronizer.SynchronizeAsync();
     var skillSynchronizer = scope.ServiceProvider.GetRequiredService<ISkillCatalogSynchronizer>();
@@ -305,6 +322,7 @@ app.MapStoryMaterialAnalysis();
 app.MapAdaptationScripts();
 app.MapVisualAssets();
 app.MapAudioMaterials();
+app.MapDigitalPresenters();
 app.MapStoryboards();
 app.MapStoryboardMedia();
 app.MapStoryboardDialogueAudio();

@@ -3,6 +3,7 @@ using System;
 using AlexDirectorConsole.V2.Database.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AlexDirectorConsole.V2.Database.Data.Migrations
 {
     [DbContext(typeof(V2DbContext))]
-    partial class V2DbContextModelSnapshot : ModelSnapshot
+    [Migration("20260904082519_AddDigitalPresenters")]
+    partial class AddDigitalPresenters
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -592,7 +595,7 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<Guid?>("OutfitImageAssetId")
                         .HasColumnType("TEXT");
 
-                    b.Property<Guid?>("ProjectId")
+                    b.Property<Guid>("ProjectId")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
@@ -642,7 +645,7 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<Guid>("PresenterId")
                         .HasColumnType("TEXT");
 
-                    b.Property<Guid?>("ProjectId")
+                    b.Property<Guid>("ProjectId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
@@ -663,6 +666,8 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.HasIndex("BackgroundImageAssetId");
 
                     b.HasIndex("OutfitImageAssetId");
+
+                    b.HasIndex("ProjectId");
 
                     b.HasIndex("PresenterId", "EpisodeNumber")
                         .IsUnique();
@@ -703,12 +708,7 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<Guid?>("FirstFrameAssetId")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ImagePrompt")
-                        .IsRequired()
-                        .HasMaxLength(12000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid?>("ProjectId")
+                    b.Property<Guid>("ProjectId")
                         .HasColumnType("TEXT");
 
                     b.Property<int>("SortOrder")
@@ -725,14 +725,11 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<Guid?>("VideoAssetId")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("VideoPrompt")
-                        .IsRequired()
-                        .HasMaxLength(12000)
-                        .HasColumnType("TEXT");
-
                     b.HasKey("Id");
 
                     b.HasIndex("FirstFrameAssetId");
+
+                    b.HasIndex("ProjectId");
 
                     b.HasIndex("VideoAssetId");
 
@@ -1160,11 +1157,6 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Type")
-                        .IsRequired()
-                        .HasMaxLength(40)
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
@@ -2111,6 +2103,12 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasForeignKey("OutfitImageAssetId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("AlexDirectorConsole.V2.Database.Models.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
                     b.HasOne("AlexDirectorConsole.V2.Database.Models.Asset", null)
                         .WithMany()
                         .HasForeignKey("VoiceAssetId")
@@ -2135,6 +2133,12 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .HasForeignKey("PresenterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.HasOne("AlexDirectorConsole.V2.Database.Models.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("AlexDirectorConsole.V2.Database.Models.DigitalPresenterShot", b =>
@@ -2149,6 +2153,12 @@ namespace AlexDirectorConsole.V2.Database.Data.Migrations
                         .WithMany()
                         .HasForeignKey("FirstFrameAssetId")
                         .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("AlexDirectorConsole.V2.Database.Models.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
 
                     b.HasOne("AlexDirectorConsole.V2.Database.Models.Asset", null)
                         .WithMany()

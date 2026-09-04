@@ -4,6 +4,7 @@ namespace AlexDirectorConsole.V2.Api.Features.Projects;
 
 public sealed record ProjectView(
     Guid Id,
+    string Type,
     string Name,
     string? Description,
     Guid? CurrentCreativeSettingsId,
@@ -12,6 +13,7 @@ public sealed record ProjectView(
 {
     public static ProjectView FromProject(Project project) => new(
         project.Id,
+        project.Type,
         project.Name,
         project.Description,
         project.CurrentCreativeSettingsId,

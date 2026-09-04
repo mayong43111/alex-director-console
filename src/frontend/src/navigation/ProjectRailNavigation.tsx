@@ -6,14 +6,17 @@ import { projectNavigation } from "./projectNavigation";
 type ProjectRailNavigationProps = {
   activeKey: string;
   projectBase?: string;
+  projectType?: string;
   productionEpisodeId?: string;
 };
 
 export function ProjectRailNavigation({
   activeKey,
   projectBase,
+  projectType,
   productionEpisodeId,
 }: ProjectRailNavigationProps) {
+  const digitalPresenterProject = "00000000-0000-0000-0000-000000000001";
   return (
     <>
       <nav className="director-rail-nav">
@@ -22,23 +25,29 @@ export function ProjectRailNavigation({
             "production-e01",
             productionEpisodeId ?? "production-e01",
           );
-          const target = to === null
+          const target = key === "digital-presenters"
+            ? `/projects/${digitalPresenterProject}/digital-presenters`
+            : to === null
             ? "/"
             : projectBase && resolvedPath
               ? `${projectBase}/${resolvedPath}`
               : null;
+          const disabledForProjectType = projectType === "digital-presenter"
+            && key !== "project-center"
+            && key !== "digital-presenters";
+          const enabledTarget = disabledForProjectType ? null : target;
           const isActive = activeKey === key;
 
           return (
             <Tooltip
-              title={target ? label : `${label}（请先选择项目）`}
+              title={enabledTarget ? label : `${label}（当前项目不可用）`}
               placement="right"
               key={key}
             >
-              {target ? (
+              {enabledTarget ? (
                 <Link
                   className={`director-rail-link ${isActive ? "active" : ""}`}
-                  to={target}
+                  to={enabledTarget}
                   aria-label={label}
                   aria-current={isActive ? "page" : undefined}
                 >
@@ -48,7 +57,7 @@ export function ProjectRailNavigation({
               ) : (
                 <div
                   className="director-rail-link disabled"
-                  aria-label={`${label}，请先选择项目`}
+                  aria-label={`${label}，当前项目不可用`}
                   aria-disabled="true"
                 >
                   <Icon size={19} strokeWidth={1.8} />

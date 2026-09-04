@@ -63,7 +63,8 @@ public sealed record ComfyUiVideoSubmission(
     int Width,
     int Height,
     int FrameCount,
-    int Fps);
+    int Fps,
+    byte[]? ReferenceAudio = null);
 
 public sealed record ComfyUiVideoOutput(
     string FileName,
@@ -100,6 +101,8 @@ public sealed class PackagedComfyUiWorkflowProvider : IComfyUiWorkflowProvider
             "workflows",
             normalized == ComfyUiConfigurationView.Ltx23VideoWorkflow
                 ? "ltx-2.3-av-i2v-api.json"
+                : normalized == ComfyUiConfigurationView.MinimaxReferenceVideoWorkflow
+                    ? "minimax-h3-ref2va-api.json"
                 : "minimax-h3-fl2va-api.json");
         if (!File.Exists(path))
         {
@@ -124,6 +127,11 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
             submission.FirstFrame,
             $"{prefix}-first.png",
             cancellationToken);
+        string? referenceAudio = null;
+        if (submission.ReferenceAudio is not null)
+        {
+            referenceAudio = await UploadAudioAsync(client, root, submission.ReferenceAudio, $"{prefix}-reference.wav", cancellationToken);
+        }
         string? lastFrame = null;
         if (submission.LastFrame is not null)
         {
@@ -141,13 +149,15 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
         ReplaceTokens(workflow, new Dictionary<string, JsonNode?>
         {
             ["{{FIRST_FRAME}}"] = firstFrame,
+            ["{{REFERENCE_IMAGE}}"] = firstFrame,
             ["{{LAST_FRAME}}"] = lastFrame,
             ["{{PROMPT}}"] = submission.Prompt,
             ["{{WIDTH}}"] = submission.Width,
             ["{{HEIGHT}}"] = submission.Height,
             ["{{FRAME_COUNT}}"] = submission.FrameCount,
             ["{{FPS}}"] = submission.Fps,
-            ["{{OUTPUT_PREFIX}}"] = prefix
+            ["{{OUTPUT_PREFIX}}"] = prefix,
+            ["{{REFERENCE_AUDIO}}"] = referenceAudio
         });
         if (lastFrame is null && hasLastFrameInput)
         {
@@ -165,9 +175,13 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
             if (inputs.ContainsKey("seed"))
                 inputs["seed"] = Random.Shared.NextInt64(0, long.MaxValue);
         }
-        if (workflow.ToJsonString().Contains("{{", StringComparison.Ordinal))
+        var unresolvedTokens = Regex.Matches(workflow.ToJsonString(), @"\{\{[A-Z_]+\}\}")
+            .Select(match => match.Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (unresolvedTokens.Length > 0)
         {
-            throw new InvalidOperationException("ComfyUI workflow 仍含未解析占位符。");
+            throw new InvalidOperationException($"ComfyUI workflow 仍含未解析占位符：{string.Join(", ", unresolvedTokens)}。");
         }
 
         using var response = await client.PostAsJsonAsync(
@@ -239,6 +253,24 @@ public sealed class ComfyUiVideoClient(IHttpClientFactory httpClientFactory) : I
         {
             throw new InvalidOperationException($"上传关键帧失败：{body}");
         }
+        return body?["name"]?.GetValue<string>() ?? fileName;
+    }
+
+    private static async Task<string> UploadAudioAsync(
+        HttpClient client,
+        Uri root,
+        byte[] bytes,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        using var form = new MultipartFormDataContent();
+        using var content = new ByteArrayContent(bytes);
+        content.Headers.ContentType = new("audio/wav");
+        form.Add(content, "audio", fileName);
+        form.Add(new StringContent("true"), "overwrite");
+        using var response = await client.PostAsync(new Uri(root, "upload/audio"), form, cancellationToken);
+        var body = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"上传声音参考失败：{body}");
         return body?["name"]?.GetValue<string>() ?? fileName;
     }
 

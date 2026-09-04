@@ -3,6 +3,7 @@ namespace AlexDirectorConsole.V2.Database.Models;
 public sealed class Project
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public string Type { get; set; } = "production";
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public Guid? CurrentCreativeSettingsId { get; set; }
@@ -18,6 +19,53 @@ public sealed class ProductionEpisode
     public string Title { get; set; } = string.Empty;
     public double? TargetSeconds { get; set; }
     public string Status { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class DigitalPresenter
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? ProjectId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public Guid IdentityImageAssetId { get; set; }
+    public Guid? BackgroundImageAssetId { get; set; }
+    public Guid? OutfitImageAssetId { get; set; }
+    public Guid VoiceAssetId { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class DigitalPresenterEpisode
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? ProjectId { get; set; }
+    public Guid PresenterId { get; set; }
+    public int EpisodeNumber { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Dialogue { get; set; } = string.Empty;
+    public Guid? BackgroundImageAssetId { get; set; }
+    public Guid? OutfitImageAssetId { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class DigitalPresenterShot
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? ProjectId { get; set; }
+    public Guid EpisodeId { get; set; }
+    public int SortOrder { get; set; }
+    public string Dialogue { get; set; } = string.Empty;
+    public string ImagePrompt { get; set; } = string.Empty;
+    public string VideoPrompt { get; set; } = string.Empty;
+    public int EffectiveCharacterCount { get; set; }
+    public int DurationSeconds { get; set; }
+    public Guid? FirstFrameAssetId { get; set; }
+    public Guid? VideoAssetId { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? Error { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

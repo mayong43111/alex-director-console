@@ -212,6 +212,7 @@ export function ProjectCenterPage() {
   }
 
   const filteredProjects = projects.filter((project) => {
+    if (project.type === "digital-presenter") return false;
     const keyword = deferredSearch.trim().toLocaleLowerCase();
     return !keyword
       || project.name.toLocaleLowerCase().includes(keyword)
@@ -1415,7 +1416,7 @@ function ComfyUiConfigurationPanel() {
   const [configuration, setConfiguration] = useState<ComfyUiConfiguration | null>(null);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8188");
   const [imageEditWorkflow, setImageEditWorkflow] = useState<ComfyUiImageEditWorkflow>("qwen-image-edit-2511");
-  const [videoWorkflow, setVideoWorkflow] = useState<ComfyUiVideoWorkflow>("minimax-h3-fl2va-turbo-4step");
+  const [videoWorkflow, setVideoWorkflow] = useState<ComfyUiVideoWorkflow>("minimax-h3-fl2va-native");
   const [isEnabled, setIsEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"saving" | "testing" | null>(null);
@@ -1529,7 +1530,8 @@ function ComfyUiConfigurationPanel() {
               onChange={(event) => setVideoWorkflow(event.target.value as ComfyUiVideoWorkflow)}
               disabled={loading || Boolean(busy)}
             >
-              <option value="minimax-h3-fl2va-turbo-4step">MiniMax H3 Turbo</option>
+              <option value="minimax-h3-fl2va-native">MiniMax H3 原生无 LoRA</option>
+              <option value="minimax-h3-ref2va-native">MiniMax H3 Ref2VA 原生无 LoRA</option>
               <option value="ltx-2.3-av-i2v">LTX 2.3（原生音画）</option>
             </select>
           </label>

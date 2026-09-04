@@ -48,6 +48,35 @@ public sealed class ComfyUiImageRoutingTests
         Assert.Contains("最多支持 8 张参考图", error.Message);
     }
 
+        [Fact]
+        public async Task Video_client_uploads_reference_image_and_audio_to_matching_routes()
+        {
+                var handler = new RecordingVideoSubmissionHandler();
+                var client = new ComfyUiVideoClient(new RecordingHttpClientFactory(handler));
+                var workflow = """
+                        {
+                            "1": {
+                                "class_type": "ReferenceInput",
+                                "inputs": {
+                                    "image": "{{REFERENCE_IMAGE}}",
+                                    "audio": "{{REFERENCE_AUDIO}}"
+                                }
+                            }
+                        }
+                        """;
+
+                var promptId = await client.SubmitAsync(
+                        new("http://127.0.0.1:8188", workflow, [137, 80, 78, 71], null, "prompt", 768, 1344, 192, 24, [82, 73, 70, 70]),
+                        CancellationToken.None);
+
+                Assert.Equal("job-1", promptId);
+                Assert.Equal(["/upload/image", "/upload/audio", "/prompt"], handler.Requests.Select(item => item.Path));
+                Assert.Contains("name=image", handler.Requests[0].Body);
+                Assert.Contains("name=audio", handler.Requests[1].Body);
+                Assert.Contains("-first.png", handler.Requests[2].Body);
+                Assert.Contains("-reference.wav", handler.Requests[2].Body);
+        }
+
     [Fact]
     public async Task Flux_workflow_uses_requested_dimensions_and_kv_cache()
     {
@@ -235,6 +264,36 @@ public sealed class ComfyUiImageRoutingTests
     private sealed class RejectingSubmissionHttpClientFactory : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new(new RejectingSubmissionHandler());
+    }
+
+    private sealed class RecordingHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+    }
+
+    private sealed class RecordingVideoSubmissionHandler : HttpMessageHandler
+    {
+        public List<(string Path, string Body)> Requests { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri?.AbsolutePath ?? string.Empty;
+            var body = request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            Requests.Add((path, body));
+            var responseBody = path == "/prompt"
+                ? "{\"prompt_id\":\"job-1\"}"
+                : path == "/upload/image"
+                    ? "{\"name\":\"uploaded-first.png\"}"
+                    : "{\"name\":\"uploaded-reference.wav\"}";
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseBody, System.Text.Encoding.UTF8, "application/json")
+            };
+        }
     }
 
     private sealed class RejectingSubmissionHandler : HttpMessageHandler

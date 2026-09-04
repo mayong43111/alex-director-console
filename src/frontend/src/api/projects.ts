@@ -2,6 +2,7 @@ import { waitForGenerationResult, type GenerationTask } from './generationTasks'
 
 export interface ProjectRecord {
   id: string
+  type: string
   name: string
   description: string | null
   currentCreativeSettingsId: string | null

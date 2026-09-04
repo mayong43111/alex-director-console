@@ -72,6 +72,9 @@ function getWorkflow(
       tabs: [],
     };
   }
+  if (pathname.includes("/digital-presenters")) {
+    return { label: "数字播放人", tabs: [] };
+  }
   if (pathname.endsWith("/script") || pathname.includes("/script/")) {
     const [, view] = pathname
       .slice(`${projectBase}/script`.length)
@@ -134,12 +137,14 @@ export function AppShell() {
       return project.name;
     }
   });
+  const [projectType, setProjectType] = useState("production");
   useEffect(() => {
     const controller = new AbortController();
     getProject(projectId, controller.signal)
       .then((loadedProject) => {
         if (!loadedProject) return;
         setProjectName(loadedProject.name);
+        setProjectType(loadedProject.type);
         sessionStorage.setItem(
           `alex-director-v2.project.${loadedProject.id}`,
           JSON.stringify(loadedProject),
@@ -364,6 +369,7 @@ export function AppShell() {
           <ProjectRailNavigation
             activeKey={activeNavigationKey}
             projectBase={projectBase}
+            projectType={projectType}
             productionEpisodeId={routingEpisode}
           />
         )}

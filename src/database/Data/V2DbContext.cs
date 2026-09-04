@@ -7,6 +7,9 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
 {
     public DbSet<Project> Projects => Set<Project>();
     public DbSet<ProductionEpisode> ProductionEpisodes => Set<ProductionEpisode>();
+    public DbSet<DigitalPresenter> DigitalPresenters => Set<DigitalPresenter>();
+    public DbSet<DigitalPresenterEpisode> DigitalPresenterEpisodes => Set<DigitalPresenterEpisode>();
+    public DbSet<DigitalPresenterShot> DigitalPresenterShots => Set<DigitalPresenterShot>();
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<ResourceState> ResourceStates => Set<ResourceState>();
     public DbSet<AssetDependency> AssetDependencies => Set<AssetDependency>();
@@ -52,6 +55,7 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
         {
             entity.ToTable("Projects");
             entity.HasKey(item => item.Id);
+            entity.Property(item => item.Type).HasMaxLength(40).IsRequired();
             entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
             entity.Property(item => item.Description).HasMaxLength(4000);
             entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.CurrentCreativeSettingsId)
@@ -72,6 +76,52 @@ public sealed class V2DbContext(DbContextOptions<V2DbContext> options) : DbConte
             entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
             entity.HasOne<Project>().WithMany().HasForeignKey(item => item.ProjectId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<DigitalPresenter>(entity =>
+        {
+            entity.ToTable("DigitalPresenters");
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.ProjectId, item.Name });
+            entity.Property(item => item.Name).HasMaxLength(200).IsRequired();
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.IdentityImageAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.BackgroundImageAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.OutfitImageAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.VoiceAssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<DigitalPresenterEpisode>(entity =>
+        {
+            entity.ToTable("DigitalPresenterEpisodes", table =>
+                table.HasCheckConstraint("CK_DigitalPresenterEpisodes_EpisodeNumber", "EpisodeNumber > 0"));
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.PresenterId, item.EpisodeNumber }).IsUnique();
+            entity.Property(item => item.Title).HasMaxLength(200).IsRequired();
+            entity.Property(item => item.Dialogue).HasMaxLength(12000).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.HasOne<DigitalPresenter>().WithMany().HasForeignKey(item => item.PresenterId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.BackgroundImageAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.OutfitImageAssetId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<DigitalPresenterShot>(entity =>
+        {
+            entity.ToTable("DigitalPresenterShots", table =>
+            {
+                table.HasCheckConstraint("CK_DigitalPresenterShots_SortOrder", "SortOrder > 0");
+                table.HasCheckConstraint("CK_DigitalPresenterShots_EffectiveCharacterCount", "EffectiveCharacterCount > 0");
+                table.HasCheckConstraint("CK_DigitalPresenterShots_DurationSeconds", "DurationSeconds BETWEEN 4 AND 15");
+            });
+            entity.HasKey(item => item.Id);
+            entity.HasIndex(item => new { item.EpisodeId, item.SortOrder }).IsUnique();
+            entity.Property(item => item.Dialogue).HasMaxLength(2000).IsRequired();
+            entity.Property(item => item.ImagePrompt).HasMaxLength(12000).IsRequired();
+            entity.Property(item => item.VideoPrompt).HasMaxLength(12000).IsRequired();
+            entity.Property(item => item.Status).HasMaxLength(30).IsRequired();
+            entity.Property(item => item.Error).HasMaxLength(2000);
+            entity.HasOne<DigitalPresenterEpisode>().WithMany().HasForeignKey(item => item.EpisodeId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.FirstFrameAssetId).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Asset>().WithMany().HasForeignKey(item => item.VideoAssetId).OnDelete(DeleteBehavior.Restrict);
         });
     }
 

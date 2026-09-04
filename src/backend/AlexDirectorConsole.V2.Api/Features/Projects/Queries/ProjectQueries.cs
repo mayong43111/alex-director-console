@@ -37,6 +37,7 @@ public sealed class GetProjectQueryHandler(V2DbContext dbContext)
             .Where(project => project.Id == query.ProjectId)
             .Select(project => new ProjectView(
                 project.Id,
+                project.Type,
                 project.Name,
                 project.Description,
                 project.CurrentCreativeSettingsId,

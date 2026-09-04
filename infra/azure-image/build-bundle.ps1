@@ -38,6 +38,7 @@ Copy-Item $workflowPath $workflowOutput -Force
 Copy-Item (Join-Path $PSScriptRoot "config") $BundlePath -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot "nomad") $BundlePath -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot "scripts") $BundlePath -Recurse -Force
+Copy-Item (Join-Path $PSScriptRoot "comfyui-custom-nodes") $BundlePath -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot "cloud-init.yaml.tmpl") $BundlePath -Force
 
 Write-Output "Bundle created at $BundlePath"

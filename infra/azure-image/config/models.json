@@ -13,7 +13,7 @@
     },
     {
       "id": "minimax-h3",
-      "displayName": "MiniMax H3 FL2VA Turbo",
+      "displayName": "MiniMax H3 原生音视频",
       "runtime": "comfyui",
       "required": true,
       "repositoryEnvironment": "MINIMAX_H3_REPO",
@@ -23,7 +23,7 @@
         "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
         "vae/minimax_h3_video_vae_fp16.safetensors",
         "vae/minimax_h3_audio_vae_fp32.safetensors",
-        "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+        "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
       ]
     },
     {
@@ -78,7 +78,7 @@
     "VAEDecodeAudio",
     "CreateVideo",
     "SaveVideo",
-    "LoraLoaderModelOnly",
+    "MiniMaxH3ReferenceToVideo",
     "MiniMaxH3SigmaShift"
   ]
 }

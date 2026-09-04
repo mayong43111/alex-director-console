@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   SlidersHorizontal,
   Sparkles,
+  TvMinimalPlay,
   type LucideIcon,
 } from "lucide-react";
 
@@ -26,4 +27,5 @@ export const projectNavigation: ProjectNavigationItem[] = [
   { key: "storyboard", label: "分镜", icon: Clapperboard, to: "storyboard" },
   { key: "production", label: "生产", icon: Gauge, to: "production" },
   { key: "review", label: "审阅", icon: Sparkles, to: "review" },
+  { key: "digital-presenters", label: "数字人", icon: TvMinimalPlay, to: "digital-presenters" },
 ];

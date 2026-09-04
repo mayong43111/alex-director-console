@@ -37,7 +37,7 @@ export interface ComfyUiConfiguration {
 }
 
 export type ComfyUiImageEditWorkflow = 'qwen-image-edit-2511' | 'flux2-dev-image-edit-kv-cache'
-export type ComfyUiVideoWorkflow = 'minimax-h3-fl2va-turbo-4step' | 'ltx-2.3-av-i2v'
+export type ComfyUiVideoWorkflow = 'minimax-h3-fl2va-native' | 'minimax-h3-ref2va-native' | 'ltx-2.3-av-i2v'
 
 export interface ComfyUiCapabilities {
   isSuccess: boolean

@@ -4,6 +4,7 @@ import { ApplicationLayout } from './layouts'
 import { AgentsPage, DemoPage, ProjectCenterPage, ServicesPage, SkillsPage } from './pages/SupplementaryPages'
 import { SessionsPage } from './pages/SessionsPage'
 import { VoicePackagesPage } from './pages/VoicePackagesPage'
+import { DigitalPresenterEpisodePage, DigitalPresenterPreviewPage, DigitalPresenterProfilePage, DigitalPresentersPage } from './pages/DigitalPresentersPage'
 import {
   AssetsPage,
   ProductionPage,
@@ -65,6 +66,10 @@ export default function App() {
         <Route path="story/outline" element={<LegacyStoryRedirect />} />
         <Route path="story/chapters" element={<LegacyStoryRedirect />} />
         <Route path="assets/:assetType" element={<AssetsPage />} />
+        <Route path="digital-presenters" element={<DigitalPresentersPage />} />
+        <Route path="digital-presenters/:presenterId" element={<DigitalPresenterProfilePage />} />
+        <Route path="digital-presenters/:presenterId/episodes/:episodeId" element={<DigitalPresenterEpisodePage />} />
+        <Route path="digital-presenters/:presenterId/episodes/:episodeId/preview" element={<DigitalPresenterPreviewPage />} />
         <Route path="script/:sourceId/adaptation" element={<SourcePage />} />
         <Route path="script/:productionEpisodeId/production" element={<ScriptPage />} />
         <Route path="script/adaptation/:sourceEpisodeId?" element={<LegacyAdaptationRedirect />} />
